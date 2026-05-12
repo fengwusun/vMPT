@@ -498,18 +498,25 @@ _SHUTTER_CORNER_TEMPLATE = shutter_corners_v2v3(0.0, 0.0)  # (4, 2) in V2/V3
 
 
 def _compute_wcs_jacobian(wcs: WCS, fx: float, fy: float) -> np.ndarray:
-    """Return the inverse Jacobian mapping (Δlon_arcsec, Δlat_arcsec) →
-    (Δpix_x, Δpix_y) evaluated at pixel (fx, fy). Linear approximation; for
-    fields up to ~10 arcmin it agrees with SkyCoord/WCS to sub-pixel."""
+    """Return the inverse Jacobian mapping (Δeast_arcsec, Δnorth_arcsec) →
+    (Δpix_x, Δpix_y) evaluated at pixel (fx, fy).
+
+    NOTE: `c0.spherical_offsets_to(c1)` returns the proper tangent-plane
+    (east, north) offsets — i.e. the east offset is already cos(dec)-
+    corrected. Using `(c1.ra - c0.ra)` directly gives the RA *angular*
+    difference, which is 1/cos(dec) too large near the poles and produces
+    visibly-mis-placed overlays at Dec |~| 20° or more (this was the cause
+    of the r0600 "click opens wrong shutter" bug).
+    """
     c0 = wcs.pixel_to_world(fx, fy)
     c1 = wcs.pixel_to_world(fx + 1, fy)
     c2 = wcs.pixel_to_world(fx, fy + 1)
-    dlon_dx = (c1.ra - c0.ra).to(u.arcsec).value
-    dlat_dx = (c1.dec - c0.dec).to(u.arcsec).value
-    dlon_dy = (c2.ra - c0.ra).to(u.arcsec).value
-    dlat_dy = (c2.dec - c0.dec).to(u.arcsec).value
-    # Forward J: pixel offset → sky offset; invert to go sky → pixel
-    J = np.array([[dlon_dx, dlon_dy], [dlat_dx, dlat_dy]])
+    d_e_x, d_n_x = c0.spherical_offsets_to(c1)
+    d_e_y, d_n_y = c0.spherical_offsets_to(c2)
+    J = np.array([
+        [d_e_x.to(u.arcsec).value, d_e_y.to(u.arcsec).value],
+        [d_n_x.to(u.arcsec).value, d_n_y.to(u.arcsec).value],
+    ])
     return np.linalg.inv(J)
 
 
