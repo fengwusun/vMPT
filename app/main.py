@@ -118,6 +118,14 @@ dec_input = TextInput(title="Pointing Dec (deg)", value="")
 pa_slider = Slider(title="APA_V3 (deg)", start=0.0, end=360.0, step=0.1, value=0.0)
 pa_input = TextInput(title="APA_V3 (deg, exact)", value="0.0")
 
+# Visibility window query (jwst_gtvt)
+visibility_date_input = TextInput(
+    title="Visibility date (YYYY-MM-DD)", value="",
+    placeholder="leave blank for today",
+)
+visibility_btn = Button(label="Compute allowed APA_V3 (jwst_gtvt)", button_type="primary")
+visibility_div = Div(text="<small>Allowed APA_V3 windows appear here.</small>", width=320)
+
 disperser_select = Select(title="Disperser", options=DISPERSERS, value="PRISM")
 filter_select = Select(title="Filter", options=FILTER_OPTIONS, value="CLEAR")
 
@@ -431,11 +439,21 @@ def refresh_image_glyph() -> None:
     arr = _image_array_for_bokeh(img)
     H, W = arr.shape
     src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
-    # Reset axes
     fig.x_range.start = 0
     fig.x_range.end = W
     fig.y_range.start = 0
     fig.y_range.end = H
+    # Match figure aspect to image aspect so each FITS pixel is a square
+    # screen pixel (no horizontal/vertical stretching). match_aspect=True
+    # locks the data ratio through pan/zoom. Assumes square arcsec/pix in
+    # the WCS, which is the case for typical JWST/HST drizzled mosaics.
+    base = 900
+    if W >= H:
+        fig.width = base
+        fig.height = max(300, int(base * H / W))
+    else:
+        fig.height = base
+        fig.width = max(300, int(base * W / H))
 
 
 # ---------------------------------------------------------------------------
@@ -873,6 +891,82 @@ snap_box.on_change("active", on_snap)
 
 
 # ---------------------------------------------------------------------------
+# Visibility / APA_V3 constraints (jwst_gtvt)
+# ---------------------------------------------------------------------------
+
+
+def on_visibility():
+    fiducial = _pointing_skycoord()
+    if fiducial is None:
+        _set_status("Set RA/Dec before computing visibility.", "warn")
+        return
+    try:
+        from jwst_gtvt.jwst_tvt import Ephemeris
+    except ImportError:
+        _set_status("jwst_gtvt not installed (pip install jwst_gtvt).", "err")
+        return
+
+    try:
+        _set_status("Querying jwst_gtvt ephemeris… (one-time, ~5 s)", "info")
+        eph = Ephemeris()
+        df = eph.get_fixed_target_positions(
+            f"{fiducial.ra.deg:.6f}", f"{fiducial.dec.deg:.6f}"
+        )
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"jwst_gtvt query failed: {e}", "err")
+        traceback.print_exc()
+        return
+
+    obs = df[df["in_FOR"]].copy()
+    if len(obs) == 0:
+        visibility_div.text = (
+            "<small>Target never observable by JWST (likely too close to the Sun "
+            "across the ephemeris range).</small>"
+        )
+        return
+
+    # Find the requested-date row (or today)
+    date_str = visibility_date_input.value.strip()
+    if not date_str:
+        date_str = datetime.utcnow().strftime("%Y-%m-%d")
+    # Match by 'Calendar Date (TDB)' substring; gtvt format e.g. "A.D. 2026-Sep-18 00:00:00.0000"
+    yyyy, mm, dd = date_str.split("-")
+    month_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                  "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][int(mm) - 1]
+    needle = f"{yyyy}-{month_abbr}-{int(dd):02d}"
+    matches = obs[obs["Calendar Date (TDB)"].str.contains(needle, na=False)]
+
+    if len(matches) == 0:
+        visibility_div.text = (
+            f"<small><b>{date_str}: not observable.</b> "
+            f"Observable windows in ephemeris range: "
+            f"{len(obs)} days total.</small>"
+        )
+        return
+
+    row = matches.iloc[0]
+    nom = float(row["V3PA_nominal_angle"])
+    lo = float(row["V3PA_min_pa_angle"])
+    hi = float(row["V3PA_max_pa_angle"])
+    # Allowed range may wrap mod 360
+    visibility_div.text = (
+        f"<small><b>{date_str}: observable.</b><br>"
+        f"V3PA nominal = <b>{nom:.2f}°</b><br>"
+        f"V3PA allowed: <b>{lo:.2f}° – {hi:.2f}°</b><br>"
+        f"(window width {hi - lo:.1f}°)</small>"
+    )
+    # Snap slider into the allowed range and recolor band
+    pa_slider.value = nom
+    _set_status(
+        f"jwst_gtvt: {date_str} V3PA ∈ [{lo:.1f}, {hi:.1f}]°, nominal {nom:.1f}°.",
+        "ok",
+    )
+
+
+visibility_btn.on_click(on_visibility)
+
+
+# ---------------------------------------------------------------------------
 # Wiring
 # ---------------------------------------------------------------------------
 
@@ -915,6 +1009,7 @@ sidebar = column(
     Div(text="<h3>Pointing</h3>"),
     ra_input, dec_input,
     pa_slider, pa_input,
+    visibility_date_input, visibility_btn, visibility_div,
     Div(text="<h3>Instrument</h3>"),
     disperser_select, filter_select,
     Div(text="<h3>Display</h3>"),
