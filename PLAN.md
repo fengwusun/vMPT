@@ -76,7 +76,11 @@ This is the planner core. (Already in Bokeh; no migration needed.)
   - "Undo last action" and "Clear all".
 - Conflict detection (M4 stretch, can defer to M5): no two open shutters in the same `(q, d)` column unless they belong to the same contiguous slitlet (because they'd disperse onto the same detector rows).
 
-### M5 — Wavelength cutoffs (analytic model, no CRDS) (1 day)
+### M5 — Wavelength cutoffs (analytic model, no CRDS) (1 day) — **shipped with placeholder, needs replacement**
+
+**Known issue (flagged by reviewer 2026-05-12)**: `V2_DISP_EXTENT = 180″` in `app/wavelengths.py` is a placeholder. The per-shutter wavelength shift reaches ±4 μm for PRISM and ±2 μm for G395M across the full MSA — far above the ±0.05 μm accuracy target. Tooltip wavelengths are correct at the fiducial only. Replace with per-grating `dλ/dV2` constants sourced from JDox before trusting the tooltip for non-fiducial shutters.
+
+
 
 Per the user (2026-05-11): skip `jwst.assign_wcs`. Use an analytic per-grating dispersion model keyed off the shutter's V2/V3 (already in hand from `nirspec_msa_v2v3.npz`).
 

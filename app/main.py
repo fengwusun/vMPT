@@ -38,7 +38,14 @@ from bokeh.models import (
 from bokeh.plotting import figure
 
 from app.catalog import Catalog, catalog_in_view, load_catalog
-from app.coords import MSA_V2_REF, MSA_V3_REF, rot_matrix, shutter_corners_v2v3, v2v3_to_radec
+from app.coords import (
+    MSA_V2_REF,
+    MSA_V3_REF,
+    V3_IDL_Y_ANGLE,
+    rot_matrix,
+    shutter_corners_v2v3,
+    v2v3_to_radec,
+)
 from app.empt_io import (
     OpenShutter,
     Pointing,
@@ -674,7 +681,7 @@ def on_open_shutter_tap(attr, old, new):
                 other = state["open_shutters"][k]
                 if (other.target_id == sh.target_id
                         and other.q == q and other.d == d
-                        and abs(other.s - s) <= state["slitlet_height"] // 2 + 1):
+                        and abs(other.s - s) <= state["slitlet_height"] // 2):
                     del state["open_shutters"][k]
         _set_status(f"Removed shutter ({q},{s},{d}) and slitlet siblings.", "ok")
     refresh_overlays()
@@ -749,7 +756,8 @@ def on_export():
             })
 
     pa_v3 = state["pa_v3"]
-    pa_ap = (pa_v3 + 138.5) % 360.0  # eMPT reference shows ~138.5° offset
+    # PA_V3 - PA_AP = -V3IdlYAngle (mod 360); for NRS_FULL_MSA V3IdlYAngle ~ 138.5746°.
+    pa_ap = (pa_v3 + V3_IDL_Y_ANGLE) % 360.0
     pointing = Pointing(
         ra_deg=float(ra_input.value),
         dec_deg=float(dec_input.value),

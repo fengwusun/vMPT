@@ -10,6 +10,9 @@ _msa_ap = _siaf["NRS_FULL_MSA"]
 
 MSA_V2_REF: float = float(_msa_ap.V2Ref)
 MSA_V3_REF: float = float(_msa_ap.V3Ref)
+# V3IdlYAngle for NRS_FULL_MSA: rotation between V3 and the aperture's Ideal-Y.
+# Used to convert PA_V3 <-> PA_AP for the eMPT pointing_summary export.
+V3_IDL_Y_ANGLE: float = float(_msa_ap.V3IdlYAngle)
 
 
 def rot_matrix(rotation: float = 30.0) -> np.ndarray:
