@@ -21,15 +21,18 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
+from bokeh.events import DoubleTap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.models import (
     Button,
     CheckboxGroup,
     ColumnDataSource,
+    CustomJSTickFormatter,
     Div,
     FileInput,
     HoverTool,
+    PointDrawTool,
     Select,
     Slider,
     TapTool,
@@ -42,6 +45,7 @@ from app.coords import (
     MSA_V2_REF,
     MSA_V3_REF,
     V3_IDL_Y_ANGLE,
+    fixed_slit_corners_v2v3,
     rot_matrix,
     shutter_corners_v2v3,
     v2v3_to_radec,
@@ -76,6 +80,7 @@ state: dict = {
     "catalog": None,
     "tmp_sidecar_path": None,
     "open_shutters": {},  # (q,s,d) -> OpenShutter
+    "highlighted": set(), # set of (q,s,d) tuples — visual flag, not exported
     "history": [],        # stack of prior open_shutters snapshots (capped)
     "pa_v3": 0.0,
     "ra_deg": 0.0,
@@ -149,12 +154,18 @@ export_btn = Button(label="Export eMPT bundle", button_type="success")
 src_image = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
 src_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[]))
 src_bg_shutters = ColumnDataSource(
-    data=dict(xs=[], ys=[], q=[], s=[], d=[], reason=[])
+    data=dict(xs=[], ys=[], q=[], s=[], d=[])
+)
+src_stuck_open = ColumnDataSource(
+    data=dict(xs=[], ys=[], q=[], s=[], d=[])
 )
 src_open_shutters = ColumnDataSource(
     data=dict(xs=[], ys=[], q=[], s=[], d=[], target=[], lam_blue=[], lam_red=[])
 )
+src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
+src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
 src_targets = ColumnDataSource(data=dict(x=[], y=[], id=[], ra=[], dec=[], pr=[]))
+src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
 fig = figure(
     width=900, height=900,
@@ -162,40 +173,75 @@ fig = figure(
     match_aspect=True,
     output_backend="webgl",
     title="NIRSpec MSA planner",
-    x_axis_label="pix x", y_axis_label="pix y",
+    x_axis_label="RA (deg)", y_axis_label="Dec (deg)",
 )
 fig.toolbar.active_scroll = fig.tools[1]  # wheel zoom enabled by default
 
 img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=src_image)
 
-msa_outline_glyph = fig.multi_polygons(
-    xs="xs", ys="ys", source=src_msa_outline,
-    line_color="dodgerblue", line_width=1.5, fill_alpha=0.0,
-)
+# Bottom-to-top render order: image, operable shutters, stuck-open shutters,
+# open shutters (user picks), highlighted shutters, MSA outline, fixed slits,
+# targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
     line_color="white", line_alpha=0.35, line_width=0.5,
     fill_color="white", fill_alpha=0.05,
+)
+stuck_open_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_stuck_open,
+    line_color="#ff2222", line_alpha=0.9, line_width=1.0,
+    fill_color="#ff2222", fill_alpha=0.10,
 )
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
     line_color="#ff3333", line_width=1.5,
     fill_color="#ff8888", fill_alpha=0.35,
 )
+highlighted_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_highlighted,
+    line_color="cyan", line_width=2.0, fill_alpha=0.0,
+)
+msa_outline_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_msa_outline,
+    line_color="dodgerblue", line_width=1.5, fill_alpha=0.0,
+)
+fixed_slits_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_fixed_slits,
+    line_color="gold", line_width=2.0, fill_color="gold", fill_alpha=0.18,
+)
 target_glyph = fig.scatter(
     x="x", y="y", source=src_targets,
     size=10, marker="circle", line_color="yellow", fill_alpha=0.0, line_width=1.5,
 )
+pointing_handle_glyph = fig.scatter(
+    x="x", y="y", source=src_pointing_handle,
+    size=18, marker="cross", line_color="lime", fill_color="lime",
+    line_width=3, fill_alpha=0.6,
+)
+# Drag tool for the pointing handle (only this renderer is draggable)
+point_draw_tool = PointDrawTool(renderers=[pointing_handle_glyph], add=False, drag=True)
+fig.add_tools(point_draw_tool)
+# Make handle-drag the default drag interaction. Pan is still available via
+# the pan icon in the toolbar.
+fig.toolbar.active_drag = point_draw_tool
 
 fig.add_tools(HoverTool(
     renderers=[bg_shutters_glyph],
-    tooltips=[("Q,s,d", "@q,@s,@d"), ("op", "@reason")],
+    tooltips=[("Q,s,d", "@q,@s,@d"), ("state", "operable")],
+))
+fig.add_tools(HoverTool(
+    renderers=[stuck_open_glyph],
+    tooltips=[("Q,s,d", "@q,@s,@d"), ("state", "STUCK OPEN")],
 ))
 fig.add_tools(HoverTool(
     renderers=[open_shutters_glyph],
     tooltips=[("Q,s,d", "@q,@s,@d"),
               ("target", "@target"),
               ("λ blue/red", "@lam_blue{0.00} / @lam_red{0.00} μm")],
+))
+fig.add_tools(HoverTool(
+    renderers=[fixed_slits_glyph],
+    tooltips=[("slit", "@name")],
 ))
 fig.add_tools(HoverTool(
     renderers=[target_glyph],
@@ -248,15 +294,15 @@ def _pointing_skycoord() -> SkyCoord | None:
 
 def _shutter_polygons_in_view(
     fiducial: SkyCoord, pa_v3: float, wcs: WCS,
-    apply_operability: bool,
     view_bbox_pix: tuple[float, float, float, float],
 ) -> dict:
-    """Compute shutter polygons in image-pixel coords.
+    """Compute shutter polygons in image-pixel coords for shutters in view.
 
-    Returns dict keyed by (q, s, d) -> {'xs': [...], 'ys': [...], 'reason': int}.
-    Culls to shutters whose centers fall inside view_bbox_pix plus a 5″ margin.
+    Returns dict keyed by (q, s, d) -> {'xs', 'ys', 'reason'}. Always drops
+    failed-closed shutters (reason==1) — they're shown as "not present".
+    Failed-open (reason==2) shutters are kept so callers can color them red.
+    Operable shutters (reason==0) are kept too.
     """
-    # Convert *all* shutter centers to pixel once; cheap (250k coords).
     all_v2 = V2_MSA.reshape(-1)
     all_v3 = V3_MSA.reshape(-1)
     centers_v2v3 = np.stack([all_v2, all_v3], axis=1)
@@ -271,19 +317,15 @@ def _shutter_polygons_in_view(
         & (py >= ymin - margin)
         & (py <= ymax + margin)
     )
-    idx = np.where(in_view)[0]
-
-    if apply_operability:
-        flat_operable = OPERABLE.reshape(-1)
-        idx = idx[flat_operable[idx]]
-
+    flat_reason = REASON.reshape(-1)
+    # Always exclude failed-closed (reason == 1)
+    keep = in_view & (flat_reason != 1)
+    idx = np.where(keep)[0]
     if idx.size == 0:
         return {}
 
-    # Build (M, 4, 2) corner array in V2/V3 for selected shutters
     sel_v2 = all_v2[idx]
     sel_v3 = all_v3[idx]
-    # Stack: for each shutter, 4 corners
     M = idx.size
     corners_v2v3 = np.empty((M * 4, 2), dtype=np.float64)
     for k, (v2c, v3c) in enumerate(zip(sel_v2, sel_v3)):
@@ -293,8 +335,6 @@ def _shutter_polygons_in_view(
     cx = cx.reshape(M, 4)
     cy = cy.reshape(M, 4)
 
-    flat_reason = REASON.reshape(-1)
-    # Recover (q, s, d) from flat index in (4, 171, 365)
     qs = idx // (171 * 365)
     rem = idx % (171 * 365)
     ss = rem // 365
@@ -308,6 +348,18 @@ def _shutter_polygons_in_view(
             "reason": int(flat_reason[idx[k]]),
         }
     return out
+
+
+def _fixed_slit_polygons(fiducial: SkyCoord, pa_v3: float, wcs: WCS) -> dict:
+    """Per-slit polygons in image-pixel coords for the 5 NIRSpec fixed slits."""
+    xs_all, ys_all, names = [], [], []
+    for name, corners_v2v3 in fixed_slit_corners_v2v3().items():
+        sky = v2v3_to_radec(fiducial, pa_v3, corners_v2v3)
+        x, y = _world_to_pixel(sky, wcs)
+        xs_all.append([[x.tolist()]])
+        ys_all.append([[y.tolist()]])
+        names.append(name.replace("NRS_", "").replace("_SLIT", ""))
+    return dict(xs=xs_all, ys=ys_all, name=names)
 
 
 def _msa_outline_polygons(fiducial: SkyCoord, pa_v3: float, wcs: WCS) -> dict:
@@ -327,17 +379,41 @@ def _msa_outline_polygons(fiducial: SkyCoord, pa_v3: float, wcs: WCS) -> dict:
     return dict(xs=xs_all, ys=ys_all)
 
 
-def _shutter_polys_to_cds(polys: dict) -> dict:
-    """Convert shutter polygons dict to MultiPolygons CDS data."""
-    xs, ys, qs, ss, ds, reasons = [], [], [], [], [], []
+def _shutter_polys_to_cds(polys: dict, only_reason: int | None = None) -> dict:
+    """Convert shutter polygons dict to MultiPolygons CDS data.
+
+    If `only_reason` is set, include only shutters whose reason matches.
+    Returned dict matches the CDS schema (no `reason` column — that's the filter).
+    """
+    xs, ys, qs, ss, ds = [], [], [], [], []
     for (q, s, d), p in polys.items():
+        if only_reason is not None and p["reason"] != only_reason:
+            continue
         xs.append([[p["xs"]]])
         ys.append([[p["ys"]]])
         qs.append(q)
         ss.append(s)
         ds.append(d)
-        reasons.append(p["reason"])
-    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds, reason=reasons)
+    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds)
+
+
+def _highlighted_polygons() -> dict:
+    """Polygons for shutters in state['highlighted'], at current pointing."""
+    img = state["image"]
+    fiducial = _pointing_skycoord()
+    if img is None or fiducial is None or not state["highlighted"]:
+        return dict(xs=[], ys=[], q=[], s=[], d=[])
+    xs, ys, qs, ss, ds = [], [], [], [], []
+    for (q, s, d) in state["highlighted"]:
+        v2c = V2_MSA[q - 1, s - 1, d - 1]
+        v3c = V3_MSA[q - 1, s - 1, d - 1]
+        corners_v2v3 = shutter_corners_v2v3(v2c, v3c)
+        sky = v2v3_to_radec(fiducial, pa_v3=state["pa_v3"], corners_v2v3=corners_v2v3)
+        cx, cy = _world_to_pixel(sky, img.wcs)
+        xs.append([[cx.tolist()]])
+        ys.append([[cy.tolist()]])
+        qs.append(q); ss.append(s); ds.append(d)
+    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds)
 
 
 def _open_shutters_cds_data() -> dict:
@@ -392,18 +468,30 @@ def refresh_overlays() -> None:
     else:
         src_msa_outline.data = dict(xs=[], ys=[])
 
-    # Background shutters (operable filter optional)
+    # Shutters: split operable from stuck-open; failed-closed never shown.
     show_shutters = 1 in layers_box.active
-    apply_op = 2 in layers_box.active
+    view_bbox = (0, W, 0, H)
+    polys = _shutter_polygons_in_view(fiducial, pa_v3, wcs, view_bbox)
     if show_shutters:
-        view_bbox = (0, W, 0, H)
-        polys = _shutter_polygons_in_view(fiducial, pa_v3, wcs, apply_op, view_bbox)
-        src_bg_shutters.data = _shutter_polys_to_cds(polys)
+        src_bg_shutters.data = _shutter_polys_to_cds(polys, only_reason=0)
     else:
-        src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[], reason=[])
+        src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
+    # Stuck-open shutters always shown (red), regardless of the toggle
+    src_stuck_open.data = _shutter_polys_to_cds(polys, only_reason=2)
 
     # Open shutters (always shown)
     src_open_shutters.data = _open_shutters_cds_data()
+    # Highlighted shutters
+    src_highlighted.data = _highlighted_polygons()
+    # Fixed slits always visible
+    src_fixed_slits.data = _fixed_slit_polygons(fiducial, pa_v3, wcs)
+    # Pointing handle at the image-pixel of (RA, Dec)
+    fid_x, fid_y = _world_to_pixel(fiducial, wcs)
+    state["_mute_drag_cb"] = True
+    try:
+        src_pointing_handle.data = dict(x=[float(fid_x)], y=[float(fid_y)])
+    finally:
+        state["_mute_drag_cb"] = False
 
     # Targets
     show_targets = 3 in layers_box.active
@@ -454,6 +542,42 @@ def refresh_image_glyph() -> None:
     else:
         fig.height = base
         fig.width = max(300, int(base * W / H))
+    # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
+    # WCS. Linear approximation around the image center — accurate at the
+    # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
+    try:
+        H_half, W_half = H / 2.0, W / 2.0
+        center = img.wcs.pixel_to_world(W_half, H_half)
+        # Differentials in deg/pix at the center
+        dx_ra, dx_dec = img.wcs.pixel_to_world(W_half + 1, H_half).ra.deg - center.ra.deg, \
+                        img.wcs.pixel_to_world(W_half + 1, H_half).dec.deg - center.dec.deg
+        dy_ra, dy_dec = img.wcs.pixel_to_world(W_half, H_half + 1).ra.deg - center.ra.deg, \
+                        img.wcs.pixel_to_world(W_half, H_half + 1).dec.deg - center.dec.deg
+        # Wrap RA jumps near 0/360 into the linear differential
+        for _v in (dx_ra, dy_ra):
+            if abs(_v) > 180:
+                pass  # left as-is; small-field case won't hit this
+        fig.xaxis.formatter = CustomJSTickFormatter(
+            args=dict(ra0=center.ra.deg, dec0=center.dec.deg,
+                      cx=W_half, cy=H_half,
+                      dxra=dx_ra, dxdec=dx_dec, dyra=dy_ra, dydec=dy_dec),
+            code="""
+                // Linear approximation: tick x is on the central row.
+                var ra = ra0 + (tick - cx) * dxra;
+                return ra.toFixed(4);
+            """,
+        )
+        fig.yaxis.formatter = CustomJSTickFormatter(
+            args=dict(ra0=center.ra.deg, dec0=center.dec.deg,
+                      cx=W_half, cy=H_half,
+                      dxra=dx_ra, dxdec=dx_dec, dyra=dy_ra, dydec=dy_dec),
+            code="""
+                var dec = dec0 + (tick - cy) * dydec;
+                return dec.toFixed(4);
+            """,
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -888,6 +1012,71 @@ undo_btn.on_click(on_undo)
 clear_btn.on_click(on_clear)
 export_btn.on_click(on_export)
 snap_box.on_change("active", on_snap)
+
+
+# ---------------------------------------------------------------------------
+# Drag-pointing handle and double-tap highlight
+# ---------------------------------------------------------------------------
+
+
+def on_pointing_handle_drag(attr, old, new):
+    """Fires when the user drags the lime cross via PointDrawTool.
+
+    Detect "real" user drags by comparing the new pixel position to what the
+    current RA/Dec would imply; only act if the displacement is meaningful
+    (≥1 pixel). This avoids feedback when refresh_overlays repositions the
+    handle programmatically.
+    """
+    img = state["image"]
+    if img is None:
+        return
+    xs, ys = new.get("x", []), new.get("y", [])
+    if not xs or not ys:
+        return
+    fiducial = _pointing_skycoord()
+    if fiducial is not None:
+        try:
+            ex, ey = _world_to_pixel(fiducial, img.wcs)
+            if abs(float(xs[0]) - float(ex)) < 1.0 and abs(float(ys[0]) - float(ey)) < 1.0:
+                return  # programmatic update from refresh_overlays — ignore
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        sky = img.wcs.pixel_to_world(float(xs[0]), float(ys[0]))
+        ra_input.value = f"{sky.ra.deg:.6f}"
+        dec_input.value = f"{sky.dec.deg:.6f}"
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"Drag-pointing update failed: {e}", "err")
+
+
+src_pointing_handle.on_change("data", on_pointing_handle_drag)
+
+
+def on_double_tap(event):
+    """Double-click anywhere → toggle highlight on the nearest shutter."""
+    img = state["image"]
+    fiducial = _pointing_skycoord()
+    if img is None or fiducial is None:
+        return
+    try:
+        sky = img.wcs.pixel_to_world(float(event.x), float(event.y))
+    except Exception:  # noqa: BLE001
+        return
+    v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
+    nearest = _nearest_shutter(v2, v3, require_operable=False)
+    if nearest is None:
+        return
+    key = nearest
+    if key in state["highlighted"]:
+        state["highlighted"].remove(key)
+        _set_status(f"Un-highlighted shutter {key}.", "ok")
+    else:
+        state["highlighted"].add(key)
+        _set_status(f"Highlighted shutter {key} (cyan).", "ok")
+    refresh_overlays()
+
+
+fig.on_event(DoubleTap, on_double_tap)
 
 
 # ---------------------------------------------------------------------------

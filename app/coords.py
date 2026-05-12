@@ -36,3 +36,24 @@ def v2v3_to_radec(coord_c: SkyCoord, pa_v3: float, corners_v2v3: np.ndarray) -> 
     return coord_c.spherical_offsets_by(
         offsets.T[0] * u.arcsec, offsets.T[1] * u.arcsec
     )
+
+
+# NIRSpec fixed-slit apertures (always rendered on the canvas).
+FIXED_SLIT_NAMES: tuple[str, ...] = (
+    "NRS_S200A1_SLIT",
+    "NRS_S200A2_SLIT",
+    "NRS_S400A1_SLIT",
+    "NRS_S1600A1_SLIT",
+    "NRS_S200B1_SLIT",
+)
+
+
+def fixed_slit_corners_v2v3() -> dict[str, np.ndarray]:
+    """Return {slit_name: (N, 2) corners in V2/V3 arcsec} for the five fixed slits."""
+    out: dict[str, np.ndarray] = {}
+    for name in FIXED_SLIT_NAMES:
+        ap = _siaf[name]
+        pts = np.array(ap.closed_polygon_points(to_frame="tel"))
+        # pysiaf returns (2, N) arrays of (v2, v3); transpose to (N, 2).
+        out[name] = pts.T if pts.shape[0] == 2 else pts
+    return out
