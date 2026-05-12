@@ -26,6 +26,30 @@ FILTER_BLUE_CUTOFF: dict[str, float] = {
 # Projected MSA-to-detector dispersion span along V2 (arcsec). Placeholder per PLAN.md.
 V2_DISP_EXTENT: float = 180.0
 
+# Per-arcsec wavelength dispersion, calibrated so PRISM/CLEAR's ~4.7 μm range
+# spans the full V2_DISP_EXTENT. Filters with narrower wavelength coverage
+# (e.g. G140M/F070LP at 0.57 μm) get a *proportionally narrower* V2 overlap
+# zone. This is a deliberate approximation for the spectral-conflict visual
+# — see PLAN.md M5 for the placeholder notes.
+LAMBDA_PER_ARCSEC: float = (5.30 - 0.60) / V2_DISP_EXTENT  # ~0.026 μm/arcsec
+
+
+def v2_overlap_distance(disperser: str, filt: str) -> float:
+    """Half-width V2 distance (arcsec) over which two shutters at the same
+    s-row have overlapping wavelength coverage with the given grating/filter.
+
+    For PRISM/CLEAR this is the full V2_DISP_EXTENT (~180″) — almost every
+    same-row shutter conflicts. For narrow-filter combos (e.g.
+    G140M/F070LP, ~0.57 μm) it shrinks to ~22″ — only nearby shutters share
+    any wavelength.
+    """
+    disperser = disperser.upper()
+    filt = filt.upper()
+    if disperser not in GRATING_RANGES or filt not in GRATING_RANGES[disperser]:
+        return V2_DISP_EXTENT
+    lam_min, lam_max = GRATING_RANGES[disperser][filt]
+    return (lam_max - lam_min) / LAMBDA_PER_ARCSEC
+
 # Gap parameters (relative to fiducial wavelength span).
 GAP_CENTER_REL: float = 0.50
 GAP_WIDTH_REL: float = 0.10

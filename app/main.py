@@ -34,7 +34,6 @@ from bokeh.models import (
     HoverTool,
     Select,
     Slider,
-    TapTool,
     TextInput,
     WheelZoomTool,
 )
@@ -60,7 +59,12 @@ from app.empt_io import (
 from app.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
 from app.msa import load_msa_grid, load_operability
 from app.session_io import Session, export_session_json, import_session_json
-from app.wavelengths import FILTER_BLUE_CUTOFF, GRATING_RANGES, cutoffs
+from app.wavelengths import (
+    FILTER_BLUE_CUTOFF,
+    GRATING_RANGES,
+    cutoffs,
+    v2_overlap_distance,
+)
 
 # ---------------------------------------------------------------------------
 # Singletons
@@ -326,7 +330,11 @@ src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
 fig = figure(
     width=900, height=900,
-    tools="pan,box_zoom,reset,save,tap",
+    # No "tap" tool: it auto-selects clicked glyphs, which causes Bokeh's
+    # default nonselection-rendering to fade every *other* open shutter to
+    # 20% alpha — making them look "pale" after a click. We still receive
+    # mouse clicks via fig.on_event(Tap, on_tap) without a TapTool present.
+    tools="pan,box_zoom,reset,save",
     match_aspect=True,
     output_backend="webgl",
     title="vMPT — visual MSA Planning Tool",
@@ -813,28 +821,29 @@ def refresh_overlays() -> None:
     else:
         src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
 
-    # Spectral-overlap: operable shutters whose (q, s) matches any open shutter,
-    # excluding the open shutters themselves. Computed via mask arithmetic on
-    # the 250k centers — no Python loop over the full set.
+    # Spectral-overlap: operable shutters at the same s-row (same quadrant)
+    # AND within the V2 distance over which their wavelength coverage overlaps
+    # the open shutter's coverage. For PRISM/CLEAR this is essentially the
+    # full s-row; for narrow filters (e.g. G140M/F070LP, 0.57 μm) it's only
+    # ~20″ — only neighbouring shutters share any wavelength range.
     open_keys = state["open_shutters"].keys()
     if open_keys:
-        # Build a boolean mask of "shutters in any (q, s) row of an open one"
+        v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365)
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
-        # Pack (q, s) → unique id = q * 200 + s; comparable via np.isin
-        target_qs = np.array([k[0] - 1 for k in open_keys])
-        target_ss = np.array([k[1] - 1 for k in open_keys])
-        target_ids = target_qs * 200 + target_ss
-        all_ids = q_arr * 200 + s_arr
-        same_row = np.isin(all_ids, target_ids)
-        # Open shutter indices
+        is_overlap = np.zeros(_V2_OFFSETS_ALL.size, dtype=bool)
+        for q_o, s_o, d_o in open_keys:
+            v2_o = float(_V2_OFFSETS_ALL[(q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)] + MSA_V2_REF)
+            same_row = (q_arr == q_o - 1) & (s_arr == s_o - 1)
+            near_v2 = np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o) < v2_overlap
+            is_overlap |= same_row & near_v2
+        # Don't mark the open shutters themselves as overlap.
         open_flat = np.array(
             [(k[0]-1) * 171 * 365 + (k[1]-1) * 365 + (k[2]-1) for k in open_keys],
             dtype=np.int64,
         )
-        is_open = np.zeros(_V2_OFFSETS_ALL.size, dtype=bool)
-        is_open[open_flat] = True
-        overlap_idx = np.where(in_view & (_FLAT_REASON == 0) & same_row & ~is_open)[0]
+        is_overlap[open_flat] = False
+        overlap_idx = np.where(in_view & (_FLAT_REASON == 0) & is_overlap)[0]
     else:
         overlap_idx = np.empty(0, dtype=np.int64)
     src_spec_overlap.data = _project_indices_to_cds(overlap_idx, pa_v3, fid_pix, jinv)
@@ -1364,14 +1373,16 @@ def on_tap(event):
             _open_or_toggle_slitlet_at(q, s, d, target_id=tgt_id)
             return
 
-    # 2) Otherwise: snap to nearest shutter and toggle it manually.
+    # 2) Otherwise: snap to nearest operable shutter and toggle it manually.
+    # Non-operable shutters (stuck-open / failed-closed) must never be opened.
     try:
         sky = img.wcs.pixel_to_world(x_data, y_data)
         v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
-        nearest = _nearest_shutter(v2, v3, require_operable=False)
+        nearest = _nearest_shutter(v2, v3, require_operable=True)
     except Exception:  # noqa: BLE001
         return
     if nearest is None:
+        _set_status("No operable shutter near that click.", "warn")
         return
     q, s, d = nearest
     _open_or_toggle_slitlet_at(q, s, d, target_id=None)
