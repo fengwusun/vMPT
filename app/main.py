@@ -704,6 +704,35 @@ def _open_shutters_cds_data(pa_v3: float, fid_pix: tuple[float, float],
 # ---------------------------------------------------------------------------
 
 
+def refresh_overlays_light() -> None:
+    """Cheap, real-time overlay update.
+
+    Renders only the layers that are O(1) in polygon count: the 4 MSA
+    quadrant outlines, the 5 fixed slits, and the pointing handle. Skips
+    the per-shutter layers (operable, stuck-open, spectral-overlap, open,
+    highlighted) and the target catalog. Intended for slider drags so the
+    UI stays responsive; pair with refresh_overlays() on commit.
+    """
+    img: LoadedImage | None = state["image"]
+    if img is None:
+        return
+    fiducial = _pointing_skycoord()
+    if fiducial is None:
+        return
+    pa_v3 = state["pa_v3"]
+    wcs = img.wcs
+    fid_x, fid_y = _world_to_pixel(fiducial, wcs)
+    fid_pix = (float(fid_x), float(fid_y))
+    jinv = _compute_wcs_jacobian(wcs, fid_pix[0], fid_pix[1])
+
+    # MSA outline (toggle still respected)
+    if 0 in layers_box.active:
+        src_msa_outline.data = _msa_outline_polygons(pa_v3, fid_pix, jinv)
+    # Fixed slits always visible
+    src_fixed_slits.data = _fixed_slit_polygons(pa_v3, fid_pix, jinv)
+    src_pointing_handle.data = dict(x=[fid_pix[0]], y=[fid_pix[1]])
+
+
 def refresh_overlays() -> None:
     img: LoadedImage | None = state["image"]
     if img is None:
@@ -1104,9 +1133,20 @@ def _sync_pa_widgets(v3pa: float, source: str | None = None) -> None:
 
 
 def on_v3pa_slider(attr, old, new):
+    """Fires continuously during slider drag. Light refresh only — just the
+    4 MSA quadrant outlines and the pointing handle follow the value
+    in real time. The full shutter overlay is recomputed on slider
+    release via on_v3pa_slider_done(value_throttled)."""
     if state.get("_syncing_pa"):
         return
     _sync_pa_widgets(float(v3pa_slider.value), source="slider")
+    refresh_overlays_light()
+
+
+def on_v3pa_slider_done(attr, old, new):
+    """Fires once when slider drag ends. Full refresh."""
+    if state.get("_syncing_pa"):
+        return
     refresh_overlays()
 
 
@@ -1688,6 +1728,7 @@ catalog_mag_input.on_change("value", lambda a, o, n: refresh_overlays())
 ra_input.on_change("value", on_pointing)
 dec_input.on_change("value", on_pointing)
 v3pa_slider.on_change("value", on_v3pa_slider)
+v3pa_slider.on_change("value_throttled", on_v3pa_slider_done)
 v3pa_input.on_change("value", on_v3pa_text)
 apa_input.on_change("value", on_apa_text)
 layers_box.on_change("active", on_layers)
