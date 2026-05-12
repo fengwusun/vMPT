@@ -21,7 +21,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
-from bokeh.events import DoubleTap, Tap
+from bokeh.events import DoubleTap, RangesUpdate, Tap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.models import (
@@ -71,6 +71,21 @@ OPERABLE, REASON = load_operability()      # (4, 171, 365) bool / int8
 
 DISPERSERS = list(GRATING_RANGES.keys())   # PRISM, G140M, ...
 FILTER_OPTIONS = ["CLEAR", "F070LP", "F100LP", "F170LP", "F290LP"]
+# Canonical disperser/filter combinations available in NIRSpec MOS. The
+# combined dropdown drives the wavelength tooltip; values match
+# observation-mode names used by APT.
+DISPERSER_FILTER_COMBOS: list[tuple[str, str]] = [
+    ("PRISM",  "CLEAR"),
+    ("G140M",  "F070LP"),
+    ("G140M",  "F100LP"),
+    ("G235M",  "F170LP"),
+    ("G395M",  "F290LP"),
+    ("G140H",  "F070LP"),
+    ("G140H",  "F100LP"),
+    ("G235H",  "F170LP"),
+    ("G395H",  "F290LP"),
+]
+DISPERSER_FILTER_LABELS = [f"{d} / {f}" for d, f in DISPERSER_FILTER_COMBOS]
 
 # ---------------------------------------------------------------------------
 # Session state
@@ -237,14 +252,17 @@ def on_help_toggle():
 help_toggle_btn.on_click(on_help_toggle)
 help_panel = column(help_toggle_btn, help_div, width=340)
 
-disperser_select = Select(title="Disperser", options=DISPERSERS, value="PRISM")
-filter_select = Select(title="Filter", options=FILTER_OPTIONS, value="CLEAR")
+disperser_filter_select = Select(
+    title="Disperser / Filter",
+    options=DISPERSER_FILTER_LABELS,
+    value="PRISM / CLEAR",
+)
 
 layers_box = CheckboxGroup(
-    labels=["Show MSA outline", "Show operable shutters", "Apply operability", "Show targets"],
+    labels=["Show MSA outline", "Show operable shutters", "Show targets"],
     # Operable shutters OFF by default — drawing 180k+ polygons is slow.
     # User can toggle on once zoomed in to a region of interest.
-    active=[0, 2, 3],
+    active=[0, 2],
 )
 MAX_OPERABLE_RENDER = 8000  # hard cap to keep redraws fast even when enabled
 slitlet_select = Select(
@@ -831,7 +849,7 @@ def refresh_overlays() -> None:
     src_pointing_handle.data = dict(x=[fid_pix[0]], y=[fid_pix[1]])
 
     # Targets
-    show_targets = 3 in layers_box.active
+    show_targets = 2 in layers_box.active
     cat: Catalog | None = state["catalog"]
     if show_targets and cat is not None:
         coords = SkyCoord(cat.ra_deg, cat.dec_deg, unit=u.deg, frame="icrs")
@@ -1183,13 +1201,14 @@ def on_layers(attr, old, new):
     refresh_overlays()
 
 
-def on_disperser(attr, old, new):
-    state["disperser"] = disperser_select.value
-    refresh_overlays()
-
-
-def on_filter(attr, old, new):
-    state["filter"] = filter_select.value
+def on_disperser_filter(attr, old, new):
+    label = disperser_filter_select.value
+    try:
+        d_part, f_part = [s.strip() for s in label.split("/")]
+    except ValueError:
+        return
+    state["disperser"] = d_part
+    state["filter"] = f_part
     refresh_overlays()
 
 
@@ -1448,11 +1467,17 @@ def on_export():
             str(out_dir / "shutter_mask.csv"),
             open_list, OPERABLE, REASON,
         )
+        # Also drop a session.json next to the APT files so the same
+        # directory can be re-loaded later via Session → Load to restore
+        # picks + pointing + everything.
+        export_session_json(_build_current_session(), str(out_dir / "session.json"))
         _set_status(
-            f"Exported eMPT bundle to {out_dir} "
+            f"Exported eMPT bundle + session.json to {out_dir} "
             f"({len(targets_rows)} targets, {len(open_list)} open shutters).",
-            "ok",
+            "ok", clear_after=15,
         )
+        # Pre-fill the Session-load input so the user can re-load with one click.
+        session_load_path_input.value = str(out_dir / "session.json")
     except Exception as e:  # noqa: BLE001
         _set_status(f"Export failed: {e}", "err")
         traceback.print_exc()
@@ -1460,6 +1485,15 @@ def on_export():
 
 # Tap wiring
 fig.on_event(Tap, on_tap)
+
+
+def on_ranges_update(event):
+    """Fires when the user finishes pan or zoom. Re-cull shutters to the new
+    view so panning into a fresh region brings its shutters into view."""
+    refresh_overlays()
+
+
+fig.on_event(RangesUpdate, on_ranges_update)
 undo_btn.on_click(on_undo)
 clear_btn.on_click(on_clear)
 export_btn.on_click(on_export)
@@ -1529,8 +1563,13 @@ def on_session_load():
     ra_input.value = f"{sess.pointing_ra_deg:.6f}"
     dec_input.value = f"{sess.pointing_dec_deg:.6f}"
     _sync_pa_widgets(sess.pa_v3_deg)
-    disperser_select.value = sess.disperser
-    filter_select.value = sess.filter_name
+    combo_label = f"{sess.disperser} / {sess.filter_name}"
+    if combo_label in DISPERSER_FILTER_LABELS:
+        disperser_filter_select.value = combo_label
+    else:
+        # Fall back to direct state mutation if the combo isn't in the list
+        state["disperser"] = sess.disperser
+        state["filter"] = sess.filter_name
     slitlet_select.value = str(sess.slitlet_height)
     state["slitlet_height"] = int(sess.slitlet_height)
     # Restore the open-shutter dict and highlighted set
@@ -1739,8 +1778,7 @@ v3pa_slider.on_change("value_throttled", on_v3pa_slider_done)
 v3pa_input.on_change("value", on_v3pa_text)
 apa_input.on_change("value", on_apa_text)
 layers_box.on_change("active", on_layers)
-disperser_select.on_change("value", on_disperser)
-filter_select.on_change("value", on_filter)
+disperser_filter_select.on_change("value", on_disperser_filter)
 slitlet_select.on_change("value", on_slitlet_height)
 
 # ---------------------------------------------------------------------------
@@ -1772,7 +1810,7 @@ sidebar = column(
     v3pa_slider, v3pa_input, apa_input, pa_help_div,
     visibility_date_input, visibility_btn, visibility_div,
     Div(text="<h3>Instrument</h3>"),
-    disperser_select, filter_select,
+    disperser_filter_select,
     Div(text="<h3>Display</h3>"),
     layers_box,
     slitlet_select,
