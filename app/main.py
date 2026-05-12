@@ -34,6 +34,8 @@ from bokeh.models import (
     HoverTool,
     Select,
     Slider,
+    TabPanel,
+    Tabs,
     TextInput,
     WheelZoomTool,
 )
@@ -1824,44 +1826,80 @@ slitlet_select.on_change("value", on_slitlet_height)
 # Layout
 # ---------------------------------------------------------------------------
 
-sidebar = column(
-    loading_banner,
-    stats_div,
-    Div(text="<h3>Image</h3>Try an example field:"),
+SIDEBAR_W = 340
+
+# Compact sidebar organised as tabs around the natural workflow:
+# Load (image + catalog) → Aim (pointing + PA + visibility) →
+# Pick (instrument, layers, slitlet, filters, undo/clear) →
+# Save (session save/load, APT export).
+
+load_tab = TabPanel(title="Load", child=column(
+    Div(text="<b>Image</b> — try an example:"),
     row(example_a370_btn, example_r0600_btn),
-    Div(text="<small><b>or</b> paste a local path:</small>"),
+    Div(text="<small><b>or</b> paste a local FITS path:</small>"),
     fits_path_input,
-    Div(text="<i>or</i> JPG + sidecar FITS by path:"),
+    Div(text="<small><b>or</b> JPG + sidecar FITS:</small>"),
     sidecar_path_input,
     jpg_path_input,
-    Div(text="<small>Upload widgets below — small files only "
-             "(unless server started with <code>--websocket-max-message-size</code>):</small>"),
+    Div(text="<details><summary><small>Small-file upload widgets "
+             "(WebSocket limit applies)</small></summary>"
+             "</details>"),
     fits_input,
     sidecar_input,
     jpg_input,
-    Div(text="<h3>Catalog</h3>Path:"),
+    Div(text="<b>Catalog</b> (CSV / ASCII / FITS with at least ID, RA, DEC):"),
     catalog_path_input,
     catalog_input,
     catalog_priority_input,
     catalog_mag_input,
-    Div(text="<h3>Pointing</h3>"),
+    width=SIDEBAR_W - 20,
+))
+
+aim_tab = TabPanel(title="Aim", child=column(
+    Div(text="<b>Pointing center</b>"),
     ra_input, dec_input,
+    Div(text="<b>Rotation</b>"),
     v3pa_slider, v3pa_input, apa_input, pa_help_div,
+    Div(text="<b>Visibility window</b>"),
     visibility_date_input, visibility_btn, visibility_div,
-    Div(text="<h3>Instrument</h3>"),
+    width=SIDEBAR_W - 20,
+))
+
+pick_tab = TabPanel(title="Pick", child=column(
+    Div(text="<b>Disperser / Filter</b>"),
     disperser_filter_select,
-    Div(text="<h3>Display</h3>"),
+    Div(text="<b>Layers</b>"),
     layers_box,
+    Div(text="<b>Slitlet</b>"),
     slitlet_select,
     snap_box,
+    Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
-    Div(text="<h3>Session (collaborate)</h3>"),
+    width=SIDEBAR_W - 20,
+))
+
+save_tab = TabPanel(title="Save", child=column(
+    Div(text="<b>Session</b> (share with collaborators)"),
     session_save_path_input, session_save_btn,
     session_load_path_input, session_load_btn,
-    Div(text="<h3>Export to APT</h3>"),
+    Div(text="<b>Export to APT</b> (eMPT bundle)"),
     export_dir_input, export_btn,
+    width=SIDEBAR_W - 20,
+))
+
+sidebar_tabs = Tabs(
+    tabs=[load_tab, aim_tab, pick_tab, save_tab],
+    width=SIDEBAR_W,
+)
+
+# Stats banner and status pinned above/below the tabs so they stay
+# visible regardless of which tab the user is on.
+sidebar = column(
+    loading_banner,
+    stats_div,
+    sidebar_tabs,
     status,
-    width=340,
+    width=SIDEBAR_W,
 )
 
 curdoc().add_root(row(sidebar, fig, help_panel))
