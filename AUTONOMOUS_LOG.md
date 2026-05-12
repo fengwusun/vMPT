@@ -1,3 +1,54 @@
+# Build log
+
+## Phase 2: autonomous improvement pass (2026-05-12, ~2 h)
+
+The user gave a free-form mandate: "make the app more user-friendly,
+nicer in interface, faster" with the goal of supporting collaborative
+target picking for NIRSpec MSA observations.
+
+What landed (commits `7879ee8`, `39df968`, plus catalog-filter +
+banner-safety + docs):
+
+1. **~50× faster overlay refresh.** Precomputed V2/V3 offsets +
+   per-refresh WCS inverse-Jacobian + index-based projection.
+   Operable-OFF: 477 ms → 8.4 ms. Operable-ON: 1394 ms → 66.5 ms.
+   PA slider drag is now smooth.
+
+2. **Session save/load JSON.** New `app/session_io.py` (built by
+   subagent, 4/4 tests). UI: "Save session" / "Load session" buttons
+   with path inputs. The JSON snapshots pointing, V3 PA, disperser,
+   filter, slitlet height, every open shutter with target_id and role,
+   highlighted shutters, and image/catalog paths. Sharing the JSON to
+   a collaborator restores the full picking state. Round-trip verified.
+
+3. **Statistics panel** at the top of the sidebar: pointing (deg +
+   sexagesimal), V3 PA + NIRSpec APA, count of open shutters, targets
+   covered, highlighted shutters, spectral conflicts, disperser/filter.
+   Updates every refresh.
+
+4. **One-click example loaders** "Load Abell 370 example" / "Load
+   RXCJ0600 example" at the top of the Image section.
+
+5. **Status auto-clear** after 6 s via `add_timeout_callback` with a
+   generation counter so only the most recent message fires its clear.
+
+6. **Loading banner safety timeout** (60 s) so it can never get stuck.
+
+7. **Catalog priority/magnitude filters** as text inputs; targets are
+   excluded if their priority class is too high or their mag is too
+   faint. NaN values are excluded conservatively when a filter is
+   active.
+
+8. **Brighter spec-overlap glyph** so the orange band is visible at
+   typical zoom levels.
+
+9. **Help panel updated** with sections for Save/Share session and
+   Export to APT.
+
+Tests: 50/50 (added 4 session-io tests). All previous tests pass.
+
+---
+
 # Overnight build log — 2026-05-11 → 2026-05-12
 
 User signed off at ~22:00. **All milestones M0–M4 + M5 (analytic) + M6 (eMPT export) shipped.** Reviewer passed; 46 / 46 tests green.

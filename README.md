@@ -2,8 +2,28 @@
 
 A Bokeh-based planner for laying out NIRSpec MSA shutter configurations
 on an image of the target field. Mirrors the MPT/eMPT workflow but lets
-you pick shutters by hand instead of by automated optimization, and
-exports an APT-loadable bundle.
+you pick shutters by hand instead of by automated optimization, supports
+collaboration via session JSON files, and exports an APT-loadable
+bundle.
+
+## Quick start
+
+```bash
+cd /Users/sunfengwu/nirspec
+./run.sh   # opens http://localhost:5006/app
+```
+
+In the app:
+1. Click **"Load Abell 370 example"** (or RXCJ0600) in the sidebar.
+2. Set **V3 PA** (slider) or click **"Compute allowed V3 PA"** for the
+   visibility window at a given date.
+3. **Click anywhere** on the image to open the nearest shutter as a
+   3-shutter slitlet. **Double-click** to highlight a shutter (visual
+   flag only). **Shift-click** to move the pointing center.
+4. **Save session** at any time and share the JSON with a collaborator;
+   they **Load session** to pick up where you left off.
+5. **Export eMPT bundle** when you're done — produces the three files
+   APT needs.
 
 ## Run
 
@@ -145,7 +165,22 @@ in the eMPT repo.
 - `app/wavelengths.py` — analytic per-grating dispersion model.
 - `app/image_io.py` — FITS + JPG-with-sidecar loaders.
 - `app/catalog.py` — CSV/ASCII/FITS catalog reader.
-- `app/empt_io.py` — three eMPT writers.
+- `app/empt_io.py` — three eMPT writers (observed_targets.cat,
+  pointing_summary.txt, shutter_mask.csv).
+- `app/session_io.py` — JSON save/load of the full picking session.
+
+### Performance
+
+`refresh_overlays` runs in ~10 ms when the operable-shutter layer is
+toggled off (the default), and ~70 ms when it's on. The hot path is
+pure-numpy: precomputed V2/V3 offsets for all 249,660 shutters, a
+single WCS inverse-Jacobian computed at the pointing pixel, then two
+matmuls (rotation by PA, then sky→pixel). No `SkyCoord` round-trips
+or per-polygon Python loops on the 250k set.
+
+To keep redraws fast even when the operable layer is on, the
+view-bbox is the figure's current visible range and operable shutters
+are capped at `MAX_OPERABLE_RENDER = 8000` (evenly subsampled).
 
 ## Known limitations / TODOs
 
@@ -161,10 +196,10 @@ in the eMPT repo.
 
 ## Tests
 
-`pytest tests/` — 46 unit and end-to-end tests covering coord
+`pytest tests/` — 50 unit and end-to-end tests covering coord
 transforms, shutter-mask CSV format (byte-diff against eMPT reference),
-wavelength model, image loaders, catalog parser, and overlay rendering
-on both example FITS and JPG fields.
+wavelength model, image loaders, catalog parser, session JSON
+round-trip, and overlay rendering on both example FITS and JPG fields.
 
 ## References
 

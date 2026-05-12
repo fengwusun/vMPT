@@ -426,13 +426,31 @@ def _set_status(msg: str, level: str = "info", clear_after: float = 6.0) -> None
             pass
 
 
+_LOADING_GENERATION = [0]
+
+
 def _show_loading(msg: str) -> None:
-    """Show the yellow loading banner. Pair with _hide_loading()."""
+    """Show the yellow loading banner. Pair with _hide_loading().
+
+    Schedules a 60-second safety timeout so the banner never gets stuck
+    if a callback path fails to call _hide_loading.
+    """
     loading_banner.text = f"⏳ {msg}"
     loading_banner.visible = True
+    _LOADING_GENERATION[0] += 1
+    gen = _LOADING_GENERATION[0]
+    def _safety_hide():
+        if _LOADING_GENERATION[0] == gen and loading_banner.visible:
+            loading_banner.visible = False
+            loading_banner.text = ""
+    try:
+        curdoc().add_timeout_callback(_safety_hide, 60_000)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _hide_loading() -> None:
+    _LOADING_GENERATION[0] += 1  # cancel any pending safety timer
     loading_banner.visible = False
     loading_banner.text = ""
 
