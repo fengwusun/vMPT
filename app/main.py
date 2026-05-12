@@ -120,16 +120,40 @@ catalog_input = FileInput(accept=".csv,.cat,.txt,.fits", title="Catalog upload")
 
 ra_input = TextInput(title="Pointing RA (deg)", value="")
 dec_input = TextInput(title="Pointing Dec (deg)", value="")
-pa_slider = Slider(title="APA_V3 (deg)", start=0.0, end=360.0, step=0.1, value=0.0)
-pa_input = TextInput(title="APA_V3 (deg, exact)", value="0.0")
+
+# V3 PA = position angle of the JWST V3 axis on sky. This is what drives the
+# V2/V3 -> RA/Dec math. APT/MPT's "NIRSpec PA" is the *aperture* PA (APA),
+# which differs by the V3IdlYAngle of NRS_FULL_MSA (~138.57 deg). We show
+# both, synchronized.
+v3pa_slider = Slider(title="V3 PA (deg)", start=0.0, end=360.0, step=0.1, value=0.0)
+v3pa_input = TextInput(title="V3 PA (deg, exact)", value="0.0")
+apa_input = TextInput(
+    title=f"NIRSpec APA (deg) — V3PA + {V3_IDL_Y_ANGLE:.3f}°",
+    value=f"{V3_IDL_Y_ANGLE % 360.0:.2f}",
+)
+pa_help_div = Div(text=(
+    "<small><b>V3 PA</b>: JWST V3 axis PA on sky (drives the overlay). "
+    f"<b>NIRSpec APA</b>: aperture PA of NRS_FULL_MSA = V3PA + {V3_IDL_Y_ANGLE:.2f}° "
+    "(mod 360). APT/MPT calls this NIRSpec's 'Aperture PA'. "
+    "<a href='https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/"
+    "jwst-position-angles-ranges-and-offsets' target='_blank'>JDox reference</a>.</small>"
+), width=320)
 
 # Visibility window query (jwst_gtvt)
 visibility_date_input = TextInput(
     title="Visibility date (YYYY-MM-DD)", value="",
     placeholder="leave blank for today",
 )
-visibility_btn = Button(label="Compute allowed APA_V3 (jwst_gtvt)", button_type="primary")
-visibility_div = Div(text="<small>Allowed APA_V3 windows appear here.</small>", width=320)
+visibility_btn = Button(label="Compute allowed V3 PA (jwst_gtvt)", button_type="primary")
+visibility_div = Div(text="<small>Allowed V3 PA windows appear here.</small>", width=320)
+
+# Loading banner — prominent indicator at the top, hidden by default.
+loading_banner = Div(
+    text="", width=320, height=30, visible=False,
+    styles=dict(background="#fff3cd", color="#664d03",
+                padding="6px 10px", border="1px solid #ffecb5",
+                **{"border-radius": "4px", "font-weight": "bold"}),
+)
 
 disperser_select = Select(title="Disperser", options=DISPERSERS, value="PRISM")
 filter_select = Select(title="Filter", options=FILTER_OPTIONS, value="CLEAR")
@@ -256,6 +280,23 @@ fig.add_tools(HoverTool(
 def _set_status(msg: str, level: str = "info") -> None:
     color = {"info": "#222", "warn": "#a06000", "err": "#a00000", "ok": "#006020"}[level]
     status.text = f'<div style="color:{color}">{msg}</div>'
+
+
+def _show_loading(msg: str) -> None:
+    """Show the yellow loading banner. Pair with _hide_loading()."""
+    loading_banner.text = f"⏳ {msg}"
+    loading_banner.visible = True
+
+
+def _hide_loading() -> None:
+    loading_banner.visible = False
+    loading_banner.text = ""
+
+
+def _deferred(fn, *args, **kwargs):
+    """Run fn on the next Bokeh document tick so any prior UI state changes
+    (e.g. _show_loading) flush to the browser first."""
+    curdoc().add_next_tick_callback(lambda: fn(*args, **kwargs))
 
 
 def _write_temp(b64_value: str, suffix: str) -> str:
@@ -608,6 +649,8 @@ def _load_fits_from_path(path: str) -> None:
     except Exception as e:  # noqa: BLE001
         _set_status(f"FITS load failed: {e}", "err")
         traceback.print_exc()
+    finally:
+        _hide_loading()
 
 
 def _load_jpg_pair_from_paths(jpg_path: str, sidecar_path: str) -> None:
@@ -617,6 +660,8 @@ def _load_jpg_pair_from_paths(jpg_path: str, sidecar_path: str) -> None:
     except Exception as e:  # noqa: BLE001
         _set_status(f"JPG+sidecar load failed: {e}", "err")
         traceback.print_exc()
+    finally:
+        _hide_loading()
 
 
 def _load_catalog_from_path(path: str) -> None:
@@ -628,15 +673,21 @@ def _load_catalog_from_path(path: str) -> None:
     except Exception as e:  # noqa: BLE001
         _set_status(f"Catalog load failed: {e}", "err")
         traceback.print_exc()
+    finally:
+        _hide_loading()
 
 
-# Path-based callbacks (primary input for a local tool)
+# Path-based callbacks (primary input for a local tool).
+# Slow loads are deferred to the next tick so the loading banner renders first.
 def on_fits_path(attr, old, new):
     p = fits_path_input.value.strip()
-    if p and Path(p).exists():
-        _load_fits_from_path(p)
-    elif p:
+    if not p:
+        return
+    if not Path(p).exists():
         _set_status(f"FITS path not found: {p}", "err")
+        return
+    _show_loading(f"Loading FITS: {Path(p).name}…")
+    _deferred(_load_fits_from_path, p)
 
 
 def on_sidecar_path(attr, old, new):
@@ -649,7 +700,8 @@ def on_sidecar_path(attr, old, new):
     state["tmp_sidecar_path"] = p
     jpg_p = jpg_path_input.value.strip()
     if jpg_p and Path(jpg_p).exists():
-        _load_jpg_pair_from_paths(jpg_p, p)
+        _show_loading(f"Loading JPG + WCS sidecar…")
+        _deferred(_load_jpg_pair_from_paths, jpg_p, p)
     else:
         _set_status("Sidecar set. Now enter a JPG path.", "info")
 
@@ -665,15 +717,19 @@ def on_jpg_path(attr, old, new):
     if not side_p or not Path(side_p).exists():
         _set_status("Enter a sidecar FITS path first.", "warn")
         return
-    _load_jpg_pair_from_paths(jpg_p, side_p)
+    _show_loading(f"Loading JPG: {Path(jpg_p).name}… (large JPGs take 5–10 s)")
+    _deferred(_load_jpg_pair_from_paths, jpg_p, side_p)
 
 
 def on_catalog_path(attr, old, new):
     p = catalog_path_input.value.strip()
-    if p and Path(p).exists():
-        _load_catalog_from_path(p)
-    elif p:
+    if not p:
+        return
+    if not Path(p).exists():
         _set_status(f"Catalog path not found: {p}", "err")
+        return
+    _show_loading(f"Loading catalog: {Path(p).name}…")
+    _deferred(_load_catalog_from_path, p)
 
 
 # Upload-based callbacks (for small files only — Bokeh WebSocket limit applies)
@@ -737,19 +793,52 @@ def on_pointing(attr, old, new):
     refresh_overlays()
 
 
-def on_pa_slider(attr, old, new):
-    state["pa_v3"] = float(pa_slider.value)
-    pa_input.value = f"{state['pa_v3']:.2f}"
+def _sync_pa_widgets(v3pa: float, source: str | None = None) -> None:
+    """Update PA widgets from a V3 PA value (mod 360).
+
+    `source` names the widget the change came from so we *don't* write back
+    to it (avoids clobbering the user's in-flight typed text).
+    """
+    state["_syncing_pa"] = True
+    try:
+        state["pa_v3"] = v3pa % 360.0
+        if source != "slider":
+            v3pa_slider.value = state["pa_v3"]
+        if source != "v3pa_text":
+            v3pa_input.value = f"{state['pa_v3']:.2f}"
+        if source != "apa_text":
+            apa = (state["pa_v3"] + V3_IDL_Y_ANGLE) % 360.0
+            apa_input.value = f"{apa:.2f}"
+    finally:
+        state["_syncing_pa"] = False
+
+
+def on_v3pa_slider(attr, old, new):
+    if state.get("_syncing_pa"):
+        return
+    _sync_pa_widgets(float(v3pa_slider.value), source="slider")
     refresh_overlays()
 
 
-def on_pa_text(attr, old, new):
+def on_v3pa_text(attr, old, new):
+    if state.get("_syncing_pa"):
+        return
     try:
-        v = float(pa_input.value) % 360.0
-        state["pa_v3"] = v
-        pa_slider.value = v
+        v = float(v3pa_input.value)
     except (TypeError, ValueError):
         return
+    _sync_pa_widgets(v, source="v3pa_text")
+    refresh_overlays()
+
+
+def on_apa_text(attr, old, new):
+    if state.get("_syncing_pa"):
+        return
+    try:
+        apa = float(apa_input.value)
+    except (TypeError, ValueError):
+        return
+    _sync_pa_widgets(apa - V3_IDL_Y_ANGLE, source="apa_text")
     refresh_overlays()
 
 
@@ -1090,13 +1179,17 @@ def on_visibility():
         _set_status("Set RA/Dec before computing visibility.", "warn")
         return
     try:
-        from jwst_gtvt.jwst_tvt import Ephemeris
+        from jwst_gtvt.jwst_tvt import Ephemeris  # noqa: F401
     except ImportError:
         _set_status("jwst_gtvt not installed (pip install jwst_gtvt).", "err")
         return
+    _show_loading("Querying jwst_gtvt ephemeris… (first call ~5–8 s, cached after).")
+    _deferred(_do_visibility_query, fiducial)
 
+
+def _do_visibility_query(fiducial):
     try:
-        _set_status("Querying jwst_gtvt ephemeris… (one-time, ~5 s)", "info")
+        from jwst_gtvt.jwst_tvt import Ephemeris
         eph = Ephemeris()
         df = eph.get_fixed_target_positions(
             f"{fiducial.ra.deg:.6f}", f"{fiducial.dec.deg:.6f}"
@@ -1104,7 +1197,13 @@ def on_visibility():
     except Exception as e:  # noqa: BLE001
         _set_status(f"jwst_gtvt query failed: {e}", "err")
         traceback.print_exc()
+        _hide_loading()
         return
+    _hide_loading()
+    _render_visibility(df)
+
+
+def _render_visibility(df):
 
     obs = df[df["in_FOR"]].copy()
     if len(obs) == 0:
@@ -1145,7 +1244,8 @@ def on_visibility():
         f"(window width {hi - lo:.1f}°)</small>"
     )
     # Snap slider into the allowed range and recolor band
-    pa_slider.value = nom
+    _sync_pa_widgets(nom)
+    refresh_overlays()
     _set_status(
         f"jwst_gtvt: {date_str} V3PA ∈ [{lo:.1f}, {hi:.1f}]°, nominal {nom:.1f}°.",
         "ok",
@@ -1169,8 +1269,9 @@ sidecar_path_input.on_change("value", on_sidecar_path)
 catalog_path_input.on_change("value", on_catalog_path)
 ra_input.on_change("value", on_pointing)
 dec_input.on_change("value", on_pointing)
-pa_slider.on_change("value", on_pa_slider)
-pa_input.on_change("value", on_pa_text)
+v3pa_slider.on_change("value", on_v3pa_slider)
+v3pa_input.on_change("value", on_v3pa_text)
+apa_input.on_change("value", on_apa_text)
 layers_box.on_change("active", on_layers)
 disperser_select.on_change("value", on_disperser)
 filter_select.on_change("value", on_filter)
@@ -1181,6 +1282,7 @@ slitlet_select.on_change("value", on_slitlet_height)
 # ---------------------------------------------------------------------------
 
 sidebar = column(
+    loading_banner,
     Div(text="<h3>Image</h3><b>Paste a local path</b> (works for any size):"),
     fits_path_input,
     Div(text="<i>or</i> JPG + sidecar FITS by path:"),
@@ -1197,7 +1299,7 @@ sidebar = column(
     catalog_input,
     Div(text="<h3>Pointing</h3>"),
     ra_input, dec_input,
-    pa_slider, pa_input,
+    v3pa_slider, v3pa_input, apa_input, pa_help_div,
     visibility_date_input, visibility_btn, visibility_div,
     Div(text="<h3>Instrument</h3>"),
     disperser_select, filter_select,
