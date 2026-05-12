@@ -60,6 +60,14 @@ from app.empt_io import (
 )
 from app.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
 from app.msa import load_msa_grid, load_operability
+from app.mpt_io import (
+    MPTPlan,
+    download_apt_program,
+    list_mpt_plans_in_aptx,
+    parse_mpt_json,
+    parse_mpt_json_in_aptx,
+    parse_shutter_csv,
+)
 from app.session_io import Session, export_session_json, import_session_json
 from app.wavelengths import (
     FILTER_BLUE_CUTOFF,
@@ -301,6 +309,50 @@ session_load_btn = Button(label="Load session", button_type="primary")
 example_a370_btn = Button(label="Load Abell 370 example", button_type="default")
 example_r0600_btn = Button(label="Load RXCJ0600 example", button_type="default")
 
+# Import an existing APT plan: either an MPT JSON (preferred — has pointing,
+# PA, multiple plans, target IDs) or a shutter CSV (just the open mask).
+mpt_json_path_input = TextInput(
+    title="APT/MPT plan JSON path",
+    value="",
+    placeholder="/path/to/plan.json",
+)
+mpt_plan_select = Select(
+    title="Plan from JSON",
+    options=[],
+    value="",
+    visible=False,
+)
+mpt_load_btn = Button(
+    label="Load plan from JSON", button_type="primary", disabled=True,
+)
+mpt_csv_path_input = TextInput(
+    title="Shutter CSV path (open-mask only)",
+    value="",
+    placeholder="/path/to/shutter_mask.csv",
+)
+mpt_csv_load_btn = Button(label="Load shutter CSV", button_type="primary")
+
+# Direct APT support: either an .aptx file path on disk, or a program
+# ID we can download from STScI.
+apt_path_input = TextInput(
+    title="APT (.aptx) path on disk",
+    value="",
+    placeholder="/path/to/1208.aptx",
+)
+apt_program_input = TextInput(
+    title="… or JWST program ID (fetched from STScI)",
+    value="",
+    placeholder="e.g. 1208",
+)
+apt_fetch_btn = Button(label="Fetch / open .aptx", button_type="primary")
+apt_plan_select = Select(
+    title="Plan inside .aptx",
+    options=[],
+    value="",
+    visible=False,
+)
+apt_load_btn = Button(label="Load selected plan", button_type="primary", disabled=True)
+
 # Statistics panel — always-visible counts.
 stats_div = Div(
     width=320,
@@ -358,8 +410,8 @@ img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source
 # targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
-    line_color="white", line_alpha=0.35, line_width=0.5,
-    fill_color="white", fill_alpha=0.05,
+    line_color="silver", line_alpha=0.10, line_width=0.5,
+    fill_alpha=0.0,
 )
 stuck_open_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_stuck_open,
@@ -1682,6 +1734,187 @@ def on_example_r0600():
 
 example_a370_btn.on_click(on_example_a370)
 example_r0600_btn.on_click(on_example_r0600)
+
+
+# ---------------------------------------------------------------------------
+# MPT JSON / shutter CSV import (load an existing APT MSA plan)
+# ---------------------------------------------------------------------------
+
+
+# Cache the parsed plan list keyed on file path so the Select callback
+# doesn't re-parse on every plan-switch.
+_mpt_plans_cache: dict[str, list] = {}
+
+
+def _parse_and_cache_mpt(path: str) -> list:
+    plans = parse_mpt_json(path)
+    _mpt_plans_cache[path] = plans
+    return plans
+
+
+def on_mpt_json_path(attr, old, new):
+    path = mpt_json_path_input.value.strip()
+    if not path:
+        mpt_plan_select.options = []
+        mpt_plan_select.visible = False
+        mpt_load_btn.disabled = True
+        return
+    if not Path(path).exists():
+        _set_status(f"MPT JSON path not found: {path}", "err")
+        return
+    try:
+        plans = _parse_and_cache_mpt(path)
+    except ValueError as e:
+        _set_status(f"MPT JSON parse failed: {e}", "err")
+        return
+    labels = [f"{i+1}. {p.name} ({p.n_open_shutters} open)"
+              for i, p in enumerate(plans)]
+    mpt_plan_select.options = labels
+    mpt_plan_select.value = labels[0] if labels else ""
+    mpt_plan_select.visible = True
+    mpt_load_btn.disabled = not labels
+    _set_status(f"Found {len(plans)} plan(s) in MPT JSON. Pick one and click "
+                f"'Load plan from JSON'.", "ok")
+
+
+def on_mpt_load():
+    path = mpt_json_path_input.value.strip()
+    if not path or path not in _mpt_plans_cache:
+        _set_status("Set the MPT JSON path first.", "warn")
+        return
+    plans = _mpt_plans_cache[path]
+    sel = mpt_plan_select.value
+    if not sel:
+        _set_status("Pick a plan from the dropdown.", "warn")
+        return
+    idx = mpt_plan_select.options.index(sel)
+    plan = plans[idx]
+    _apply_plan(plan)
+
+
+def _apply_plan(plan) -> None:
+    """Apply an MPTPlan to the live UI state: pointing, V3 PA, disperser,
+    and the unfolded open-shutter set."""
+    _push_history()
+    if plan.ra_deg is not None and plan.dec_deg is not None:
+        ra_input.value = f"{plan.ra_deg:.6f}"
+        dec_input.value = f"{plan.dec_deg:.6f}"
+    _sync_pa_widgets(plan.v3_pa_deg)
+    if plan.grating and plan.filter_name:
+        combo = f"{plan.grating} / {plan.filter_name}"
+        if combo in DISPERSER_FILTER_LABELS:
+            disperser_filter_select.value = combo
+    state["open_shutters"] = {
+        (sh.q, sh.s, sh.d): sh for sh in plan.to_open_shutters()
+    }
+    refresh_overlays()
+    _set_status(
+        f"Loaded plan '{plan.name}': {len(state['open_shutters'])} open shutters, "
+        f"APA={plan.aperture_pa_deg:.2f}°, V3 PA={plan.v3_pa_deg:.2f}°.",
+        "ok", clear_after=12,
+    )
+
+
+def on_mpt_csv_load():
+    path = mpt_csv_path_input.value.strip()
+    if not path:
+        _set_status("Set the shutter CSV path first.", "warn")
+        return
+    if not Path(path).exists():
+        _set_status(f"Shutter CSV not found: {path}", "err")
+        return
+    try:
+        opens = parse_shutter_csv(path)
+    except ValueError as e:
+        _set_status(f"Shutter CSV parse failed: {e}", "err")
+        return
+    _push_history()
+    state["open_shutters"] = {(sh.q, sh.s, sh.d): sh for sh in opens}
+    refresh_overlays()
+    _set_status(
+        f"Loaded shutter CSV: {len(opens)} open shutters (no slitlet "
+        f"grouping or target IDs — CSV doesn't carry that info).",
+        "ok", clear_after=12,
+    )
+
+
+mpt_json_path_input.on_change("value", on_mpt_json_path)
+mpt_load_btn.on_click(on_mpt_load)
+mpt_csv_load_btn.on_click(on_mpt_csv_load)
+
+
+# .aptx handling: either an on-disk file or a program ID. After we have
+# the archive, list its embedded MPT plans into apt_plan_select.
+
+_apt_state: dict = {"aptx_path": None}
+
+
+def on_apt_fetch():
+    aptx_path = apt_path_input.value.strip()
+    pid = apt_program_input.value.strip()
+    if not aptx_path and not pid:
+        _set_status("Set an .aptx path or a program ID first.", "warn")
+        return
+    if aptx_path:
+        if not Path(aptx_path).exists():
+            _set_status(f".aptx not found: {aptx_path}", "err")
+            return
+        path = aptx_path
+    else:
+        _show_loading(f"Downloading APT {pid} from STScI…")
+        try:
+            path = download_apt_program(pid)
+        except ValueError as e:
+            _hide_loading()
+            _set_status(f"Download failed: {e}", "err")
+            return
+        _hide_loading()
+    try:
+        plans = list_mpt_plans_in_aptx(path)
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"Could not read .aptx: {e}", "err")
+        return
+    if not plans:
+        _set_status(f".aptx contained no MPT-format plans.", "warn")
+        return
+    _apt_state["aptx_path"] = path
+    apt_plan_select.options = plans
+    apt_plan_select.value = plans[0]
+    apt_plan_select.visible = True
+    apt_load_btn.disabled = False
+    _set_status(
+        f"Found {len(plans)} MSA plan(s) in {Path(path).name}. "
+        f"Pick one and click 'Load selected plan'.", "ok", clear_after=15,
+    )
+
+
+def on_apt_load():
+    aptx_path = _apt_state.get("aptx_path")
+    member = apt_plan_select.value
+    if not aptx_path or not member:
+        _set_status("Open an .aptx first, then pick a plan.", "warn")
+        return
+    try:
+        plans = parse_mpt_json_in_aptx(aptx_path, member)
+    except ValueError as e:
+        _set_status(f"Plan parse failed: {e}", "err")
+        return
+    if not plans:
+        _set_status(f"No plans inside {member}.", "warn")
+        return
+    # MPT JSON inside an .aptx member may have multiple configs (sub-plans).
+    # For now, load the first; future enhancement: a second dropdown.
+    _apply_plan(plans[0])
+    if len(plans) > 1:
+        _set_status(
+            f"Loaded first of {len(plans)} configs in {member}. "
+            f"(Future: select sub-config from a dropdown.)",
+            "ok", clear_after=20,
+        )
+
+
+apt_fetch_btn.on_click(on_apt_fetch)
+apt_load_btn.on_click(on_apt_load)
 snap_box.on_change("active", on_snap)
 
 
@@ -1876,6 +2109,19 @@ load_tab = TabPanel(title="Load", child=column(
     catalog_input,
     catalog_priority_input,
     catalog_mag_input,
+    Div(text="<b>Import APT plan</b> — from a single exported JSON:"),
+    mpt_json_path_input,
+    mpt_plan_select,
+    mpt_load_btn,
+    Div(text="<small><i>or</i> a shutter CSV (open mask only):</small>"),
+    mpt_csv_path_input,
+    mpt_csv_load_btn,
+    Div(text="<small><i>or</i> straight from an APT (.aptx) file or program ID:</small>"),
+    apt_path_input,
+    apt_program_input,
+    apt_fetch_btn,
+    apt_plan_select,
+    apt_load_btn,
     width=SIDEBAR_W - 20,
 ))
 
