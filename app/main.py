@@ -119,6 +119,14 @@ jpg_input = FileInput(accept=".jpg,.jpeg,.png", title="JPG upload (small files)"
 sidecar_input = FileInput(accept=".fits", title="Sidecar FITS upload")
 catalog_input = FileInput(accept=".csv,.cat,.txt,.fits", title="Catalog upload")
 
+# Catalog filters — hide-able. Numeric thresholds; leave blank/empty to skip.
+catalog_priority_input = TextInput(
+    title="Show priority class ≤ (blank = all)", value="", placeholder="e.g. 3",
+)
+catalog_mag_input = TextInput(
+    title="Show mag ≤ (blank = all)", value="", placeholder="e.g. 28",
+)
+
 ra_input = TextInput(title="Pointing RA (deg)", value="")
 dec_input = TextInput(title="Pointing Dec (deg)", value="")
 
@@ -195,7 +203,14 @@ help_div = Div(
   an open shutter — their spectra would overlap on the detector.</li>
   <li><span style='color:gold;font-weight:bold'>Gold</span> polygons are the 5 NIRSpec fixed slits.</li>
 </ul>
-<b>5. Export</b>
+<b>5. Save / share session</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li><b>Save session</b> → writes a JSON snapshot of pointing, PA, all
+  open shutters, highlighted shutters, and the image/catalog paths.</li>
+  <li><b>Load session</b> → restores the snapshot. Hand the JSON to a
+  collaborator to continue picking where you left off.</li>
+</ul>
+<b>6. Export to APT</b>
 <ul style='margin:4px 0 8px 18px'>
   <li>Set the export dir, click <b>Export eMPT bundle</b>.</li>
   <li>Produces: <code>observed_targets.cat</code> (APT source catalog),
@@ -326,8 +341,8 @@ stuck_open_glyph = fig.multi_polygons(
 # spectra would overlap on the detector (MPT-style spectral conflict).
 spec_overlap_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap,
-    line_color="orange", line_alpha=0.7, line_width=0.8,
-    fill_color="orange", fill_alpha=0.10,
+    line_color="orange", line_alpha=0.9, line_width=1.0,
+    fill_color="orange", fill_alpha=0.25,
 )
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
@@ -767,8 +782,21 @@ def refresh_overlays() -> None:
     if show_targets and cat is not None:
         coords = SkyCoord(cat.ra_deg, cat.dec_deg, unit=u.deg, frame="icrs")
         x, y = _world_to_pixel(coords, wcs)
-        # Cull to image bounds
         mask = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        # Apply optional catalog filters (priority class ≤, magnitude ≤).
+        try:
+            pr_cutoff = float(catalog_priority_input.value.strip())
+        except (TypeError, ValueError):
+            pr_cutoff = None
+        try:
+            mag_cutoff = float(catalog_mag_input.value.strip())
+        except (TypeError, ValueError):
+            mag_cutoff = None
+        if pr_cutoff is not None:
+            # Drop NaNs (treated as "no priority", excluded) and apply ≤
+            mask &= np.where(np.isnan(cat.priority), False, cat.priority <= pr_cutoff)
+        if mag_cutoff is not None:
+            mask &= np.where(np.isnan(cat.mag), False, cat.mag <= mag_cutoff)
         src_targets.data = dict(
             x=x[mask].tolist(),
             y=y[mask].tolist(),
@@ -1637,6 +1665,8 @@ fits_path_input.on_change("value", on_fits_path)
 jpg_path_input.on_change("value", on_jpg_path)
 sidecar_path_input.on_change("value", on_sidecar_path)
 catalog_path_input.on_change("value", on_catalog_path)
+catalog_priority_input.on_change("value", lambda a, o, n: refresh_overlays())
+catalog_mag_input.on_change("value", lambda a, o, n: refresh_overlays())
 ra_input.on_change("value", on_pointing)
 dec_input.on_change("value", on_pointing)
 v3pa_slider.on_change("value", on_v3pa_slider)
@@ -1669,6 +1699,8 @@ sidebar = column(
     Div(text="<h3>Catalog</h3>Path:"),
     catalog_path_input,
     catalog_input,
+    catalog_priority_input,
+    catalog_mag_input,
     Div(text="<h3>Pointing</h3>"),
     ra_input, dec_input,
     v3pa_slider, v3pa_input, apa_input, pa_help_div,
