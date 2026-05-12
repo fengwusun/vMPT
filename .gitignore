@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+data/nirspec_msa_v2v3.npz
+data/jwst_nirspec_msaoper_*.json
+example_r0600/
+example_a370/
+refs/
+.venv*/
+*.egg-info/
