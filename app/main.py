@@ -2090,7 +2090,7 @@ SIDEBAR_W = 340
 # Pick (instrument, layers, slitlet, filters, undo/clear) →
 # Save (session save/load, APT export).
 
-load_tab = TabPanel(title="Load", child=column(
+image_tab = TabPanel(title="Image", child=column(
     Div(text="<b>Image</b> — try an example:"),
     row(example_a370_btn, example_r0600_btn),
     Div(text="<small><b>or</b> paste a local FITS path:</small>"),
@@ -2109,19 +2109,6 @@ load_tab = TabPanel(title="Load", child=column(
     catalog_input,
     catalog_priority_input,
     catalog_mag_input,
-    Div(text="<b>Import APT plan</b> — from a single exported JSON:"),
-    mpt_json_path_input,
-    mpt_plan_select,
-    mpt_load_btn,
-    Div(text="<small><i>or</i> a shutter CSV (open mask only):</small>"),
-    mpt_csv_path_input,
-    mpt_csv_load_btn,
-    Div(text="<small><i>or</i> straight from an APT (.aptx) file or program ID:</small>"),
-    apt_path_input,
-    apt_program_input,
-    apt_fetch_btn,
-    apt_plan_select,
-    apt_load_btn,
     width=SIDEBAR_W - 20,
 ))
 
@@ -2148,17 +2135,33 @@ pick_tab = TabPanel(title="Pick", child=column(
     width=SIDEBAR_W - 20,
 ))
 
-save_tab = TabPanel(title="Save", child=column(
-    Div(text="<b>Session</b> (share with collaborators)"),
+# MPT tab — everything to do with APT / MPT plans: import (from JSON,
+# shutter CSV, or .aptx archive / program ID), the session save/load
+# round-trip for collaboration, and the eMPT export bundle.
+mpt_tab = TabPanel(title="MPT", child=column(
+    Div(text="<b>Import a plan</b> — from a single MPT JSON:"),
+    mpt_json_path_input,
+    mpt_plan_select,
+    mpt_load_btn,
+    Div(text="<small><i>or</i> a shutter CSV (open mask only):</small>"),
+    mpt_csv_path_input,
+    mpt_csv_load_btn,
+    Div(text="<small><i>or</i> straight from an .aptx file or program ID:</small>"),
+    apt_path_input,
+    apt_program_input,
+    apt_fetch_btn,
+    apt_plan_select,
+    apt_load_btn,
+    Div(text="<b>Save / share session</b>"),
     session_save_path_input, session_save_btn,
     session_load_path_input, session_load_btn,
-    Div(text="<b>Export to APT</b> (eMPT bundle)"),
+    Div(text="<b>Export to APT</b> (eMPT bundle + session.json)"),
     export_dir_input, export_btn,
     width=SIDEBAR_W - 20,
 ))
 
 sidebar_tabs = Tabs(
-    tabs=[load_tab, aim_tab, pick_tab, save_tab],
+    tabs=[image_tab, aim_tab, pick_tab, mpt_tab],
     width=SIDEBAR_W,
 )
 
