@@ -367,8 +367,11 @@ stuck_open_glyph = fig.multi_polygons(
 # spectra would overlap on the detector (MPT-style spectral conflict).
 spec_overlap_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap,
-    line_color="orange", line_alpha=0.9, line_width=1.0,
-    fill_color="orange", fill_alpha=0.25,
+    # No edge — overlap shutters are fill-only, alpha 0.1 per conflict so
+    # the colour intensifies where multiple open shutters' spectra
+    # contribute (alpha compositing stacks).
+    line_alpha=0.0, line_width=0,
+    fill_color="orange", fill_alpha=0.10,
 )
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
@@ -826,24 +829,29 @@ def refresh_overlays() -> None:
     # the open shutter's coverage. For PRISM/CLEAR this is essentially the
     # full s-row; for narrow filters (e.g. G140M/F070LP, 0.57 μm) it's only
     # ~20″ — only neighbouring shutters share any wavelength range.
+    # Each conflict is rendered as a separate polygon (so the same shutter
+    # appears once per overlapping open-shutter spectrum) — Bokeh's alpha
+    # compositing then deepens the orange where multiple spectra collide.
     open_keys = state["open_shutters"].keys()
     if open_keys:
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365)
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
-        is_overlap = np.zeros(_V2_OFFSETS_ALL.size, dtype=bool)
+        in_view_op = in_view & (_FLAT_REASON == 0)
+        chunks: list[np.ndarray] = []
         for q_o, s_o, d_o in open_keys:
-            v2_o = float(_V2_OFFSETS_ALL[(q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)] + MSA_V2_REF)
+            open_flat = (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
+            v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
             same_row = (q_arr == q_o - 1) & (s_arr == s_o - 1)
             near_v2 = np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o) < v2_overlap
-            is_overlap |= same_row & near_v2
-        # Don't mark the open shutters themselves as overlap.
-        open_flat = np.array(
-            [(k[0]-1) * 171 * 365 + (k[1]-1) * 365 + (k[2]-1) for k in open_keys],
-            dtype=np.int64,
+            idx_this = np.where(in_view_op & same_row & near_v2)[0]
+            # Don't include the open shutter itself in its own conflict list.
+            idx_this = idx_this[idx_this != open_flat]
+            if idx_this.size:
+                chunks.append(idx_this)
+        overlap_idx = (
+            np.concatenate(chunks) if chunks else np.empty(0, dtype=np.int64)
         )
-        is_overlap[open_flat] = False
-        overlap_idx = np.where(in_view & (_FLAT_REASON == 0) & is_overlap)[0]
     else:
         overlap_idx = np.empty(0, dtype=np.int64)
     src_spec_overlap.data = _project_indices_to_cds(overlap_idx, pa_v3, fid_pix, jinv)
