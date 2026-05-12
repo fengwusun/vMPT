@@ -1254,15 +1254,24 @@ def _sky_to_v2v3(sky: SkyCoord, fiducial: SkyCoord, pa_v3: float) -> tuple[float
 
 
 def _nearest_shutter(v2_target: float, v3_target: float,
-                     require_operable: bool = True) -> tuple[int, int, int] | None:
-    """Brute-force argmin over all shutters of squared V2/V3 distance."""
+                     require_operable: bool = True,
+                     max_dist_arcsec: float | None = None) -> tuple[int, int, int] | None:
+    """Brute-force argmin over all shutters of squared V2/V3 distance.
+
+    Returns None if the closest matching shutter is farther than
+    `max_dist_arcsec` from (v2_target, v3_target). Useful so a click in
+    empty sky doesn't open a faraway shutter.
+    """
     dv2 = V2_MSA - v2_target
     dv3 = V3_MSA - v3_target
     d2 = dv2 * dv2 + dv3 * dv3
     if require_operable:
         d2 = np.where(OPERABLE, d2, np.inf)
     idx = int(np.argmin(d2))
-    if not np.isfinite(d2.flat[idx]):
+    min_d2 = float(d2.flat[idx])
+    if not np.isfinite(min_d2):
+        return None
+    if max_dist_arcsec is not None and min_d2 > max_dist_arcsec * max_dist_arcsec:
         return None
     q = idx // (171 * 365)
     rem = idx % (171 * 365)
@@ -1381,18 +1390,29 @@ def on_tap(event):
             _open_or_toggle_slitlet_at(q, s, d, target_id=tgt_id)
             return
 
-    # 2) Otherwise: snap to nearest operable shutter and toggle it manually.
-    # Non-operable shutters (stuck-open / failed-closed) must never be opened.
+    # 2) Otherwise: snap to nearest shutter and toggle. Clicks in empty
+    # sky (far from any shutter) or on stuck-open / failed-closed shutters
+    # do nothing — silent — so the user can pan and click around without
+    # accidentally opening faraway shutters.
     try:
         sky = img.wcs.pixel_to_world(x_data, y_data)
         v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
-        nearest = _nearest_shutter(v2, v3, require_operable=True)
+        # Threshold = ~half a shutter diagonal. Shutters are 0.20" wide x
+        # 0.46" tall in V2/V3; half-diagonal ~ 0.25". Use 0.5" to be a bit
+        # forgiving on aim.
+        nearest = _nearest_shutter(v2, v3, require_operable=False,
+                                   max_dist_arcsec=0.5)
     except Exception:  # noqa: BLE001
         return
     if nearest is None:
-        _set_status("No operable shutter near that click.", "warn")
-        return
+        return  # clicked far from any shutter
     q, s, d = nearest
+    # If the user is closing an already-open shutter, that's allowed even
+    # if the shutter is somehow flagged non-operable (shouldn't happen,
+    # but be defensive). Otherwise refuse to open non-operable shutters.
+    if (q, s, d) not in state["open_shutters"] and not OPERABLE[q - 1, s - 1, d - 1]:
+        return  # clicked on a stuck-open or failed-closed shutter
+
     _open_or_toggle_slitlet_at(q, s, d, target_id=None)
 
 
