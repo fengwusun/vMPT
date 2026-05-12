@@ -30,7 +30,6 @@ from bokeh.models import (
     ColumnDataSource,
     CustomJSTickFormatter,
     Div,
-    FileInput,
     HoverTool,
     Select,
     Slider,
@@ -143,10 +142,20 @@ catalog_path_input = TextInput(title="Catalog path (local)", value="", placehold
 # Upload widgets work for small files but Bokeh's default WebSocket limit (~20 MB) will
 # silently truncate larger ones. Start the server with --websocket-max-message-size if
 # you want to use these for big files.
-fits_input = FileInput(accept=".fits,.fit", title="FITS upload (small files)")
-jpg_input = FileInput(accept=".jpg,.jpeg,.png", title="JPG upload (small files)")
-sidecar_input = FileInput(accept=".fits", title="Sidecar FITS upload")
-catalog_input = FileInput(accept=".csv,.cat,.txt,.fits", title="Catalog upload")
+# "Browse…" buttons paired with each path TextInput. Clicking one opens
+# a native file picker (via a tkinter subprocess) and writes the chosen
+# path into the text input — which triggers the existing on_<path>_path
+# callback. No upload, no WebSocket size limit.
+fits_browse_btn = Button(label="Browse…", button_type="default", width=80)
+jpg_browse_btn = Button(label="Browse…", button_type="default", width=80)
+sidecar_browse_btn = Button(label="Browse…", button_type="default", width=80)
+catalog_browse_btn = Button(label="Browse…", button_type="default", width=80)
+mpt_json_browse_btn = Button(label="Browse…", button_type="default", width=80)
+mpt_csv_browse_btn = Button(label="Browse…", button_type="default", width=80)
+apt_path_browse_btn = Button(label="Browse…", button_type="default", width=80)
+session_save_browse_btn = Button(label="Browse…", button_type="default", width=80)
+session_load_browse_btn = Button(label="Browse…", button_type="default", width=80)
+export_dir_browse_btn = Button(label="Browse…", button_type="default", width=80)
 
 # Catalog filters — hide-able. Numeric thresholds; leave blank/empty to skip.
 catalog_priority_input = TextInput(
@@ -1171,53 +1180,6 @@ def on_catalog_path(attr, old, new):
     _deferred(_load_catalog_from_path, p)
 
 
-# Upload-based callbacks (for small files only — Bokeh WebSocket limit applies)
-def on_fits(attr, old, new):
-    if not fits_input.value:
-        return
-    try:
-        path = _write_temp(fits_input.value, suffix=".fits")
-        _load_fits_from_path(path)
-    except Exception as e:  # noqa: BLE001
-        _set_status(f"FITS upload failed: {e}", "err")
-
-
-def _try_load_jpg_upload():
-    if not jpg_input.value or state["tmp_sidecar_path"] is None:
-        return
-    try:
-        jpg_path = _write_temp(jpg_input.value, suffix=Path(jpg_input.filename).suffix or ".jpg")
-        _load_jpg_pair_from_paths(jpg_path, state["tmp_sidecar_path"])
-    except Exception as e:  # noqa: BLE001
-        _set_status(f"JPG upload failed: {e}", "err")
-
-
-def on_jpg(attr, old, new):
-    _try_load_jpg_upload()
-
-
-def on_sidecar(attr, old, new):
-    if not sidecar_input.value:
-        return
-    try:
-        state["tmp_sidecar_path"] = _write_temp(sidecar_input.value, suffix=".fits")
-        _set_status("Sidecar uploaded. Now upload the JPG.", "info")
-        _try_load_jpg_upload()
-    except Exception as e:  # noqa: BLE001
-        _set_status(f"Sidecar upload failed: {e}", "err")
-
-
-def on_catalog(attr, old, new):
-    if not catalog_input.value:
-        return
-    try:
-        suffix = Path(catalog_input.filename).suffix or ".csv"
-        path = _write_temp(catalog_input.value, suffix=suffix)
-        _load_catalog_from_path(path)
-    except Exception as e:  # noqa: BLE001
-        _set_status(f"Catalog upload failed: {e}", "err")
-
-
 # ---------------------------------------------------------------------------
 # Callbacks: pointing & display
 # ---------------------------------------------------------------------------
@@ -1915,6 +1877,96 @@ def on_apt_load():
 
 apt_fetch_btn.on_click(on_apt_fetch)
 apt_load_btn.on_click(on_apt_load)
+
+
+# ---------------------------------------------------------------------------
+# Native file picker (replaces Bokeh's FileInput upload widgets)
+# ---------------------------------------------------------------------------
+
+
+def _pick_file_dialog(
+    title: str,
+    filetypes: list[tuple[str, str]] | None = None,
+    mode: str = "open",
+) -> str | None:
+    """Pop a native file dialog and return the chosen path (or None).
+
+    Runs tkinter in a subprocess so it can't interfere with the Bokeh
+    server's Tornado event loop, and so any tkinter init weirdness is
+    isolated. Blocks the calling Bokeh callback while the dialog is
+    open — typical, and the user expects it.
+
+    `mode` is "open", "save", or "directory".
+    """
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    ft_repr = repr(filetypes or [])
+    script = (
+        "import json, tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.attributes('-topmost', True)\n"
+        f"title = {title!r}\n"
+        f"ftypes = {ft_repr}\n"
+        f"mode = {mode!r}\n"
+        "if mode == 'directory':\n"
+        "    p = filedialog.askdirectory(title=title, mustexist=True)\n"
+        "elif mode == 'save':\n"
+        "    p = filedialog.asksaveasfilename(title=title, filetypes=ftypes)\n"
+        "else:\n"
+        "    p = filedialog.askopenfilename(title=title, filetypes=ftypes)\n"
+        "print(json.dumps(p or ''))\n"
+        "root.destroy()\n"
+    )
+    try:
+        out = _sp.run(
+            [_sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=300,
+        )
+    except _sp.SubprocessError as e:
+        _set_status(f"File picker failed: {e}", "err")
+        return None
+    last = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
+    try:
+        result = _json.loads(last) if last else ""
+    except Exception:  # noqa: BLE001
+        result = ""
+    return result or None
+
+
+_FITS_TYPES = [("FITS", "*.fits *.fit"), ("All files", "*")]
+_JPG_TYPES = [("Image", "*.jpg *.jpeg *.png"), ("All files", "*")]
+_CATALOG_TYPES = [("Catalog", "*.csv *.cat *.txt *.fits *.ascii"),
+                  ("All files", "*")]
+_JSON_TYPES = [("JSON", "*.json"), ("All files", "*")]
+_CSV_TYPES = [("CSV", "*.csv"), ("All files", "*")]
+_APTX_TYPES = [("APT archive", "*.aptx *.zip"), ("All files", "*")]
+
+
+def _bind_browse(button, target_input, title, filetypes, mode="open"):
+    """Wire one Browse… button to write its picked path into a TextInput."""
+    def _cb():
+        p = _pick_file_dialog(title, filetypes, mode)
+        if p:
+            target_input.value = p
+    button.on_click(_cb)
+
+
+_bind_browse(fits_browse_btn, fits_path_input, "Select FITS image", _FITS_TYPES)
+_bind_browse(jpg_browse_btn, jpg_path_input, "Select JPG/PNG image", _JPG_TYPES)
+_bind_browse(sidecar_browse_btn, sidecar_path_input, "Select sidecar FITS (WCS)", _FITS_TYPES)
+_bind_browse(catalog_browse_btn, catalog_path_input, "Select catalog file", _CATALOG_TYPES)
+_bind_browse(mpt_json_browse_btn, mpt_json_path_input, "Select MPT JSON plan", _JSON_TYPES)
+_bind_browse(mpt_csv_browse_btn, mpt_csv_path_input, "Select shutter mask CSV", _CSV_TYPES)
+_bind_browse(apt_path_browse_btn, apt_path_input, "Select APT (.aptx)", _APTX_TYPES)
+_bind_browse(session_save_browse_btn, session_save_path_input,
+             "Save session as…", _JSON_TYPES, mode="save")
+_bind_browse(session_load_browse_btn, session_load_path_input,
+             "Load session JSON", _JSON_TYPES)
+_bind_browse(export_dir_browse_btn, export_dir_input,
+             "Pick export directory", None, mode="directory")
 snap_box.on_change("active", on_snap)
 
 
@@ -2059,10 +2111,6 @@ visibility_btn.on_click(on_visibility)
 # Wiring
 # ---------------------------------------------------------------------------
 
-fits_input.on_change("value", on_fits)
-jpg_input.on_change("value", on_jpg)
-sidecar_input.on_change("value", on_sidecar)
-catalog_input.on_change("value", on_catalog)
 fits_path_input.on_change("value", on_fits_path)
 jpg_path_input.on_change("value", on_jpg_path)
 sidecar_path_input.on_change("value", on_sidecar_path)
@@ -2093,20 +2141,13 @@ SIDEBAR_W = 340
 image_tab = TabPanel(title="Image", child=column(
     Div(text="<b>Image</b> — try an example:"),
     row(example_a370_btn, example_r0600_btn),
-    Div(text="<small><b>or</b> paste a local FITS path:</small>"),
-    fits_path_input,
+    Div(text="<small><b>or</b> a local FITS:</small>"),
+    row(fits_path_input, fits_browse_btn),
     Div(text="<small><b>or</b> JPG + sidecar FITS:</small>"),
-    sidecar_path_input,
-    jpg_path_input,
-    Div(text="<details><summary><small>Small-file upload widgets "
-             "(WebSocket limit applies)</small></summary>"
-             "</details>"),
-    fits_input,
-    sidecar_input,
-    jpg_input,
-    Div(text="<b>Catalog</b> (CSV / ASCII / FITS with at least ID, RA, DEC):"),
-    catalog_path_input,
-    catalog_input,
+    row(sidecar_path_input, sidecar_browse_btn),
+    row(jpg_path_input, jpg_browse_btn),
+    Div(text="<b>Catalog</b> <small>(CSV / ASCII / FITS with ID, RA, DEC)</small>"),
+    row(catalog_path_input, catalog_browse_btn),
     catalog_priority_input,
     catalog_mag_input,
     width=SIDEBAR_W - 20,
@@ -2140,23 +2181,26 @@ pick_tab = TabPanel(title="Pick", child=column(
 # round-trip for collaboration, and the eMPT export bundle.
 mpt_tab = TabPanel(title="MPT", child=column(
     Div(text="<b>Import a plan</b> — from a single MPT JSON:"),
-    mpt_json_path_input,
+    row(mpt_json_path_input, mpt_json_browse_btn),
     mpt_plan_select,
     mpt_load_btn,
     Div(text="<small><i>or</i> a shutter CSV (open mask only):</small>"),
-    mpt_csv_path_input,
+    row(mpt_csv_path_input, mpt_csv_browse_btn),
     mpt_csv_load_btn,
     Div(text="<small><i>or</i> straight from an .aptx file or program ID:</small>"),
-    apt_path_input,
+    row(apt_path_input, apt_path_browse_btn),
     apt_program_input,
     apt_fetch_btn,
     apt_plan_select,
     apt_load_btn,
     Div(text="<b>Save / share session</b>"),
-    session_save_path_input, session_save_btn,
-    session_load_path_input, session_load_btn,
+    row(session_save_path_input, session_save_browse_btn),
+    session_save_btn,
+    row(session_load_path_input, session_load_browse_btn),
+    session_load_btn,
     Div(text="<b>Export to APT</b> (eMPT bundle + session.json)"),
-    export_dir_input, export_btn,
+    row(export_dir_input, export_dir_browse_btn),
+    export_btn,
     width=SIDEBAR_W - 20,
 ))
 
