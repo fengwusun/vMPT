@@ -322,7 +322,9 @@ src_stuck_open = ColumnDataSource(
     data=dict(xs=[], ys=[], q=[], s=[], d=[])
 )
 src_open_shutters = ColumnDataSource(
-    data=dict(xs=[], ys=[], q=[], s=[], d=[], target=[], lam_blue=[], lam_red=[])
+    data=dict(xs=[], ys=[], q=[], s=[], d=[], target=[],
+              lam_blue=[], lam_red=[], lam_gap_lo=[], lam_gap_hi=[],
+              gap_label=[])
 )
 src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
@@ -418,7 +420,8 @@ fig.add_tools(HoverTool(
     renderers=[open_shutters_glyph],
     tooltips=[("Q,s,d", "@q,@s,@d"),
               ("target", "@target"),
-              ("λ blue/red", "@lam_blue{0.00} / @lam_red{0.00} μm")],
+              ("λ blue / red", "@lam_blue{0.00} / @lam_red{0.00} μm"),
+              ("NRS1/NRS2 gap", "@gap_label")],
 ))
 fig.add_tools(HoverTool(
     renderers=[fixed_slits_glyph],
@@ -720,21 +723,36 @@ def _open_shutters_cds_data(pa_v3: float, fid_pix: tuple[float, float],
                             jinv: np.ndarray) -> dict:
     """Open-shutter polygons + per-shutter target ID and wavelength cutoffs."""
     if not state["open_shutters"]:
-        return dict(xs=[], ys=[], q=[], s=[], d=[], target=[], lam_blue=[], lam_red=[])
+        return dict(xs=[], ys=[], q=[], s=[], d=[], target=[],
+                    lam_blue=[], lam_red=[], lam_gap_lo=[], lam_gap_hi=[],
+                    gap_label=[])
     keys = list(state["open_shutters"].keys())
     xs, ys, qs, ss, ds = _polygons_for_shutter_keys(keys, pa_v3, fid_pix, jinv)
     tgt: list[str] = []
     lam_b: list[float] = []
     lam_r: list[float] = []
+    lam_glo: list[float] = []
+    lam_ghi: list[float] = []
+    gap_lbl: list[str] = []
     for (q, s, d) in keys:
         sh = state["open_shutters"][(q, s, d)]
         tgt.append(str(sh.target_id) if sh.target_id is not None else "")
         v2c = float(V2_MSA[q - 1, s - 1, d - 1])
         v3c = float(V3_MSA[q - 1, s - 1, d - 1])
         cut = cutoffs(v2c, v3c, state["disperser"], state["filter"])
-        lam_b.append(cut.get("lam_blue") if cut and cut.get("lam_blue") is not None else float("nan"))
-        lam_r.append(cut.get("lam_red") if cut and cut.get("lam_red") is not None else float("nan"))
-    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds, target=tgt, lam_blue=lam_b, lam_red=lam_r)
+        b = cut.get("lam_blue"); r = cut.get("lam_red")
+        glo = cut.get("lam_gap_lo"); ghi = cut.get("lam_gap_hi")
+        lam_b.append(b if b is not None else float("nan"))
+        lam_r.append(r if r is not None else float("nan"))
+        lam_glo.append(glo if glo is not None else float("nan"))
+        lam_ghi.append(ghi if ghi is not None else float("nan"))
+        if glo is None or ghi is None:
+            gap_lbl.append("(no gap on this spectrum)")
+        else:
+            gap_lbl.append(f"{glo:.2f} – {ghi:.2f} μm")
+    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds, target=tgt,
+                lam_blue=lam_b, lam_red=lam_r,
+                lam_gap_lo=lam_glo, lam_gap_hi=lam_ghi, gap_label=gap_lbl)
 
 
 # ---------------------------------------------------------------------------
@@ -826,28 +844,34 @@ def refresh_overlays() -> None:
     else:
         src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
 
-    # Spectral-overlap: operable shutters at the same s-row (same quadrant)
-    # AND within the V2 distance over which their wavelength coverage overlaps
-    # the open shutter's coverage. For PRISM/CLEAR this is essentially the
-    # full s-row; for narrow filters (e.g. G140M/F070LP, 0.57 μm) it's only
-    # ~20″ — only neighbouring shutters share any wavelength range.
-    # Each conflict is rendered as a separate polygon (so the same shutter
-    # appears once per overlapping open-shutter spectrum) — Bokeh's alpha
-    # compositing then deepens the orange where multiple spectra collide.
+    # Spectral-overlap: operable shutters whose spectrum collides with any
+    # open shutter's spectrum on the detector. The collision condition is
+    #
+    #   |Δs| <= SHVAL_S_TOLERANCE  (same detector-y row, *any* quadrant)
+    #   AND |ΔV2| < v2_overlap_distance(disperser, filter)
+    #
+    # The s-tolerance approximates eMPT's shval matching: eMPT's `shval`
+    # is essentially the MSA row index s, with shval ≈ s ± 1 across both
+    # the d-axis and the four quadrants. With sthresh=3.5 (eMPT default),
+    # cross-quadrant pairs at the same s share a detector-y row, so the
+    # spectrum collision *can* cross the inter-quadrant gap. For PRISM
+    # the V2 cutoff (~35″) keeps things within one quadrant; for M
+    # (~200″) and H (~500″) gratings the V2 window reaches adjacent
+    # quadrants and the orange band spans the MSA.
+    SHVAL_S_TOLERANCE = 3
     open_keys = state["open_shutters"].keys()
     if open_keys:
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
-        q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365)
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
         in_view_op = in_view & (_FLAT_REASON == 0)
         chunks: list[np.ndarray] = []
         for q_o, s_o, d_o in open_keys:
             open_flat = (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
             v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
-            same_row = (q_arr == q_o - 1) & (s_arr == s_o - 1)
+            # Same shval-row across ANY quadrant
+            same_row = np.abs(s_arr - (s_o - 1)) <= SHVAL_S_TOLERANCE
             near_v2 = np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o) < v2_overlap
             idx_this = np.where(in_view_op & same_row & near_v2)[0]
-            # Don't include the open shutter itself in its own conflict list.
             idx_this = idx_this[idx_this != open_flat]
             if idx_this.size:
                 chunks.append(idx_this)

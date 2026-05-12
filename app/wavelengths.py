@@ -82,6 +82,12 @@ GAP_WIDTH_REL: float = 0.10
 
 
 def cutoffs(v2_arcsec: float, v3_arcsec: float, disperser: str, filt: str) -> dict:
+    """Wavelength endpoints of the dispersed spectrum on the detector for
+    a shutter at (V2, V3). All values are CLAMPED to the disperser's
+    intrinsic [lam_min, lam_max] range — we never report wavelengths
+    beyond what the grating can usefully observe (so PRISM is capped at
+    5.3 μm even for shutters far from V2_REF).
+    """
     disperser = disperser.upper()
     filt = filt.upper()
     if disperser not in GRATING_RANGES or filt not in GRATING_RANGES[disperser]:
@@ -94,18 +100,38 @@ def cutoffs(v2_arcsec: float, v3_arcsec: float, disperser: str, filt: str) -> di
     # Wavelength shift induced by shutter V2 offset from the fiducial.
     shift = (v2_arcsec - MSA_V2_REF) * dlam_dv2
 
-    lam_blue = lam_min + shift
-    lam_red = lam_max + shift
+    # Clamp the shifted spectrum to the grating's intrinsic range — the
+    # detector can't pick up wavelengths the grating doesn't usefully
+    # disperse. The gap stays at fixed wavelengths (NRS1/NRS2 detector
+    # gap is at a fixed pair of wavelengths for each disperser, derived
+    # from the optics — we treat them as constants relative to the
+    # spectrum's center and clip if the shifted gap leaves the range).
+    lam_blue_raw = lam_min + shift
+    lam_red_raw = lam_max + shift
+    lam_blue = max(lam_min, min(lam_max, lam_blue_raw))
+    lam_red = max(lam_min, min(lam_max, lam_red_raw))
+
     gap_half = 0.5 * GAP_WIDTH_REL * span
-    lam_gap_center = lam_min + GAP_CENTER_REL * span + shift
-    lam_gap_lo = lam_gap_center - gap_half
-    lam_gap_hi = lam_gap_center + gap_half
+    lam_gap_center_raw = lam_min + GAP_CENTER_REL * span + shift
+    lam_gap_lo_raw = lam_gap_center_raw - gap_half
+    lam_gap_hi_raw = lam_gap_center_raw + gap_half
+
+    # The gap is physical — if the shifted gap falls outside the
+    # observable range, there's effectively no detector gap on this
+    # shutter's spectrum (it's seen contiguously, or not at all).
+    if lam_gap_hi_raw < lam_blue or lam_gap_lo_raw > lam_red:
+        lam_gap_lo = None
+        lam_gap_hi = None
+    else:
+        lam_gap_lo = max(lam_blue, min(lam_red, lam_gap_lo_raw))
+        lam_gap_hi = max(lam_blue, min(lam_red, lam_gap_hi_raw))
 
     blue_cut = FILTER_BLUE_CUTOFF.get(filt, 0.0)
 
-    def _maybe(lam: float, is_blue_edge: bool = False) -> float | None:
+    def _maybe(lam, is_blue_edge: bool = False):
+        if lam is None:
+            return None
         if lam < blue_cut:
-            # Blue edge clamps to filter cutoff if any red part of spectrum survives.
             if is_blue_edge and lam_red > blue_cut:
                 return float(blue_cut)
             return None

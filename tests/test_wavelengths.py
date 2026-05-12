@@ -37,14 +37,20 @@ def test_fiducial_matches_published(disp, filt, lam_blue, lam_red):
 
 
 def test_shift_with_v2_offset_G395M():
-    base = cutoffs(MSA_V2_REF, MSA_V3_REF, "G395M", "F290LP")
-    shifted = cutoffs(MSA_V2_REF + 30.0, MSA_V3_REF, "G395M", "F290LP")
+    """After clamping, a positive V2 shift moves the blue end UP while
+    the red end stays clamped to lam_max (the spectrum's red end has
+    run off the right edge of the detector). Symmetric for negative."""
     lam_min, lam_max = GRATING_RANGES["G395M"]["F290LP"]
     expected_shift = 30.0 * (lam_max - lam_min) / V2_DISP_EXTENT
-    assert abs((shifted["lam_blue"] - base["lam_blue"]) - expected_shift) < 1e-6
-    assert abs((shifted["lam_red"] - base["lam_red"]) - expected_shift) < 1e-6
-    # Sanity: ~0.5 micron magnitude.
     assert 0.2 < abs(expected_shift) < 0.7
+    # Positive V2 shift → blue moves up, red clamped at lam_max.
+    shifted_pos = cutoffs(MSA_V2_REF + 30.0, MSA_V3_REF, "G395M", "F290LP")
+    assert shifted_pos["lam_red"] == pytest.approx(lam_max)
+    assert shifted_pos["lam_blue"] == pytest.approx(lam_min + expected_shift)
+    # Negative V2 shift → blue clamped (at filter cutoff = lam_min), red moves down.
+    shifted_neg = cutoffs(MSA_V2_REF - 30.0, MSA_V3_REF, "G395M", "F290LP")
+    assert shifted_neg["lam_blue"] == pytest.approx(lam_min)
+    assert shifted_neg["lam_red"] == pytest.approx(lam_max - expected_shift)
 
 
 def test_unsupported_combo_raises():
