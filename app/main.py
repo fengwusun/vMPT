@@ -59,6 +59,7 @@ from app.empt_io import (
 )
 from app.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
 from app.msa import load_msa_grid, load_operability
+from app.session_io import Session, export_session_json, import_session_json
 from app.wavelengths import FILTER_BLUE_CUTOFF, GRATING_RANGES, cutoffs
 
 # ---------------------------------------------------------------------------
@@ -243,6 +244,35 @@ clear_btn = Button(label="Clear open", button_type="warning")
 export_dir_input = TextInput(title="Export dir", value=str(Path.cwd() / "exports"))
 export_btn = Button(label="Export eMPT bundle", button_type="success")
 
+# Session save/load: round-trips the full picking state for collaborators.
+session_save_path_input = TextInput(
+    title="Session save path",
+    value=str(Path.cwd() / "exports" / "session.json"),
+    placeholder="/path/to/session.json",
+)
+session_save_btn = Button(label="Save session", button_type="primary")
+session_load_path_input = TextInput(
+    title="Session load path",
+    value="",
+    placeholder="/path/to/session.json",
+)
+session_load_btn = Button(label="Load session", button_type="primary")
+
+# Example data quick-load buttons (onboarding).
+example_a370_btn = Button(label="Load Abell 370 example", button_type="default")
+example_r0600_btn = Button(label="Load RXCJ0600 example", button_type="default")
+
+# Statistics panel — always-visible counts.
+stats_div = Div(
+    width=320,
+    styles=dict(
+        background="#eef5ff", color="#1a3b66",
+        padding="6px 10px", border="1px solid #b8d4ff",
+        **{"border-radius": "4px", "font-size": "12px"},
+    ),
+    text="<b>Stats:</b> waiting for image…",
+)
+
 # Glyph data sources
 src_image = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
 src_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[]))
@@ -358,9 +388,27 @@ fig.add_tools(HoverTool(
 # ---------------------------------------------------------------------------
 
 
-def _set_status(msg: str, level: str = "info") -> None:
+_STATUS_AUTOCLEAR_GENERATION = [0]
+
+
+def _set_status(msg: str, level: str = "info", clear_after: float = 6.0) -> None:
+    """Set the sidebar status line. If `clear_after` is positive, fade the
+    message after that many seconds so the UI doesn't accumulate stale
+    messages. Pass 0 to keep the message indefinitely.
+    """
     color = {"info": "#222", "warn": "#a06000", "err": "#a00000", "ok": "#006020"}[level]
     status.text = f'<div style="color:{color}">{msg}</div>'
+    _STATUS_AUTOCLEAR_GENERATION[0] += 1
+    gen = _STATUS_AUTOCLEAR_GENERATION[0]
+    if clear_after > 0:
+        def _maybe_clear():
+            # Only clear if no newer status has been set since.
+            if _STATUS_AUTOCLEAR_GENERATION[0] == gen:
+                status.text = '<div style="color:#888">Ready.</div>'
+        try:
+            curdoc().add_timeout_callback(_maybe_clear, int(clear_after * 1000))
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _show_loading(msg: str) -> None:
@@ -732,11 +780,28 @@ def refresh_overlays() -> None:
     else:
         src_targets.data = dict(x=[], y=[], id=[], ra=[], dec=[], pr=[])
 
+    # Update stats panel and status with the current configuration.
     n_op = len(state["open_shutters"])
     n_tgt_open = len({sh.target_id for sh in state["open_shutters"].values() if sh.target_id})
+    n_hl = len(state["highlighted"])
+    n_overlap = overlap_idx.size
+    apa = (pa_v3 + V3_IDL_Y_ANGLE) % 360.0
+    # Sexagesimal RA/Dec for the stats panel
+    fid_sky = SkyCoord(fiducial.ra.deg, fiducial.dec.deg, unit=u.deg)
+    ra_hms = fid_sky.ra.to_string(unit=u.hour, sep=":", precision=2, pad=True)
+    dec_dms = fid_sky.dec.to_string(unit=u.deg, sep=":", precision=1, alwayssign=True, pad=True)
+    stats_div.text = (
+        f"<b>Pointing</b>: {fiducial.ra.deg:.5f}, {fiducial.dec.deg:.5f} "
+        f"&nbsp;<span style='color:#666'>({ra_hms}, {dec_dms})</span><br>"
+        f"<b>V3 PA</b> {pa_v3:.2f}° &nbsp;|&nbsp; <b>NIRSpec APA</b> {apa:.2f}°<br>"
+        f"<b>Open</b>: {n_op} shutters across {n_tgt_open} targets &nbsp;|&nbsp; "
+        f"<b>Highlight</b>: {n_hl}<br>"
+        f"<b>Spectral conflicts</b>: {n_overlap} shutters &nbsp;|&nbsp; "
+        f"<b>{state['disperser']}/{state['filter']}</b>"
+    )
     _set_status(
         f"{n_op} open shutters covering {n_tgt_open} targets. "
-        f"PA_V3 = {pa_v3:.2f}°.", "ok",
+        f"V3 PA = {pa_v3:.2f}°.", "ok",
     )
 
 
@@ -1305,6 +1370,121 @@ fig.on_event(Tap, on_tap)
 undo_btn.on_click(on_undo)
 clear_btn.on_click(on_clear)
 export_btn.on_click(on_export)
+
+
+# ---------------------------------------------------------------------------
+# Session save/load
+# ---------------------------------------------------------------------------
+
+
+def _build_current_session() -> Session:
+    return Session(
+        pointing_ra_deg=float(state["ra_deg"]),
+        pointing_dec_deg=float(state["dec_deg"]),
+        pa_v3_deg=float(state["pa_v3"]),
+        disperser=state["disperser"],
+        filter_name=state["filter"],
+        slitlet_height=int(state["slitlet_height"]),
+        open_shutters=list(state["open_shutters"].values()),
+        highlighted=list(state["highlighted"]),
+        image_path=(state["image"].source_path if state["image"] else None),
+        catalog_path=(state["catalog"].source_path if state["catalog"] else None),
+    )
+
+
+def on_session_save():
+    path = session_save_path_input.value.strip()
+    if not path:
+        _set_status("Set a session save path first.", "warn")
+        return
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        export_session_json(_build_current_session(), str(p))
+        _set_status(f"Session saved → {p}", "ok", clear_after=10)
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"Session save failed: {e}", "err")
+        traceback.print_exc()
+
+
+def on_session_load():
+    path = session_load_path_input.value.strip()
+    if not path:
+        _set_status("Enter a session load path first.", "warn")
+        return
+    p = Path(path).expanduser()
+    if not p.exists():
+        _set_status(f"Session file not found: {p}", "err")
+        return
+    try:
+        sess = import_session_json(str(p))
+    except ValueError as e:
+        _set_status(f"Session load failed: {e}", "err")
+        return
+    # Apply session to the live UI. Load image/catalog first if paths still exist.
+    if sess.image_path and Path(sess.image_path).exists() and (
+        state["image"] is None
+        or getattr(state["image"], "source_path", None) != sess.image_path
+    ):
+        fits_path_input.value = sess.image_path  # triggers on_fits_path
+    if sess.catalog_path and Path(sess.catalog_path).exists() and (
+        state["catalog"] is None
+        or getattr(state["catalog"], "source_path", None) != sess.catalog_path
+    ):
+        catalog_path_input.value = sess.catalog_path
+    # Pointing & PA — set via the inputs so the standard on_change handlers run
+    ra_input.value = f"{sess.pointing_ra_deg:.6f}"
+    dec_input.value = f"{sess.pointing_dec_deg:.6f}"
+    _sync_pa_widgets(sess.pa_v3_deg)
+    disperser_select.value = sess.disperser
+    filter_select.value = sess.filter_name
+    slitlet_select.value = str(sess.slitlet_height)
+    state["slitlet_height"] = int(sess.slitlet_height)
+    # Restore the open-shutter dict and highlighted set
+    state["open_shutters"] = {
+        (sh.q, sh.s, sh.d): sh for sh in sess.open_shutters
+    }
+    state["highlighted"] = set(sess.highlighted)
+    state["history"] = []
+    refresh_overlays()
+    _set_status(
+        f"Session loaded: {len(state['open_shutters'])} open shutters, "
+        f"{len(state['highlighted'])} highlighted.", "ok", clear_after=10,
+    )
+
+
+session_save_btn.on_click(on_session_save)
+session_load_btn.on_click(on_session_load)
+
+
+# ---------------------------------------------------------------------------
+# Example data quick-load
+# ---------------------------------------------------------------------------
+
+
+_EX_DIR = Path(__file__).resolve().parent.parent
+
+def on_example_a370():
+    p = _EX_DIR / "example_a370" / "a370_f182m_f200w_f210m.fits"
+    if not p.exists():
+        _set_status(f"Example missing: {p}", "err")
+        return
+    fits_path_input.value = str(p)
+
+
+def on_example_r0600():
+    jpg = _EX_DIR / "example_r0600" / "JWST_F090W_F200W_F444W.jpg"
+    wcs = _EX_DIR / "example_r0600" / "wcs.fits"
+    if not (jpg.exists() and wcs.exists()):
+        _set_status("Example r0600 files missing.", "err")
+        return
+    # Set sidecar first so the JPG callback finds it.
+    sidecar_path_input.value = str(wcs)
+    jpg_path_input.value = str(jpg)
+
+
+example_a370_btn.on_click(on_example_a370)
+example_r0600_btn.on_click(on_example_r0600)
 snap_box.on_change("active", on_snap)
 
 
@@ -1473,14 +1653,16 @@ slitlet_select.on_change("value", on_slitlet_height)
 
 sidebar = column(
     loading_banner,
-    Div(text="<h3>Image</h3><b>Paste a local path</b> (works for any size):"),
+    stats_div,
+    Div(text="<h3>Image</h3>Try an example field:"),
+    row(example_a370_btn, example_r0600_btn),
+    Div(text="<small><b>or</b> paste a local path:</small>"),
     fits_path_input,
     Div(text="<i>or</i> JPG + sidecar FITS by path:"),
     sidecar_path_input,
     jpg_path_input,
     Div(text="<small>Upload widgets below — small files only "
-             "(Bokeh WS limit ~20 MB unless server started with "
-             "<code>--websocket-max-message-size</code>):</small>"),
+             "(unless server started with <code>--websocket-max-message-size</code>):</small>"),
     fits_input,
     sidecar_input,
     jpg_input,
@@ -1498,7 +1680,10 @@ sidebar = column(
     slitlet_select,
     snap_box,
     row(undo_btn, clear_btn),
-    Div(text="<h3>Export</h3>"),
+    Div(text="<h3>Session (collaborate)</h3>"),
+    session_save_path_input, session_save_btn,
+    session_load_path_input, session_load_btn,
+    Div(text="<h3>Export to APT</h3>"),
     export_dir_input, export_btn,
     status,
     width=340,
