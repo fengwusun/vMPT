@@ -97,11 +97,21 @@ def _push_history() -> None:
 # Bokeh widgets / glyphs
 # ---------------------------------------------------------------------------
 
-status = Div(text="Load a FITS or a JPG + sidecar FITS.", width=420)
-fits_input = FileInput(accept=".fits,.fit", title="FITS image")
-jpg_input = FileInput(accept=".jpg,.jpeg,.png", title="JPG/PNG image")
-sidecar_input = FileInput(accept=".fits", title="Sidecar FITS (WCS for JPG)")
-catalog_input = FileInput(accept=".csv,.cat,.txt,.fits", title="Target catalog")
+status = Div(text="Enter a file path below (or use the upload widgets for small files).", width=420)
+
+# Path-based inputs are the primary way to load — no WebSocket size limit, no temp files.
+fits_path_input = TextInput(title="FITS path (local)", value="", placeholder="/path/to/image.fits")
+jpg_path_input = TextInput(title="JPG path (local)", value="", placeholder="/path/to/image.jpg")
+sidecar_path_input = TextInput(title="Sidecar FITS path (WCS for JPG)", value="", placeholder="/path/to/wcs.fits")
+catalog_path_input = TextInput(title="Catalog path (local)", value="", placeholder="/path/to/catalog.csv")
+
+# Upload widgets work for small files but Bokeh's default WebSocket limit (~20 MB) will
+# silently truncate larger ones. Start the server with --websocket-max-message-size if
+# you want to use these for big files.
+fits_input = FileInput(accept=".fits,.fit", title="FITS upload (small files)")
+jpg_input = FileInput(accept=".jpg,.jpeg,.png", title="JPG upload (small files)")
+sidecar_input = FileInput(accept=".fits", title="Sidecar FITS upload")
+catalog_input = FileInput(accept=".csv,.cat,.txt,.fits", title="Catalog upload")
 
 ra_input = TextInput(title="Pointing RA (deg)", value="")
 dec_input = TextInput(title="Pointing Dec (deg)", value="")
@@ -433,51 +443,120 @@ def refresh_image_glyph() -> None:
 # ---------------------------------------------------------------------------
 
 
-def on_fits(attr, old, new):
-    if not fits_input.value:
-        return
+def _set_image_and_recenter(img: LoadedImage, source_label: str) -> None:
+    state["image"] = img
+    H, W = img.shape[:2]
     try:
-        path = _write_temp(fits_input.value, suffix=".fits")
-        img = load_fits(path)
-        state["image"] = img
-        # Default pointing = image center
-        H, W = img.shape
         center = img.wcs.pixel_to_world(W / 2, H / 2)
         ra_input.value = f"{center.ra.deg:.6f}"
         dec_input.value = f"{center.dec.deg:.6f}"
         state["ra_deg"] = center.ra.deg
         state["dec_deg"] = center.dec.deg
-        refresh_image_glyph()
-        refresh_overlays()
-        _set_status(f"Loaded FITS: {fits_input.filename} ({W}×{H}). Center {center.ra.deg:.4f}, {center.dec.deg:.4f}.", "ok")
+    except Exception:  # noqa: BLE001
+        pass
+    refresh_image_glyph()
+    refresh_overlays()
+    _set_status(f"Loaded {source_label} ({W}×{H}).", "ok")
+
+
+def _load_fits_from_path(path: str) -> None:
+    try:
+        img = load_fits(path)
+        _set_image_and_recenter(img, f"FITS {Path(path).name}")
     except Exception as e:  # noqa: BLE001
         _set_status(f"FITS load failed: {e}", "err")
         traceback.print_exc()
 
 
-def _try_load_jpg():
-    if not jpg_input.value or state["tmp_sidecar_path"] is None:
-        return
+def _load_jpg_pair_from_paths(jpg_path: str, sidecar_path: str) -> None:
     try:
-        jpg_path = _write_temp(jpg_input.value, suffix=Path(jpg_input.filename).suffix or ".jpg")
-        img = load_jpg_with_sidecar(jpg_path, state["tmp_sidecar_path"], max_dim=6000)
-        state["image"] = img
-        H, W = img.shape
-        center = img.wcs.pixel_to_world(W / 2, H / 2)
-        ra_input.value = f"{center.ra.deg:.6f}"
-        dec_input.value = f"{center.dec.deg:.6f}"
-        state["ra_deg"] = center.ra.deg
-        state["dec_deg"] = center.dec.deg
-        refresh_image_glyph()
-        refresh_overlays()
-        _set_status(f"Loaded JPG+sidecar: {W}×{H}.", "ok")
+        img = load_jpg_with_sidecar(jpg_path, sidecar_path, max_dim=6000)
+        _set_image_and_recenter(img, f"JPG+sidecar {Path(jpg_path).name}")
     except Exception as e:  # noqa: BLE001
         _set_status(f"JPG+sidecar load failed: {e}", "err")
         traceback.print_exc()
 
 
+def _load_catalog_from_path(path: str) -> None:
+    try:
+        cat = load_catalog(path)
+        state["catalog"] = cat
+        refresh_overlays()
+        _set_status(f"Catalog loaded: {len(cat.ra_deg)} targets from {Path(path).name}.", "ok")
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"Catalog load failed: {e}", "err")
+        traceback.print_exc()
+
+
+# Path-based callbacks (primary input for a local tool)
+def on_fits_path(attr, old, new):
+    p = fits_path_input.value.strip()
+    if p and Path(p).exists():
+        _load_fits_from_path(p)
+    elif p:
+        _set_status(f"FITS path not found: {p}", "err")
+
+
+def on_sidecar_path(attr, old, new):
+    p = sidecar_path_input.value.strip()
+    if not p:
+        return
+    if not Path(p).exists():
+        _set_status(f"Sidecar path not found: {p}", "err")
+        return
+    state["tmp_sidecar_path"] = p
+    jpg_p = jpg_path_input.value.strip()
+    if jpg_p and Path(jpg_p).exists():
+        _load_jpg_pair_from_paths(jpg_p, p)
+    else:
+        _set_status("Sidecar set. Now enter a JPG path.", "info")
+
+
+def on_jpg_path(attr, old, new):
+    jpg_p = jpg_path_input.value.strip()
+    side_p = state.get("tmp_sidecar_path") or sidecar_path_input.value.strip()
+    if not jpg_p:
+        return
+    if not Path(jpg_p).exists():
+        _set_status(f"JPG path not found: {jpg_p}", "err")
+        return
+    if not side_p or not Path(side_p).exists():
+        _set_status("Enter a sidecar FITS path first.", "warn")
+        return
+    _load_jpg_pair_from_paths(jpg_p, side_p)
+
+
+def on_catalog_path(attr, old, new):
+    p = catalog_path_input.value.strip()
+    if p and Path(p).exists():
+        _load_catalog_from_path(p)
+    elif p:
+        _set_status(f"Catalog path not found: {p}", "err")
+
+
+# Upload-based callbacks (for small files only — Bokeh WebSocket limit applies)
+def on_fits(attr, old, new):
+    if not fits_input.value:
+        return
+    try:
+        path = _write_temp(fits_input.value, suffix=".fits")
+        _load_fits_from_path(path)
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"FITS upload failed: {e}", "err")
+
+
+def _try_load_jpg_upload():
+    if not jpg_input.value or state["tmp_sidecar_path"] is None:
+        return
+    try:
+        jpg_path = _write_temp(jpg_input.value, suffix=Path(jpg_input.filename).suffix or ".jpg")
+        _load_jpg_pair_from_paths(jpg_path, state["tmp_sidecar_path"])
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"JPG upload failed: {e}", "err")
+
+
 def on_jpg(attr, old, new):
-    _try_load_jpg()
+    _try_load_jpg_upload()
 
 
 def on_sidecar(attr, old, new):
@@ -485,10 +564,10 @@ def on_sidecar(attr, old, new):
         return
     try:
         state["tmp_sidecar_path"] = _write_temp(sidecar_input.value, suffix=".fits")
-        _set_status("Sidecar FITS loaded. Now upload the JPG.", "info")
-        _try_load_jpg()
+        _set_status("Sidecar uploaded. Now upload the JPG.", "info")
+        _try_load_jpg_upload()
     except Exception as e:  # noqa: BLE001
-        _set_status(f"Sidecar load failed: {e}", "err")
+        _set_status(f"Sidecar upload failed: {e}", "err")
 
 
 def on_catalog(attr, old, new):
@@ -497,13 +576,9 @@ def on_catalog(attr, old, new):
     try:
         suffix = Path(catalog_input.filename).suffix or ".csv"
         path = _write_temp(catalog_input.value, suffix=suffix)
-        cat = load_catalog(path)
-        state["catalog"] = cat
-        refresh_overlays()
-        _set_status(f"Catalog loaded: {len(cat.ra_deg)} targets.", "ok")
+        _load_catalog_from_path(path)
     except Exception as e:  # noqa: BLE001
-        _set_status(f"Catalog load failed: {e}", "err")
-        traceback.print_exc()
+        _set_status(f"Catalog upload failed: {e}", "err")
 
 
 # ---------------------------------------------------------------------------
@@ -805,6 +880,10 @@ fits_input.on_change("value", on_fits)
 jpg_input.on_change("value", on_jpg)
 sidecar_input.on_change("value", on_sidecar)
 catalog_input.on_change("value", on_catalog)
+fits_path_input.on_change("value", on_fits_path)
+jpg_path_input.on_change("value", on_jpg_path)
+sidecar_path_input.on_change("value", on_sidecar_path)
+catalog_path_input.on_change("value", on_catalog_path)
 ra_input.on_change("value", on_pointing)
 dec_input.on_change("value", on_pointing)
 pa_slider.on_change("value", on_pa_slider)
@@ -819,12 +898,19 @@ slitlet_select.on_change("value", on_slitlet_height)
 # ---------------------------------------------------------------------------
 
 sidebar = column(
-    Div(text="<h3>Image</h3>"),
+    Div(text="<h3>Image</h3><b>Paste a local path</b> (works for any size):"),
+    fits_path_input,
+    Div(text="<i>or</i> JPG + sidecar FITS by path:"),
+    sidecar_path_input,
+    jpg_path_input,
+    Div(text="<small>Upload widgets below — small files only "
+             "(Bokeh WS limit ~20 MB unless server started with "
+             "<code>--websocket-max-message-size</code>):</small>"),
     fits_input,
-    Div(text="<i>or</i> JPG + sidecar:"),
     sidecar_input,
     jpg_input,
-    Div(text="<h3>Catalog</h3>"),
+    Div(text="<h3>Catalog</h3>Path:"),
+    catalog_path_input,
     catalog_input,
     Div(text="<h3>Pointing</h3>"),
     ra_input, dec_input,
@@ -839,7 +925,7 @@ sidebar = column(
     Div(text="<h3>Export</h3>"),
     export_dir_input, export_btn,
     status,
-    width=320,
+    width=340,
 )
 
 curdoc().add_root(row(sidebar, fig))
