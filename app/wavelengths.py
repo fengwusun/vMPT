@@ -26,29 +26,55 @@ FILTER_BLUE_CUTOFF: dict[str, float] = {
 # Projected MSA-to-detector dispersion span along V2 (arcsec). Placeholder per PLAN.md.
 V2_DISP_EXTENT: float = 180.0
 
-# Per-arcsec wavelength dispersion, calibrated so PRISM/CLEAR's ~4.7 μm range
-# spans the full V2_DISP_EXTENT. Filters with narrower wavelength coverage
-# (e.g. G140M/F070LP at 0.57 μm) get a *proportionally narrower* V2 overlap
-# zone. This is a deliberate approximation for the spectral-conflict visual
-# — see PLAN.md M5 for the placeholder notes.
 LAMBDA_PER_ARCSEC: float = (5.30 - 0.60) / V2_DISP_EXTENT  # ~0.026 μm/arcsec
 
 
-def v2_overlap_distance(disperser: str, filt: str) -> float:
-    """Half-width V2 distance (arcsec) over which two shutters at the same
-    s-row have overlapping wavelength coverage with the given grating/filter.
+# Half-width of the on-detector spectrum, in V2 arcsec, per disperser.
+#
+# Source: eMPT (Bonaventura et al. 2023, A&A 672, A40),
+# `reference_files/prism_sep.dat`, which tabulates per-shutter +/- column
+# separations for the PRISM spectrum. At a central shutter the values are
+# sep_p ≈ +176, sep_m ≈ -177 columns. Each MSA column is ~0.20" along V2,
+# so the projected V2 half-extent of PRISM's spectrum is ~0.20 × 176 ≈ 35".
+# Within ~10 % across the MSA.
+#
+# For the grating modes, eMPT applies no column cutoff at all — any pair
+# of shutters at the same detector-y row collide (the spectrum spans the
+# entire detector). For an H-grating the spectrum reaches beyond the MSA
+# in V2, so cross-quadrant pairs collide as well. We approximate both
+# behaviours with a single (large) V2 half-extent below.
+#
+# IMPORTANT — what the visualisation actually shows. We compute the
+# orange spectral-conflict shutters as "same q AND same s in the MSA grid,
+# within `v2_overlap_distance` of the open shutter in V2." So:
+#
+#   - PRISM at a center shutter (d ~ 200): ~94 % of the row in the same
+#     quadrant. (Yes, "most of the row" — physical: PRISM spectrum on
+#     detector is ~70" wide in V2, the row is 73" wide.)
+#   - PRISM at an edge shutter (d ~ 10): only ~51 % of the row. (The
+#     spectrum runs off the end.)
+#   - M / H gratings: ~100 % of the row in same quadrant.
+#
+# Not yet modelled: cross-quadrant collisions for grating modes. Two
+# shutters in different quadrants but at the same detector y can collide;
+# we'd need the eMPT shval tables to do this exactly. Reasonable
+# enhancement for a future release.
+SPECTRUM_V2_HALFEXTENT: dict[str, float] = {
+    "PRISM": 35.0,
+    "G140M": 200.0,
+    "G235M": 200.0,
+    "G395M": 200.0,
+    "G140H": 500.0,
+    "G235H": 500.0,
+    "G395H": 500.0,
+}
 
-    For PRISM/CLEAR this is the full V2_DISP_EXTENT (~180″) — almost every
-    same-row shutter conflicts. For narrow-filter combos (e.g.
-    G140M/F070LP, ~0.57 μm) it shrinks to ~22″ — only nearby shutters share
-    any wavelength.
-    """
-    disperser = disperser.upper()
-    filt = filt.upper()
-    if disperser not in GRATING_RANGES or filt not in GRATING_RANGES[disperser]:
-        return V2_DISP_EXTENT
-    lam_min, lam_max = GRATING_RANGES[disperser][filt]
-    return (lam_max - lam_min) / LAMBDA_PER_ARCSEC
+
+def v2_overlap_distance(disperser: str, filt: str) -> float:
+    """V2 half-extent (arcsec) of the spectrum on the detector. Two same-row
+    shutters whose V2 separation is less than this value collide on the
+    detector. See module-level comment for the eMPT reference."""
+    return SPECTRUM_V2_HALFEXTENT.get(disperser.upper(), 180.0)
 
 # Gap parameters (relative to fiducial wavelength span).
 GAP_CENTER_REL: float = 0.50
