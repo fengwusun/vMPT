@@ -37,6 +37,7 @@ from bokeh.models import (
     Slider,
     TapTool,
     TextInput,
+    WheelZoomTool,
 )
 from bokeh.plotting import figure
 
@@ -193,13 +194,18 @@ src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
 fig = figure(
     width=900, height=900,
-    tools="pan,wheel_zoom,box_zoom,reset,save,tap",
+    tools="pan,box_zoom,reset,save,tap",
     match_aspect=True,
     output_backend="webgl",
     title="NIRSpec MSA planner",
     x_axis_label="RA (deg)", y_axis_label="Dec (deg)",
 )
-fig.toolbar.active_scroll = fig.tools[1]  # wheel zoom enabled by default
+# Custom WheelZoomTool: scroll always zooms both axes equally, even when the
+# cursor is over an axis. Bokeh's default (zoom_on_axis=True) lets scrolling
+# on an axis zoom *only* that axis, which would distort the image aspect.
+wheel_zoom = WheelZoomTool(dimensions="both", zoom_on_axis=False)
+fig.add_tools(wheel_zoom)
+fig.toolbar.active_scroll = wheel_zoom
 
 img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=src_image)
 
