@@ -1,0 +1,14 @@
+# Minimum runtime + test dependencies for vMPT.
+# Recommended environment: conda activate stenv (STScI Hubble + Webb pipeline env).
+# If installing manually, all packages are pip-installable.
+
+astropy>=5.0
+bokeh>=3.7
+jwst>=1.18
+jwst_gtvt>=1.0
+numpy>=1.24
+pandas>=2.0
+Pillow>=9.0
+pysiaf>=0.20
+pytest>=7.0
+scipy>=1.10

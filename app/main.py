@@ -1,4 +1,4 @@
-"""NIRSpec MSA hand-picking planner — Bokeh server entry point.
+"""vMPT — visual MSA Planning Tool. Bokeh server entry point.
 
 Run:  bokeh serve app/ --show
 """
@@ -311,7 +311,7 @@ fig = figure(
     tools="pan,box_zoom,reset,save,tap",
     match_aspect=True,
     output_backend="webgl",
-    title="NIRSpec MSA planner",
+    title="vMPT — visual MSA Planning Tool",
     x_axis_label="RA (deg)", y_axis_label="Dec (deg)",
 )
 # Custom WheelZoomTool: scroll always zooms both axes equally, even when the
@@ -1781,4 +1781,4 @@ sidebar = column(
 )
 
 curdoc().add_root(row(sidebar, fig, help_panel))
-curdoc().title = "NIRSpec MSA planner"
+curdoc().title = "vMPT — visual MSA Planning Tool"

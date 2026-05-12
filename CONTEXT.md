@@ -1,4 +1,4 @@
-# NIRSpec MSA Overlay & Planner — Project Context
+# vMPT (visual MSA Planning Tool) — Project Context
 
 Cold-start reference for the interactive NIRSpec-MSA-on-image **planning** tool. Think of it as a hand-driven MPT/eMPT: load an image, drop a target catalog on top, pick a pointing (RA, Dec, APA_V3), hand-pick which shutters to open, then export a configuration that can be loaded into APT.
 

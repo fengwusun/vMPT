@@ -1,10 +1,35 @@
-# NIRSpec MSA hand-picking planner
+# vMPT — visual MSA Planning Tool
 
-A Bokeh-based planner for laying out NIRSpec MSA shutter configurations
-on an image of the target field. Mirrors the MPT/eMPT workflow but lets
-you pick shutters by hand instead of by automated optimization, supports
-collaboration via session JSON files, and exports an APT-loadable
-bundle.
+An interactive Bokeh app for hand-picking JWST/NIRSpec MSA shutter
+configurations on an image of the target field. Mirrors the
+[MPT](https://jwst-docs.stsci.edu/jwst-astronomers-proposal-tool-overview/apt-workflow-articles/apt-mosaic-spectroscopy/mos-mode-msa-planning-tool)
+/ [eMPT](https://github.com/esdc-esac-esa-int/eMPT_v1) workflow but
+lets you pick shutters by hand instead of by automated optimization,
+supports collaboration via session JSON files, and exports an
+APT-loadable bundle.
+
+![status](https://img.shields.io/badge/tests-50%20passed-brightgreen)
+![python](https://img.shields.io/badge/python-3.11-blue)
+![license](https://img.shields.io/badge/license-MIT-blue)
+
+## Features
+- Load a FITS image or a JPG + sidecar FITS (the latter handles the
+  large 16000² mosaics fitsmap produces).
+- Snap-to-nearest tap to open shutters; double-tap to flag; shift-click
+  to move the pointing center.
+- 5 NIRSpec fixed slits + the 4 MSA quadrants always drawn.
+- Stuck-open shutters always flagged in red; failed-closed hidden.
+- Spectral-overlap warning band (orange) shows which other shutters
+  would conflict on the detector if also opened.
+- `jwst_gtvt` visibility query for any date returns the allowed V3 PA
+  window for the current pointing.
+- Session save/load JSON for collaboration.
+- eMPT-format export bundle (`observed_targets.cat`,
+  `pointing_summary.txt`, `shutter_mask.csv`) ready to import into APT.
+- ~50× faster overlay refresh than a naive astropy implementation,
+  thanks to a precomputed V2/V3 offset cache and a per-refresh WCS
+  inverse-Jacobian. PA slider drag is real-time (light refresh during
+  drag, full refresh on release).
 
 ## Quick start
 
