@@ -55,8 +55,9 @@ drawn as yellow circles, clipped to the visible image.
   `jwst_gtvt`'s ephemeris and reports the allowed V3PA window for the
   requested date. First call takes ~5–8 s.
 
-The lime cross on the figure is a **draggable pointing handle**:
-drag-and-drop to move the pointing center on sky.
+The lime cross on the figure is the **pointing center marker**.
+**Shift-click anywhere on the image** to move the pointing center to
+that sky location; RA/Dec inputs update and the MSA overlay follows.
 
 ### 4. Display layers
 
@@ -127,11 +128,12 @@ in the eMPT repo.
 
 - **Wheel**: zoom both axes equally (locked aspect, scrolling on an
   axis does not zoom that axis alone).
-- **Default drag**: moves the lime pointing handle. To pan, click the
-  pan icon in the right-edge toolbar.
+- **Drag**: pan the view.
 - **Box zoom**: select box-zoom icon, then drag a rectangle.
 - **Reset**: toolbar reset icon.
-- **Tap** (single click): snap to nearest shutter / target (see above).
+- **Click** (no modifier): snap to nearest shutter / target (see above).
+- **Shift-click**: move pointing center to the click location.
+- **Double-click**: toggle cyan highlight on the nearest shutter.
 
 ## Architecture
 

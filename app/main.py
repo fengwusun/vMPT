@@ -32,7 +32,6 @@ from bokeh.models import (
     Div,
     FileInput,
     HoverTool,
-    PointDrawTool,
     Select,
     Slider,
     TapTool,
@@ -180,7 +179,7 @@ help_div = Div(
 <ul style='margin:4px 0 8px 18px'>
   <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3PA + 138.575° (mod 360).</li>
   <li>Click <b>Compute allowed V3 PA</b> after entering a date to query jwst_gtvt.</li>
-  <li>Drag the <span style='color:lime;font-weight:bold'>lime cross</span> to move the pointing center.</li>
+  <li><b>Shift+click</b> anywhere on the image to move the pointing center there. The <span style='color:lime;font-weight:bold'>lime cross</span> shows the current pointing.</li>
 </ul>
 <b>4. Hand-pick shutters</b>
 <ul style='margin:4px 0 8px 18px'>
@@ -205,7 +204,7 @@ help_div = Div(
 <b>Interactions</b>
 <ul style='margin:4px 0 8px 18px'>
   <li><b>Wheel</b>: zoom both axes equally.</li>
-  <li><b>Drag</b> (default): move the lime cross. Pan: select pan icon in the toolbar.</li>
+  <li><b>Drag</b>: pan the view.</li>
   <li><b>Box zoom</b>: select box-zoom icon, then drag.</li>
   <li><b>Reset</b>: toolbar reset icon.</li>
 </ul>
@@ -323,12 +322,10 @@ pointing_handle_glyph = fig.scatter(
     size=18, marker="cross", line_color="lime", fill_color="lime",
     line_width=3, fill_alpha=0.6,
 )
-# Drag tool for the pointing handle (only this renderer is draggable)
-point_draw_tool = PointDrawTool(renderers=[pointing_handle_glyph], add=False, drag=True)
-fig.add_tools(point_draw_tool)
-# Make handle-drag the default drag interaction. Pan is still available via
-# the pan icon in the toolbar.
-fig.toolbar.active_drag = point_draw_tool
+# The lime cross is a *visual* indicator of the pointing center only.
+# To move the pointing center, shift-click anywhere on the image — see
+# on_tap() below. (Bokeh's PointDrawTool drag interaction was unreliable
+# across versions, so we use a click-with-modifier instead.)
 
 fig.add_tools(HoverTool(
     renderers=[bg_shutters_glyph],
@@ -626,11 +623,7 @@ def refresh_overlays() -> None:
     src_fixed_slits.data = _fixed_slit_polygons(fiducial, pa_v3, wcs)
     # Pointing handle at the image-pixel of (RA, Dec)
     fid_x, fid_y = _world_to_pixel(fiducial, wcs)
-    state["_mute_drag_cb"] = True
-    try:
-        src_pointing_handle.data = dict(x=[float(fid_x)], y=[float(fid_y)])
-    finally:
-        state["_mute_drag_cb"] = False
+    src_pointing_handle.data = dict(x=[float(fid_x)], y=[float(fid_y)])
 
     # Targets
     show_targets = 3 in layers_box.active
@@ -1057,14 +1050,32 @@ def on_tap(event):
     """Unified single-tap handler.
 
     Snap-to-nearest model so the user doesn't have to land precisely on a
-    polygon. If the tap lands close to a target marker, open a slitlet for
-    that target. Otherwise snap to the nearest shutter and toggle.
+    polygon. Modes:
+      - Shift+click: move the pointing center to the click location.
+      - Click near a yellow target: open a 3-shutter slitlet there.
+      - Click anywhere else: snap to the nearest shutter and toggle it.
     """
     img = state["image"]
     fiducial = _pointing_skycoord()
     if img is None or fiducial is None:
         return
     x_data, y_data = float(event.x), float(event.y)
+
+    # 0) Shift-click → move pointing center. Bokeh 3.x: event.modifiers is a
+    # KeyModifiers model with .shift attribute; older versions exposed it as
+    # a dict or as a top-level event attribute.
+    mods = getattr(event, "modifiers", None)
+    shift_held = False
+    if mods is not None:
+        if isinstance(mods, dict):
+            shift_held = bool(mods.get("shift"))
+        else:
+            shift_held = bool(getattr(mods, "shift", False))
+    if not shift_held:
+        shift_held = bool(getattr(event, "shift", False))
+    if shift_held:
+        _move_pointing_to(x_data, y_data)
+        return
 
     # 1) Near a target marker? Open a slitlet for it.
     tx = np.asarray(src_targets.data.get("x") or [], dtype=float)
@@ -1214,37 +1225,22 @@ snap_box.on_change("active", on_snap)
 # ---------------------------------------------------------------------------
 
 
-def on_pointing_handle_drag(attr, old, new):
-    """Fires when the user drags the lime cross via PointDrawTool.
-
-    Detect "real" user drags by comparing the new pixel position to what the
-    current RA/Dec would imply; only act if the displacement is meaningful
-    (≥1 pixel). This avoids feedback when refresh_overlays repositions the
-    handle programmatically.
-    """
+def _move_pointing_to(x_data: float, y_data: float) -> None:
+    """Move the pointing center to the given image-pixel position."""
     img = state["image"]
     if img is None:
         return
-    xs, ys = new.get("x", []), new.get("y", [])
-    if not xs or not ys:
-        return
-    fiducial = _pointing_skycoord()
-    if fiducial is not None:
-        try:
-            ex, ey = _world_to_pixel(fiducial, img.wcs)
-            if abs(float(xs[0]) - float(ex)) < 1.0 and abs(float(ys[0]) - float(ey)) < 1.0:
-                return  # programmatic update from refresh_overlays — ignore
-        except Exception:  # noqa: BLE001
-            pass
     try:
-        sky = img.wcs.pixel_to_world(float(xs[0]), float(ys[0]))
+        sky = img.wcs.pixel_to_world(float(x_data), float(y_data))
         ra_input.value = f"{sky.ra.deg:.6f}"
         dec_input.value = f"{sky.dec.deg:.6f}"
+        _set_status(
+            f"Pointing → RA={sky.ra.deg:.5f}°, Dec={sky.dec.deg:.5f}°.", "ok",
+        )
     except Exception as e:  # noqa: BLE001
-        _set_status(f"Drag-pointing update failed: {e}", "err")
+        _set_status(f"Move-pointing failed: {e}", "err")
 
 
-src_pointing_handle.on_change("data", on_pointing_handle_drag)
 
 
 def on_double_tap(event):
