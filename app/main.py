@@ -21,7 +21,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
-from bokeh.events import DoubleTap
+from bokeh.events import DoubleTap, Tap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.models import (
@@ -156,6 +156,72 @@ loading_banner = Div(
                 **{"border-radius": "4px", "font-weight": "bold"}),
 )
 
+# Quick-help panel rendered on the right side of the figure.
+help_toggle_btn = Button(label="Hide help", button_type="default", width=110)
+help_div = Div(
+    width=320,
+    styles=dict(
+        background="#f8f9fa", color="#212529",
+        padding="10px 14px", border="1px solid #dee2e6",
+        **{"border-radius": "6px"},
+    ),
+    text="""
+<h3 style='margin-top:0'>Quick guide</h3>
+<b>1. Load image</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li>Paste a local <b>FITS path</b>, or</li>
+  <li>Paste a <b>JPG path</b> + <b>sidecar FITS</b> path (sidecar supplies WCS).</li>
+</ul>
+<b>2. Optional: target catalog</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li>CSV/ASCII/FITS with at least <code>ID, RA, DEC</code>.</li>
+</ul>
+<b>3. Set pointing</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3PA + 138.575° (mod 360).</li>
+  <li>Click <b>Compute allowed V3 PA</b> after entering a date to query jwst_gtvt.</li>
+  <li>Drag the <span style='color:lime;font-weight:bold'>lime cross</span> to move the pointing center.</li>
+</ul>
+<b>4. Hand-pick shutters</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li><b>Click anywhere</b> on the image → snaps to the nearest shutter and toggles it open.
+  Click near a yellow target → opens a 3-shutter slitlet on that target.</li>
+  <li><b>Double-click</b> a shutter → toggles its <span style='color:cyan;font-weight:bold;background:#222;padding:0 4px'>cyan highlight</span>
+  (visual flag, not exported).</li>
+  <li><span style='color:#ff3333;font-weight:bold'>Open shutters</span> are red-filled.
+  <span style='color:#ff2222;font-weight:bold'>Stuck-open</span> shutters: red edge.
+  Failed-closed shutters are hidden.</li>
+  <li><span style='color:orange;font-weight:bold'>Orange-tinted</span> shutters share an s-row with
+  an open shutter — their spectra would overlap on the detector.</li>
+  <li><span style='color:gold;font-weight:bold'>Gold</span> polygons are the 5 NIRSpec fixed slits.</li>
+</ul>
+<b>5. Export</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li>Set the export dir, click <b>Export eMPT bundle</b>.</li>
+  <li>Produces: <code>observed_targets.cat</code> (APT source catalog),
+  <code>pointing_summary.txt</code> (PA values to copy-paste), and
+  <code>shutter_mask.csv</code> (per-nod MSA mask, format byte-compatible with eMPT).</li>
+</ul>
+<b>Interactions</b>
+<ul style='margin:4px 0 8px 18px'>
+  <li><b>Wheel</b>: zoom both axes equally.</li>
+  <li><b>Drag</b> (default): move the lime cross. Pan: select pan icon in the toolbar.</li>
+  <li><b>Box zoom</b>: select box-zoom icon, then drag.</li>
+  <li><b>Reset</b>: toolbar reset icon.</li>
+</ul>
+<p style='margin:4px 0'>See <code>README.md</code> in the project for the full reference.</p>
+""",
+)
+
+
+def on_help_toggle():
+    help_div.visible = not help_div.visible
+    help_toggle_btn.label = "Hide help" if help_div.visible else "Show help"
+
+
+help_toggle_btn.on_click(on_help_toggle)
+help_panel = column(help_toggle_btn, help_div, width=340)
+
 disperser_select = Select(title="Disperser", options=DISPERSERS, value="PRISM")
 filter_select = Select(title="Filter", options=FILTER_OPTIONS, value="CLEAR")
 
@@ -188,6 +254,7 @@ src_open_shutters = ColumnDataSource(
     data=dict(xs=[], ys=[], q=[], s=[], d=[], target=[], lam_blue=[], lam_red=[])
 )
 src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
+src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
 src_targets = ColumnDataSource(data=dict(x=[], y=[], id=[], ra=[], dec=[], pr=[]))
 src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
@@ -221,6 +288,14 @@ stuck_open_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_stuck_open,
     line_color="#ff2222", line_alpha=0.9, line_width=1.0,
     fill_color="#ff2222", fill_alpha=0.10,
+)
+# Spectral-overlap shutters: any operable shutter in the same s row of the
+# same quadrant as a currently-open shutter. If opened, their dispersed
+# spectra would overlap on the detector (MPT-style spectral conflict).
+spec_overlap_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_spec_overlap,
+    line_color="orange", line_alpha=0.7, line_width=0.8,
+    fill_color="orange", fill_alpha=0.10,
 )
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
@@ -525,6 +600,23 @@ def refresh_overlays() -> None:
         src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
     # Stuck-open shutters always shown (red), regardless of the toggle
     src_stuck_open.data = _shutter_polys_to_cds(polys, only_reason=2)
+    # Spectral-overlap layer: highlight operable shutters at the same s row
+    # (same quadrant) as any currently-open shutter — those are the ones
+    # whose spectra would overlap with the open shutter on the detector.
+    overlap_keys: set[tuple[int, int, int]] = set()
+    open_keys = set(state["open_shutters"].keys())
+    if open_keys:
+        rows_per_q: dict[int, set[int]] = {}
+        for q, s, d in open_keys:
+            rows_per_q.setdefault(q, set()).add(s)
+        for (q, s, d), p in polys.items():
+            if p["reason"] != 0:
+                continue
+            if s in rows_per_q.get(q, ()):
+                if (q, s, d) not in open_keys:
+                    overlap_keys.add((q, s, d))
+    overlap_polys = {k: polys[k] for k in overlap_keys if k in polys}
+    src_spec_overlap.data = _shutter_polys_to_cds(overlap_polys)
 
     # Open shutters (always shown)
     src_open_shutters.data = _open_shutters_cds_data()
@@ -925,69 +1017,25 @@ def _add_slitlet(q: int, s_center: int, d: int, target_id: str | None) -> int:
     return added
 
 
-def on_target_tap(attr, old, new):
-    if not new:
-        return
-    idx = int(new[0])
-    src_targets.selected.indices = []  # clear selection so the next tap re-fires
-    if idx >= len(src_targets.data["x"]):
-        return
-    img = state["image"]
-    fiducial = _pointing_skycoord()
-    if img is None or fiducial is None:
-        return
-    px = src_targets.data["x"][idx]
-    py = src_targets.data["y"][idx]
-    tgt_id = src_targets.data["id"][idx]
-    sky_target = img.wcs.pixel_to_world(px, py)
-    v2, v3 = _sky_to_v2v3(sky_target, fiducial, state["pa_v3"])
-    nearest = _nearest_shutter(v2, v3, require_operable=state["snap_to_operable"])
-    if nearest is None:
-        _set_status(f"Target {tgt_id}: no operable shutter nearby.", "warn")
-        return
-    q, s, d = nearest
-    _push_history()
-    n = _add_slitlet(q, s, d, target_id=str(tgt_id))
-    _set_status(f"Target {tgt_id} → slitlet ({q},{s},{d}), {n} shutters opened.", "ok")
-    refresh_overlays()
+def _data_distance_for_screen_pixels(n_pix: float = 15.0) -> float:
+    """Convert a screen-pixel distance to a rough data-coord distance at the
+    current zoom level, for proximity tests. Uses the x-range / fig.width."""
+    try:
+        rng = float(fig.x_range.end) - float(fig.x_range.start)
+        w = max(int(getattr(fig, "width", 900) or 900), 1)
+        return n_pix * (rng / w)
+    except Exception:  # noqa: BLE001
+        return 30.0
 
 
-def on_bg_shutter_tap(attr, old, new):
-    if not new:
-        return
-    idx = int(new[0])
-    src_bg_shutters.selected.indices = []
-    if idx >= len(src_bg_shutters.data["q"]):
-        return
-    q = int(src_bg_shutters.data["q"][idx])
-    s = int(src_bg_shutters.data["s"][idx])
-    d = int(src_bg_shutters.data["d"][idx])
-    key = (q, s, d)
-    _push_history()
-    if key in state["open_shutters"]:
-        del state["open_shutters"][key]
-        _set_status(f"Closed shutter ({q},{s},{d}).", "ok")
-    else:
-        state["open_shutters"][key] = OpenShutter(q=q, s=s, d=d, role="manual")
-        _set_status(f"Opened shutter ({q},{s},{d}) manually.", "ok")
-    refresh_overlays()
-
-
-def on_open_shutter_tap(attr, old, new):
-    if not new:
-        return
-    idx = int(new[0])
-    src_open_shutters.selected.indices = []
-    if idx >= len(src_open_shutters.data["q"]):
-        return
-    q = int(src_open_shutters.data["q"][idx])
-    s = int(src_open_shutters.data["s"][idx])
-    d = int(src_open_shutters.data["d"][idx])
+def _open_or_toggle_slitlet_at(q: int, s: int, d: int, target_id: str | None) -> None:
+    """Open a slitlet centered at (q, s, d). If it's already open (same key),
+    remove it plus its slitlet siblings instead.
+    """
     key = (q, s, d)
     _push_history()
     if key in state["open_shutters"]:
         sh = state["open_shutters"].pop(key)
-        # Remove slitlet siblings (same target_id, same q, d, contiguous s)
         if sh.target_id:
             for k in list(state["open_shutters"].keys()):
                 other = state["open_shutters"][k]
@@ -995,8 +1043,62 @@ def on_open_shutter_tap(attr, old, new):
                         and other.q == q and other.d == d
                         and abs(other.s - s) <= state["slitlet_height"] // 2):
                     del state["open_shutters"][k]
-        _set_status(f"Removed shutter ({q},{s},{d}) and slitlet siblings.", "ok")
+        _set_status(f"Closed shutter ({q},{s},{d}) and slitlet siblings.", "ok")
+    elif target_id is not None:
+        n = _add_slitlet(q, s, d, target_id=target_id)
+        _set_status(f"Target {target_id} → slitlet ({q},{s},{d}), {n} shutters opened.", "ok")
+    else:
+        state["open_shutters"][key] = OpenShutter(q=q, s=s, d=d, role="manual")
+        _set_status(f"Opened shutter ({q},{s},{d}) manually.", "ok")
     refresh_overlays()
+
+
+def on_tap(event):
+    """Unified single-tap handler.
+
+    Snap-to-nearest model so the user doesn't have to land precisely on a
+    polygon. If the tap lands close to a target marker, open a slitlet for
+    that target. Otherwise snap to the nearest shutter and toggle.
+    """
+    img = state["image"]
+    fiducial = _pointing_skycoord()
+    if img is None or fiducial is None:
+        return
+    x_data, y_data = float(event.x), float(event.y)
+
+    # 1) Near a target marker? Open a slitlet for it.
+    tx = np.asarray(src_targets.data.get("x") or [], dtype=float)
+    ty = np.asarray(src_targets.data.get("y") or [], dtype=float)
+    if tx.size > 0:
+        d2 = (tx - x_data) ** 2 + (ty - y_data) ** 2
+        i = int(np.argmin(d2))
+        thr = _data_distance_for_screen_pixels(15.0)
+        if d2[i] < thr * thr:
+            tgt_id = str(src_targets.data["id"][i])
+            try:
+                sky_target = img.wcs.pixel_to_world(float(tx[i]), float(ty[i]))
+                v2, v3 = _sky_to_v2v3(sky_target, fiducial, state["pa_v3"])
+                nearest = _nearest_shutter(v2, v3, require_operable=state["snap_to_operable"])
+            except Exception:  # noqa: BLE001
+                nearest = None
+            if nearest is None:
+                _set_status(f"Target {tgt_id}: no operable shutter nearby.", "warn")
+                return
+            q, s, d = nearest
+            _open_or_toggle_slitlet_at(q, s, d, target_id=tgt_id)
+            return
+
+    # 2) Otherwise: snap to nearest shutter and toggle it manually.
+    try:
+        sky = img.wcs.pixel_to_world(x_data, y_data)
+        v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
+        nearest = _nearest_shutter(v2, v3, require_operable=False)
+    except Exception:  # noqa: BLE001
+        return
+    if nearest is None:
+        return
+    q, s, d = nearest
+    _open_or_toggle_slitlet_at(q, s, d, target_id=None)
 
 
 def on_undo():
@@ -1100,9 +1202,7 @@ def on_export():
 
 
 # Tap wiring
-src_targets.selected.on_change("indices", on_target_tap)
-src_bg_shutters.selected.on_change("indices", on_bg_shutter_tap)
-src_open_shutters.selected.on_change("indices", on_open_shutter_tap)
+fig.on_event(Tap, on_tap)
 undo_btn.on_click(on_undo)
 clear_btn.on_click(on_clear)
 export_btn.on_click(on_export)
@@ -1320,5 +1420,5 @@ sidebar = column(
     width=340,
 )
 
-curdoc().add_root(row(sidebar, fig))
+curdoc().add_root(row(sidebar, fig, help_panel))
 curdoc().title = "NIRSpec MSA planner"
