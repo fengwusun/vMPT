@@ -226,8 +226,11 @@ filter_select = Select(title="Filter", options=FILTER_OPTIONS, value="CLEAR")
 
 layers_box = CheckboxGroup(
     labels=["Show MSA outline", "Show operable shutters", "Apply operability", "Show targets"],
-    active=[0, 1, 2, 3],
+    # Operable shutters OFF by default — drawing 180k+ polygons is slow.
+    # User can toggle on once zoomed in to a region of interest.
+    active=[0, 2, 3],
 )
+MAX_OPERABLE_RENDER = 8000  # hard cap to keep redraws fast even when enabled
 slitlet_select = Select(
     title="Slitlet height", options=["1", "3", "5"], value="3",
 )
@@ -402,6 +405,48 @@ def _world_to_pixel(coords: SkyCoord, wcs: WCS) -> tuple[np.ndarray, np.ndarray]
     return np.asarray(x), np.asarray(y)
 
 
+# --- Vectorized geometry cache --------------------------------------------
+# Precomputed once at module load. Shutter centers in V2/V3 offset form
+# (relative to MSA_V2_REF, MSA_V3_REF). A single corner template (4 x 2) holds
+# the shutter-corner offsets in the V2/V3 frame (already rotated by the 138.5°
+# MSA tilt — same for every shutter), so per-shutter corners are just
+# (v2_off, v3_off) + template.
+_V2_OFFSETS_ALL = V2_MSA.reshape(-1) - MSA_V2_REF        # (249660,)
+_V3_OFFSETS_ALL = V3_MSA.reshape(-1) - MSA_V3_REF        # (249660,)
+_SHUTTER_CORNER_TEMPLATE = shutter_corners_v2v3(0.0, 0.0)  # (4, 2) in V2/V3
+
+
+def _compute_wcs_jacobian(wcs: WCS, fx: float, fy: float) -> np.ndarray:
+    """Return the inverse Jacobian mapping (Δlon_arcsec, Δlat_arcsec) →
+    (Δpix_x, Δpix_y) evaluated at pixel (fx, fy). Linear approximation; for
+    fields up to ~10 arcmin it agrees with SkyCoord/WCS to sub-pixel."""
+    c0 = wcs.pixel_to_world(fx, fy)
+    c1 = wcs.pixel_to_world(fx + 1, fy)
+    c2 = wcs.pixel_to_world(fx, fy + 1)
+    dlon_dx = (c1.ra - c0.ra).to(u.arcsec).value
+    dlat_dx = (c1.dec - c0.dec).to(u.arcsec).value
+    dlon_dy = (c2.ra - c0.ra).to(u.arcsec).value
+    dlat_dy = (c2.dec - c0.dec).to(u.arcsec).value
+    # Forward J: pixel offset → sky offset; invert to go sky → pixel
+    J = np.array([[dlon_dx, dlon_dy], [dlat_dx, dlat_dy]])
+    return np.linalg.inv(J)
+
+
+def _project_v2v3_offsets_to_pixel(
+    v2_offsets: np.ndarray,
+    v3_offsets: np.ndarray,
+    pa_v3: float,
+    fid_pix: tuple[float, float],
+    jinv: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized: rotate V2/V3 offsets by PA, then map to pixel via jinv."""
+    R = rot_matrix(pa_v3)
+    offsets = np.stack([v2_offsets, v3_offsets], axis=-1)  # (..., 2)
+    sky = offsets @ R                                       # (..., 2) lon/lat arcsec
+    pix = sky @ jinv.T                                      # (..., 2) pixel offsets
+    return fid_pix[0] + pix[..., 0], fid_pix[1] + pix[..., 1]
+
+
 def _pointing_skycoord() -> SkyCoord | None:
     try:
         ra = float(ra_input.value)
@@ -411,88 +456,85 @@ def _pointing_skycoord() -> SkyCoord | None:
         return None
 
 
-def _shutter_polygons_in_view(
-    fiducial: SkyCoord, pa_v3: float, wcs: WCS,
-    view_bbox_pix: tuple[float, float, float, float],
+_FLAT_REASON = REASON.reshape(-1)
+
+
+def _project_indices_to_cds(
+    idx: np.ndarray, pa_v3: float, fid_pix: tuple[float, float],
+    jinv: np.ndarray,
 ) -> dict:
-    """Compute shutter polygons in image-pixel coords for shutters in view.
-
-    Returns dict keyed by (q, s, d) -> {'xs', 'ys', 'reason'}. Always drops
-    failed-closed shutters (reason==1) — they're shown as "not present".
-    Failed-open (reason==2) shutters are kept so callers can color them red.
-    Operable shutters (reason==0) are kept too.
-    """
-    all_v2 = V2_MSA.reshape(-1)
-    all_v3 = V3_MSA.reshape(-1)
-    centers_v2v3 = np.stack([all_v2, all_v3], axis=1)
-    sky_centers = v2v3_to_radec(fiducial, pa_v3, centers_v2v3)
-    px, py = _world_to_pixel(sky_centers, wcs)
-
-    xmin, xmax, ymin, ymax = view_bbox_pix
-    margin = 50  # pixels
-    in_view = (
-        (px >= xmin - margin)
-        & (px <= xmax + margin)
-        & (py >= ymin - margin)
-        & (py <= ymax + margin)
-    )
-    flat_reason = REASON.reshape(-1)
-    # Always exclude failed-closed (reason == 1)
-    keep = in_view & (flat_reason != 1)
-    idx = np.where(keep)[0]
+    """Given a numpy int array of flat shutter indices, return a CDS-shape
+    dict {xs, ys, q, s, d}. Vectorized: no per-shutter Python loop."""
     if idx.size == 0:
-        return {}
-
-    sel_v2 = all_v2[idx]
-    sel_v3 = all_v3[idx]
+        return dict(xs=[], ys=[], q=[], s=[], d=[])
     M = idx.size
-    corners_v2v3 = np.empty((M * 4, 2), dtype=np.float64)
-    for k, (v2c, v3c) in enumerate(zip(sel_v2, sel_v3)):
-        corners_v2v3[k * 4 : k * 4 + 4] = shutter_corners_v2v3(v2c, v3c)
-    sky_corners = v2v3_to_radec(fiducial, pa_v3, corners_v2v3)
-    cx, cy = _world_to_pixel(sky_corners, wcs)
+    v2_centers = _V2_OFFSETS_ALL[idx]
+    v3_centers = _V3_OFFSETS_ALL[idx]
+    v2_corners = v2_centers[:, None] + _SHUTTER_CORNER_TEMPLATE[None, :, 0]
+    v3_corners = v3_centers[:, None] + _SHUTTER_CORNER_TEMPLATE[None, :, 1]
+    cx, cy = _project_v2v3_offsets_to_pixel(
+        v2_corners.ravel(), v3_corners.ravel(), pa_v3, fid_pix, jinv,
+    )
     cx = cx.reshape(M, 4)
     cy = cy.reshape(M, 4)
+    qs = (idx // (171 * 365)) + 1
+    ss = ((idx % (171 * 365)) // 365) + 1
+    ds = (idx % 365) + 1
+    # MultiPolygons expects xs/ys as list-of-list-of-list. Build via list
+    # comprehensions over the M rows; this is the only Python loop now and
+    # it's O(M) with no dict lookups.
+    xs_list = [[[cx[k].tolist()]] for k in range(M)]
+    ys_list = [[[cy[k].tolist()]] for k in range(M)]
+    return dict(
+        xs=xs_list, ys=ys_list,
+        q=qs.astype(int).tolist(),
+        s=ss.astype(int).tolist(),
+        d=ds.astype(int).tolist(),
+    )
 
-    qs = idx // (171 * 365)
-    rem = idx % (171 * 365)
-    ss = rem // 365
-    ds = rem % 365
 
-    out = {}
-    for k in range(M):
-        out[(int(qs[k]) + 1, int(ss[k]) + 1, int(ds[k]) + 1)] = {
-            "xs": cx[k].tolist(),
-            "ys": cy[k].tolist(),
-            "reason": int(flat_reason[idx[k]]),
-        }
-    return out
+def _in_view_mask(pa_v3: float, fid_pix: tuple[float, float],
+                  jinv: np.ndarray,
+                  view_bbox_pix: tuple[float, float, float, float]) -> np.ndarray:
+    """Bool mask over all 250k shutter centers — True if inside the view bbox
+    plus a 50-pixel margin."""
+    px, py = _project_v2v3_offsets_to_pixel(
+        _V2_OFFSETS_ALL, _V3_OFFSETS_ALL, pa_v3, fid_pix, jinv,
+    )
+    xmin, xmax, ymin, ymax = view_bbox_pix
+    margin = 50.0
+    return (
+        (px >= xmin - margin) & (px <= xmax + margin)
+        & (py >= ymin - margin) & (py <= ymax + margin)
+    )
 
 
-def _fixed_slit_polygons(fiducial: SkyCoord, pa_v3: float, wcs: WCS) -> dict:
+def _fixed_slit_polygons(pa_v3: float, fid_pix: tuple[float, float],
+                         jinv: np.ndarray) -> dict:
     """Per-slit polygons in image-pixel coords for the 5 NIRSpec fixed slits."""
     xs_all, ys_all, names = [], [], []
     for name, corners_v2v3 in fixed_slit_corners_v2v3().items():
-        sky = v2v3_to_radec(fiducial, pa_v3, corners_v2v3)
-        x, y = _world_to_pixel(sky, wcs)
+        v2_off = corners_v2v3[:, 0] - MSA_V2_REF
+        v3_off = corners_v2v3[:, 1] - MSA_V3_REF
+        x, y = _project_v2v3_offsets_to_pixel(v2_off, v3_off, pa_v3, fid_pix, jinv)
         xs_all.append([[x.tolist()]])
         ys_all.append([[y.tolist()]])
         names.append(name.replace("NRS_", "").replace("_SLIT", ""))
     return dict(xs=xs_all, ys=ys_all, name=names)
 
 
-def _msa_outline_polygons(fiducial: SkyCoord, pa_v3: float, wcs: WCS) -> dict:
+def _msa_outline_polygons(pa_v3: float, fid_pix: tuple[float, float],
+                          jinv: np.ndarray) -> dict:
     """Trace each quadrant outline (using its 4 corner shutters)."""
     xs_all, ys_all = [], []
+    rows = [0, 0, 170, 170]
+    cols = [0, 364, 364, 0]
     for q in range(4):
-        # 4 corners of the quadrant in V2/V3 (rows {0,170}, cols {0,364})
-        rows = [0, 0, 170, 170]
-        cols = [0, 364, 364, 0]
         v2c = np.array([V2_MSA[q, r, c] for r, c in zip(rows, cols)])
         v3c = np.array([V3_MSA[q, r, c] for r, c in zip(rows, cols)])
-        corners = np.stack([v2c, v3c], axis=1)
-        sky = v2v3_to_radec(fiducial, pa_v3, corners)
-        x, y = _world_to_pixel(sky, wcs)
+        x, y = _project_v2v3_offsets_to_pixel(
+            v2c - MSA_V2_REF, v3c - MSA_V3_REF, pa_v3, fid_pix, jinv,
+        )
         xs_all.append([[x.tolist()]])
         ys_all.append([[y.tolist()]])
     return dict(xs=xs_all, ys=ys_all)
@@ -516,45 +558,60 @@ def _shutter_polys_to_cds(polys: dict, only_reason: int | None = None) -> dict:
     return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds)
 
 
-def _highlighted_polygons() -> dict:
-    """Polygons for shutters in state['highlighted'], at current pointing."""
-    img = state["image"]
-    fiducial = _pointing_skycoord()
-    if img is None or fiducial is None or not state["highlighted"]:
+def _polygons_for_shutter_keys(
+    keys, pa_v3: float, fid_pix: tuple[float, float], jinv: np.ndarray,
+) -> tuple[list, list, list, list, list]:
+    """Vectorized: produce (xs, ys, q, s, d) lists for an iterable of (q,s,d).
+    Empty inputs return empty lists.
+    """
+    keys = list(keys)
+    if not keys:
+        return [], [], [], [], []
+    qs = np.array([k[0] for k in keys], dtype=np.int32)
+    ss = np.array([k[1] for k in keys], dtype=np.int32)
+    ds = np.array([k[2] for k in keys], dtype=np.int32)
+    v2_centers = V2_MSA[qs - 1, ss - 1, ds - 1] - MSA_V2_REF
+    v3_centers = V3_MSA[qs - 1, ss - 1, ds - 1] - MSA_V3_REF
+    # Broadcast: (M, 4) per axis after adding corner template
+    v2_corners = v2_centers[:, None] + _SHUTTER_CORNER_TEMPLATE[None, :, 0]
+    v3_corners = v3_centers[:, None] + _SHUTTER_CORNER_TEMPLATE[None, :, 1]
+    cx, cy = _project_v2v3_offsets_to_pixel(
+        v2_corners.ravel(), v3_corners.ravel(), pa_v3, fid_pix, jinv,
+    )
+    M = len(keys)
+    cx = cx.reshape(M, 4)
+    cy = cy.reshape(M, 4)
+    xs = [[[cx[k].tolist()]] for k in range(M)]
+    ys = [[[cy[k].tolist()]] for k in range(M)]
+    return xs, ys, qs.tolist(), ss.tolist(), ds.tolist()
+
+
+def _highlighted_polygons(pa_v3: float, fid_pix: tuple[float, float],
+                          jinv: np.ndarray) -> dict:
+    """Polygons for shutters in state['highlighted'], vectorized."""
+    if not state["highlighted"]:
         return dict(xs=[], ys=[], q=[], s=[], d=[])
-    xs, ys, qs, ss, ds = [], [], [], [], []
-    for (q, s, d) in state["highlighted"]:
-        v2c = V2_MSA[q - 1, s - 1, d - 1]
-        v3c = V3_MSA[q - 1, s - 1, d - 1]
-        corners_v2v3 = shutter_corners_v2v3(v2c, v3c)
-        sky = v2v3_to_radec(fiducial, pa_v3=state["pa_v3"], corners_v2v3=corners_v2v3)
-        cx, cy = _world_to_pixel(sky, img.wcs)
-        xs.append([[cx.tolist()]])
-        ys.append([[cy.tolist()]])
-        qs.append(q); ss.append(s); ds.append(d)
+    xs, ys, qs, ss, ds = _polygons_for_shutter_keys(
+        state["highlighted"], pa_v3, fid_pix, jinv,
+    )
     return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds)
 
 
-def _open_shutters_cds_data() -> dict:
-    """Recompute open-shutter polygons for the current pointing."""
-    img = state["image"]
-    fiducial = _pointing_skycoord()
-    if img is None or fiducial is None or not state["open_shutters"]:
+def _open_shutters_cds_data(pa_v3: float, fid_pix: tuple[float, float],
+                            jinv: np.ndarray) -> dict:
+    """Open-shutter polygons + per-shutter target ID and wavelength cutoffs."""
+    if not state["open_shutters"]:
         return dict(xs=[], ys=[], q=[], s=[], d=[], target=[], lam_blue=[], lam_red=[])
-
-    pa_v3 = state["pa_v3"]
-    wcs = img.wcs
-    xs, ys, qs, ss, ds, tgt, lam_b, lam_r = [], [], [], [], [], [], [], []
-    for (q, s, d), sh in state["open_shutters"].items():
-        v2c = V2_MSA[q - 1, s - 1, d - 1]
-        v3c = V3_MSA[q - 1, s - 1, d - 1]
-        corners_v2v3 = shutter_corners_v2v3(v2c, v3c)
-        sky = v2v3_to_radec(fiducial, pa_v3, corners_v2v3)
-        cx, cy = _world_to_pixel(sky, wcs)
-        xs.append([[cx.tolist()]])
-        ys.append([[cy.tolist()]])
-        qs.append(q); ss.append(s); ds.append(d)
+    keys = list(state["open_shutters"].keys())
+    xs, ys, qs, ss, ds = _polygons_for_shutter_keys(keys, pa_v3, fid_pix, jinv)
+    tgt: list[str] = []
+    lam_b: list[float] = []
+    lam_r: list[float] = []
+    for (q, s, d) in keys:
+        sh = state["open_shutters"][(q, s, d)]
         tgt.append(str(sh.target_id) if sh.target_id is not None else "")
+        v2c = float(V2_MSA[q - 1, s - 1, d - 1])
+        v3c = float(V3_MSA[q - 1, s - 1, d - 1])
         cut = cutoffs(v2c, v3c, state["disperser"], state["filter"])
         lam_b.append(cut.get("lam_blue") if cut and cut.get("lam_blue") is not None else float("nan"))
         lam_r.append(cut.get("lam_red") if cut and cut.get("lam_red") is not None else float("nan"))
@@ -580,50 +637,81 @@ def refresh_overlays() -> None:
     wcs = img.wcs
     H, W = img.shape
 
+    # Compute the pointing pixel and the local WCS inverse-Jacobian once;
+    # all overlay polygons reuse them via vectorized math.
+    fid_x, fid_y = _world_to_pixel(fiducial, wcs)
+    fid_pix = (float(fid_x), float(fid_y))
+    jinv = _compute_wcs_jacobian(wcs, fid_pix[0], fid_pix[1])
+
     # MSA outline
     show_outline = 0 in layers_box.active
     if show_outline:
-        src_msa_outline.data = _msa_outline_polygons(fiducial, pa_v3, wcs)
+        src_msa_outline.data = _msa_outline_polygons(pa_v3, fid_pix, jinv)
     else:
         src_msa_outline.data = dict(xs=[], ys=[])
 
-    # Shutters: split operable from stuck-open; failed-closed never shown.
+    # Cull to the current visible figure bounds (post-zoom), clipped to the
+    # image. With the current view-bbox approach, all three shutter-flavour
+    # layers (operable, stuck-open, spectral-overlap) reuse one mask.
+    try:
+        vx0 = max(0.0, min(float(fig.x_range.start), W))
+        vx1 = max(0.0, min(float(fig.x_range.end), W))
+        vy0 = max(0.0, min(float(fig.y_range.start), H))
+        vy1 = max(0.0, min(float(fig.y_range.end), H))
+        view_bbox = (min(vx0, vx1), max(vx0, vx1), min(vy0, vy1), max(vy0, vy1))
+    except (TypeError, ValueError):
+        view_bbox = (0.0, float(W), 0.0, float(H))
+    in_view = _in_view_mask(pa_v3, fid_pix, jinv, view_bbox)
+
+    # Stuck-open (always visible, very few): index-based projection.
+    stuck_open_idx = np.where(in_view & (_FLAT_REASON == 2))[0]
+    src_stuck_open.data = _project_indices_to_cds(stuck_open_idx, pa_v3, fid_pix, jinv)
+
+    # Operable shutters: only if the layer is toggled on. Cap render count.
     show_shutters = 1 in layers_box.active
-    view_bbox = (0, W, 0, H)
-    polys = _shutter_polygons_in_view(fiducial, pa_v3, wcs, view_bbox)
     if show_shutters:
-        src_bg_shutters.data = _shutter_polys_to_cds(polys, only_reason=0)
+        op_idx = np.where(in_view & (_FLAT_REASON == 0))[0]
+        if op_idx.size > MAX_OPERABLE_RENDER:
+            stride = max(1, op_idx.size // MAX_OPERABLE_RENDER)
+            op_idx = op_idx[::stride]
+        src_bg_shutters.data = _project_indices_to_cds(op_idx, pa_v3, fid_pix, jinv)
     else:
         src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
-    # Stuck-open shutters always shown (red), regardless of the toggle
-    src_stuck_open.data = _shutter_polys_to_cds(polys, only_reason=2)
-    # Spectral-overlap layer: highlight operable shutters at the same s row
-    # (same quadrant) as any currently-open shutter — those are the ones
-    # whose spectra would overlap with the open shutter on the detector.
-    overlap_keys: set[tuple[int, int, int]] = set()
-    open_keys = set(state["open_shutters"].keys())
+
+    # Spectral-overlap: operable shutters whose (q, s) matches any open shutter,
+    # excluding the open shutters themselves. Computed via mask arithmetic on
+    # the 250k centers — no Python loop over the full set.
+    open_keys = state["open_shutters"].keys()
     if open_keys:
-        rows_per_q: dict[int, set[int]] = {}
-        for q, s, d in open_keys:
-            rows_per_q.setdefault(q, set()).add(s)
-        for (q, s, d), p in polys.items():
-            if p["reason"] != 0:
-                continue
-            if s in rows_per_q.get(q, ()):
-                if (q, s, d) not in open_keys:
-                    overlap_keys.add((q, s, d))
-    overlap_polys = {k: polys[k] for k in overlap_keys if k in polys}
-    src_spec_overlap.data = _shutter_polys_to_cds(overlap_polys)
+        # Build a boolean mask of "shutters in any (q, s) row of an open one"
+        q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365)
+        s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
+        # Pack (q, s) → unique id = q * 200 + s; comparable via np.isin
+        target_qs = np.array([k[0] - 1 for k in open_keys])
+        target_ss = np.array([k[1] - 1 for k in open_keys])
+        target_ids = target_qs * 200 + target_ss
+        all_ids = q_arr * 200 + s_arr
+        same_row = np.isin(all_ids, target_ids)
+        # Open shutter indices
+        open_flat = np.array(
+            [(k[0]-1) * 171 * 365 + (k[1]-1) * 365 + (k[2]-1) for k in open_keys],
+            dtype=np.int64,
+        )
+        is_open = np.zeros(_V2_OFFSETS_ALL.size, dtype=bool)
+        is_open[open_flat] = True
+        overlap_idx = np.where(in_view & (_FLAT_REASON == 0) & same_row & ~is_open)[0]
+    else:
+        overlap_idx = np.empty(0, dtype=np.int64)
+    src_spec_overlap.data = _project_indices_to_cds(overlap_idx, pa_v3, fid_pix, jinv)
 
     # Open shutters (always shown)
-    src_open_shutters.data = _open_shutters_cds_data()
+    src_open_shutters.data = _open_shutters_cds_data(pa_v3, fid_pix, jinv)
     # Highlighted shutters
-    src_highlighted.data = _highlighted_polygons()
+    src_highlighted.data = _highlighted_polygons(pa_v3, fid_pix, jinv)
     # Fixed slits always visible
-    src_fixed_slits.data = _fixed_slit_polygons(fiducial, pa_v3, wcs)
+    src_fixed_slits.data = _fixed_slit_polygons(pa_v3, fid_pix, jinv)
     # Pointing handle at the image-pixel of (RA, Dec)
-    fid_x, fid_y = _world_to_pixel(fiducial, wcs)
-    src_pointing_handle.data = dict(x=[float(fid_x)], y=[float(fid_y)])
+    src_pointing_handle.data = dict(x=[fid_pix[0]], y=[fid_pix[1]])
 
     # Targets
     show_targets = 3 in layers_box.active
