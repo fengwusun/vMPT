@@ -84,13 +84,17 @@ The repo ships with two example fields you can load with one click.
    that URL yourself.
 
 2. **Load an example** from the **Image** tab (left sidebar):
-   - **"Load Abell 370 example"** — a 44 MB three-band FITS at
-     `example_a370/a370_f182m_f200w_f210m.fits`. Fastest to try.
-   - **"Load RXCJ0600 example"** — a 251 MB JPG + WCS-sidecar pair
+   - **"Load Abell 370 example"** — a 42 MB three-band FITS at
+     `example_a370/a370_f182m_f200w_f210m.fits` (JWST/NIRCam F182M +
+     F200W + F210M). Includes a target catalog and an APT MPT plan
+     from GTO-1208 you can load to see the full picking workflow.
+   - **"Load RXCJ0600 example"** — a 17 MB JPG + WCS-sidecar pair
      (`example_r0600/*`). Demonstrates the JPG+sidecar workflow.
+     Includes a ~28k-source target catalog.
 
-   A full-page spinner overlays the canvas during any non-instant
-   load so you know the app is busy.
+   Both examples are committed in the repo (no extra download
+   needed). A full-page spinner overlays the canvas during loads so
+   you know the app is busy.
 
 3. **Aim the MSA** in the **Aim** tab:
    - The pointing center auto-fills to the image center (unless a
@@ -388,6 +392,20 @@ cap (10,000) at the typical "looking at one quadrant" zoom level.
 - **MPT catalog format**: [JDox MPT Catalogs](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs)
 - **MSA operability**: STScI CRDS `jwst_nirspec_msaoper_*.json` (auto-loaded if `CRDS_PATH` is set)
 - **jwst_gtvt** (visibility): [GitHub](https://github.com/spacetelescope/jwst_gtvt)
+
+## Example data — attribution
+
+The two example fields shipped under `example_a370/` and
+`example_r0600/` are JWST/NIRCam images of well-studied lensing
+clusters. The image files were prepared for use as vMPT examples
+(RGB stretches; the R0600 JPG was re-encoded at JPEG quality 85 to
+keep the repo small — dimensions and WCS are unchanged from the
+science-grade version). The accompanying target catalogs and APT
+MPT plans are research products from real JWST programs.
+
+If you use the example data for anything beyond trying vMPT itself,
+please cite the originating program / data release directly — vMPT
+just ships them as a starting point.
 
 ## License
 

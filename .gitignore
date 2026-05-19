@@ -6,8 +6,10 @@ __pycache__/
 # Operability JSON is fetched from CRDS; not redistributed.
 data/jwst_nirspec_msaoper_*.json
 exports/
-example_r0600/
-example_a370/
+# Example data is now committed (after JPG recompression in May 2026)
+# so cloners can try vMPT immediately. If you don't want the large
+# example files in your local copy, run:
+#   git update-index --skip-worktree example_a370 example_r0600
 refs/
 .venv*/
 *.egg-info/
