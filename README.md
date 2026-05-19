@@ -3,15 +3,15 @@
 Interactive Bokeh app for hand-picking JWST/NIRSpec MSA shutter
 configurations on an image of the target field. Lets you (and your
 collaborators) pick shutters one at a time, see the spectral
-conflicts in real time, and export a bundle that loads into APT.
+conflicts in real time, and export a bundle that loads into APT
+and/or the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
 
-It mirrors the workflow of MPT and
-[eMPT](https://github.com/esdc-esac-esa-int/eMPT_v1) but **without**
-the automated optimization step — you keep full control. Save the
-state as a JSON file, send it to a collaborator, and they pick up
-where you left off.
+vMPT mirrors the workflow of MPT and eMPT but **without** the
+automated optimization step — you keep full control. Save the state
+as a JSON file, send it to a collaborator, and they pick up where
+you left off.
 
-![status](https://img.shields.io/badge/tests-50%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-60%2B%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 
@@ -20,8 +20,8 @@ where you left off.
 ## Installation
 
 vMPT is a local-only tool: it runs on your machine, files stay on
-your disk, computation uses your local Python. There are two install
-paths — pick whichever matches your environment.
+your disk, computation uses your local Python. There are three
+install paths — pick whichever matches your environment.
 
 ### Option A — STScI's `stenv` (recommended for JWST users)
 
@@ -40,8 +40,6 @@ pip install bokeh jwst_gtvt
 The browser should open at `http://localhost:5006/app`.
 
 ### Option B — fresh conda env
-
-If you don't have `stenv` or want a clean environment:
 
 ```bash
 git clone https://github.com/fengwusun/vMPT.git
@@ -66,7 +64,7 @@ pip install -r requirements.txt
 ### Verify the install
 
 ```bash
-pytest tests/    # 50/50 should pass; ~6 seconds
+pytest tests/    # 60+/60 should pass; ~7 seconds
 ```
 
 If everything's green, the tool is ready. If `pytest` complains about
@@ -85,35 +83,52 @@ The repo ships with two example fields you can load with one click.
    Browser opens at `http://localhost:5006/app`. If it doesn't, open
    that URL yourself.
 
-2. **Load an example** from the **Load** tab (left sidebar):
+2. **Load an example** from the **Image** tab (left sidebar):
    - **"Load Abell 370 example"** — a 44 MB three-band FITS at
      `example_a370/a370_f182m_f200w_f210m.fits`. Fastest to try.
    - **"Load RXCJ0600 example"** — a 251 MB JPG + WCS-sidecar pair
      (`example_r0600/*`). Demonstrates the JPG+sidecar workflow.
 
+   A full-page spinner overlays the canvas during any non-instant
+   load so you know the app is busy.
+
 3. **Aim the MSA** in the **Aim** tab:
-   - The pointing center auto-fills to the image center. Drag the
-     **V3 PA** slider to rotate the MSA pattern.
+   - The pointing center auto-fills to the image center (unless a
+     plan was loaded first — in that case the plan's RA/Dec is kept).
+   - Drag the **V3 PA** slider or type into the **APA** box. The
+     spinner appears during recomputation.
    - Optional: enter a date and click **"Compute allowed V3 PA"** —
      queries `jwst_gtvt` and reports the valid V3 PA window for that
-     date. Snaps the slider to the nominal angle.
+     date.
 
 4. **Pick shutters** in the **Pick** tab + on the image:
-   - **Click on the image** → opens the nearest operable shutter as
-     a 3-shutter slitlet (the clicked shutter + the two adjacent rows
-     for nod-and-shuffle).
-   - **Click an open shutter** → closes it.
+   - **Click on the image** → opens an **N-shutter slitlet** at the
+     nearest operable shutter. Choose N in the **N-shutter slitlet**
+     dropdown:
+       - `N=1` → only the clicked shutter
+       - `N=2` → click + one row lower (lower y on the detector)
+       - `N=3` → centred 3-shutter slitlet (the standard for MOS)
+       - `N=5` → centred 5-shutter slitlet
+   - **Click an open shutter** → closes it AND its slitlet siblings.
    - **Double-click** → toggles a cyan highlight (a visual flag, not
      exported).
    - **Shift-click** → moves the pointing center to that location.
    - **Wheel** → zoom both axes equally.
    - **Drag** → pan.
 
-5. **Save and export** in the **Save** tab:
-   - **Save session** → writes a JSON snapshot of the full state.
-     Share this file with a collaborator to hand off the work.
-   - **Export eMPT bundle** → writes the three files APT needs into
-     a timestamped subfolder of `exports/`.
+   If a catalog is loaded, vMPT auto-tags the slitlet with the
+   catalog source ID whose footprint falls inside any opened shutter.
+   The status bar shows which source was matched.
+
+5. **Save and export** in the **MPT** tab:
+   - **Save session** → writes the bundle (see "Bundle output" below)
+     to a single chosen directory. Share the directory with a
+     collaborator to hand off the work.
+   - **Load session** → restores any vMPT bundle (point at either
+     `MPT_plan.json` or `vMPT_workspace.json` — both work; the
+     sibling is auto-discovered).
+   - **Export eMPT bundle** → same writer as Save session, but into
+     a fresh timestamped subfolder of `exports/`.
 
 ---
 
@@ -123,15 +138,15 @@ What each color means on the figure:
 
 | Color | Meaning |
 |---|---|
-| <span style="color:dodgerblue">**Dodgerblue rectangles**</span> | The four MSA quadrant outlines |
-| <span style="color:gold">**Gold polygons**</span> | The 5 NIRSpec fixed slits (always visible) |
-| <span style="color:lime">**Lime cross**</span> | Current pointing center (shift-click to move) |
-| Faint white grid | Operable shutters (toggle in Pick → Layers) |
-| <span style="color:red">**Red edge**</span> | Stuck-open shutter (always visible) |
-| <span style="color:red">**Red filled**</span> | Open (you-selected) shutter |
-| <span style="color:cyan">**Cyan edge**</span> | Highlighted shutter (double-click marker) |
-| <span style="color:orange">**Orange tint**</span> | Spectral-conflict warning — these shutters' spectra would collide with an open shutter's on the detector. Darker orange = multiple opens contribute. |
-| <span style="color:yellow">**Yellow circles**</span> | Catalog targets (loaded in Load tab) |
+| **Dodgerblue rectangles** | The four MSA quadrant outlines |
+| **Gold polygons** | The 5 NIRSpec fixed slits (always visible) |
+| **Lime cross** | Current pointing center (shift-click to move) |
+| **Silver-edge boxes** (α=0.2) | Operable, **unaffected**, ready-to-pick shutters (toggle "Show operable shutters" in Pick → Layers) |
+| **Dark-red thick outline** | Stuck-open shutter (always visible) |
+| **Red-filled (#ff8888)** | User-opened shutter |
+| **Cyan edge** | Highlighted shutter (double-click marker) |
+| **Orange fill** (α=0.10, stackable) | Spectral-conflict warning — operable shutters whose spectra would overlap on the detector with an open or stuck-open shutter's. Darker orange = multiple opens contribute. ±1 row from each dispersion source; cross-quadrant via NRS1 (Q1↔Q3) and NRS2 (Q2↔Q4) detector pairing. |
+| **Yellow circles** | Catalog targets (toggle "Show catalog targets" in Pick → Layers) |
 
 Failed-closed shutters are not drawn at all — they don't exist for
 the user's purposes.
@@ -142,9 +157,9 @@ the user's purposes.
 
 ### Image: FITS
 
-In the **Load** tab, paste the absolute path into "FITS path (local)"
-and hit Enter. First HDU with image data is auto-selected; the WCS
-comes from that HDU's header.
+In the **Image** tab, paste the absolute path into "FITS path (local)"
+and hit Enter (or use the **Browse…** button). First HDU with image
+data is auto-selected; the WCS comes from that HDU's header.
 
 ### Image: JPG + sidecar FITS
 
@@ -165,71 +180,100 @@ CSV, whitespace-ASCII, or FITS table. Required columns
 `label`/`name`. Yellow circles appear on the image; the **Pick** tab
 has compact text inputs to filter by priority class or magnitude.
 
+When you open a shutter that contains a catalog source, the slitlet
+is auto-tagged with that source's ID. Matching follows APT's
+*[Unconstrained](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-planner)*
+Source Centering rule — a source matches the shutter whose **full
+pitch cell** (≈0.27″×0.53″) contains its centre, so sources sitting
+behind the MSA bars still get matched (to whichever neighbouring
+shutter is nearest). The status bar names the matched source.
+Slitlets with no real source get a synthesized entry at the slitlet's
+centre at export time, tagged in the catalog's `Label` column as
+`vMPT_synth`.
+
 A small example catalog lives at `tests/fixtures/tiny_catalog.csv`.
+
+---
+
+## Loading an APT plan
+
+The **MPT** tab also reads plans straight from APT exports:
+
+- **Load plan from JSON** — paste the path to an APT MPT JSON
+  (each `configs[]` entry becomes a selectable plan; pointing, V3 PA,
+  disperser, and slitlets are applied on click).
+- **Load shutter CSV** — the open-mask CSV that APT/MPT/eMPT write.
+- **Fetch / open .aptx** — point at a local `.aptx` archive **or**
+  enter a JWST program ID; vMPT downloads the latest archive from
+  STScI's public proposal-info endpoint, lists the embedded MPT
+  plans, and lets you load any one. (Some programs may not be
+  publicly available yet — the fetch will report 404.)
+
+If you load a plan first and then an image, vMPT keeps the plan's
+pointing (instead of recentering on the image).
+
+---
+
+## Bundle output
+
+When you click **Save session** or **Export eMPT bundle**, vMPT
+writes a directory with six files. The prefixes telegraph the role:
+
+| File | Role | Format |
+|---|---|---|
+| **`MPT_plan.json`** | APT MPT plan — load via APT MOS → MSA Planner | APT MPT JSON, matches the reference schema field-for-field |
+| **`<catalog>.cat`** | APT-importable Target List — name matches the user's catalog (or `MPT_catalog.cat` if none was loaded) | ASCII, tab-separated, `#`-header with the JDox-recognized labels (`ID`, `RA`, `DEC`, `Weight`, `Primary`, `Label`). The `Label` column carries `real` or `vMPT_synth` so you can tell which rows came from your input catalog. |
+| **`vMPT_workspace.json`** | vMPT-only state — per-shutter `target_id`+`role`, highlighted set, image / sidecar / catalog paths, slitlet height, exact V3 PA | vMPT-internal JSON |
+| **`eMPT_observed_targets.cat`** | eMPT-style target list | eMPT format |
+| **`eMPT_pointing_summary.txt`** | eMPT-style pointing summary | eMPT format |
+| **`eMPT_shutter_mask.csv`** | 730×342 MSA mask, byte-compatible with eMPT's writer (`shutter_routines_new.f90`) | eMPT format |
+
+### Loading the bundle into APT
+
+1. **Import the target list**: APT → *Targets → Target Lists → Import…*
+   → select the `<catalog>.cat` file. APT names the list after the
+   file stem; that stem matches `catalog.name` inside `MPT_plan.json`.
+2. **Load the plan**: APT → MOS template → *MSA Planner → Load Plan*
+   → select `MPT_plan.json`. APT pairs the plan with the Target List
+   imported in step 1.
+
+### Loading the bundle back into vMPT
+
+Point **Session load path** at either `MPT_plan.json` or
+`vMPT_workspace.json`. vMPT auto-discovers the sibling and restores:
+pointing, V3 PA, disperser/filter, slitlet height, every open
+shutter with its target_id+role, the highlighted set, and (if the
+image still exists on disk) the image + WCS sidecar.
 
 ---
 
 ## Collaborating on a target list
 
-The intended team workflow:
-
 ```
-You                                    Collaborator
-───                                    ────────────
+You                                       Collaborator
+───                                       ────────────
 
 1. Open vMPT, load image + catalog
 2. Pick shutters
-3. Save session  ──── session.json ──> Load session
-                                       (vMPT loads the same image +
-                                        catalog + picks)
-                                       Add / remove / adjust picks
-                                       Save session
-8.  Load session  <── session.json ────
+3. Save session  ──── bundle dir ───────> Load session
+                                          (vMPT loads the same image +
+                                           catalog + picks)
+                                          Add / remove / adjust picks
+                                          Save session
+8.  Load session <──── bundle dir ────────
 9.  Continue picking
-…
+...
 
 When done:
-   Export eMPT bundle  →  3 files for APT
+   Export eMPT bundle  →  6 files, ready for APT + eMPT
 ```
 
-The session JSON is small (a few KB) and contains:
-- Pointing RA / Dec / V3 PA
-- Disperser + filter
-- Every open shutter with its `(q, s, d)` triple and target ID
-- Highlighted (flagged) shutters
-- Paths to the image and catalog (so the receiver loads the same
-  files automatically — **paths must be reachable on their disk**)
-
-To make the path part work, your team should either:
-- Use a shared filesystem mount (Dropbox / Google Drive / network
-  share / `git lfs`-tracked data folder), so the paths inside the JSON
-  resolve identically on every machine, **or**
-- Open the JSON manually and edit the `image_path` / `catalog_path`
-  fields before each collaborator loads it.
-
-Bundled session: when you click **Export eMPT bundle**, vMPT also
-writes `session.json` *inside* the same bundle directory. Hand someone
-the whole folder and they can both reload the picks and re-import
-into APT without juggling separate files.
-
----
-
-## Exporting to APT
-
-The **Export eMPT bundle** button writes three files into a
-timestamped subfolder of your export directory (default
-`./exports/empt_bundle_YYYYMMDDTHHMMSS/`):
-
-| File | What APT does with it |
-|---|---|
-| `observed_targets.cat` | Whitespace-separated. *Form Editor → Targets → Import MSA Source Catalog* (Whitespace Separated format). |
-| `pointing_summary.txt` | Free-form text. **Copy** the `PA_AP`, RA, and Dec values into APT's *MSA Planner → Search Grid* (set search box width/height to 0 and N=1). Click **Generate Plan**. |
-| `shutter_mask.csv` | 730 × 342 grid. For each nod row in the generated plan: *Edit Configuration → Edit → Import CSV*. Overwrites APT's auto mask with vMPT's. |
-
-The `shutter_mask.csv` is byte-compatible with eMPT's format — the
-writer was reverse-engineered from `reference_files/shutter_routines_new.f90`
-in the eMPT repo and round-trips identical against the bundled
-`trial_00_ref/` example.
+The workspace JSON contains paths to the image and catalog. For
+those to resolve on the collaborator's machine, use a shared mount
+(Dropbox / Drive / network share / `git lfs`-tracked data folder),
+or edit `image_path` / `catalog_path` / `wcs_sidecar_path` in
+`vMPT_workspace.json` before each handoff. The MPT plan JSON itself
+carries no file paths — it's safe to share standalone.
 
 ---
 
@@ -253,25 +297,24 @@ Or pass `--port 5007` to `bokeh serve`.
 The Bokeh WebSocket has a default 20 MB cap; large uploads get
 truncated. `./run.sh` raises the cap to 500 MB, but the right move
 is to **use the path input** ("FITS path (local)") instead of the
-"Choose File" upload — the file is read directly from disk, no
+"Browse…" file picker — the file is read directly from disk, no
 WebSocket size limit applies.
 
-**Clicking a shutter opens the wrong one**
-This was a Dec≠0 WCS-Jacobian bug; fixed in commit `4682571`. Pull
-the latest:
-```bash
-git pull
-pkill -f "bokeh serve"
-./run.sh
-```
+**APT can't find the catalog when loading my plan**
+Import the matching `<catalog>.cat` file in APT first (Targets →
+Target Lists → Import). The file stem and `MPT_plan.json`'s
+`catalog.name` are aligned by the writer, but you still need to
+load the target list once on the APT side.
 
 **`jwst_gtvt` query takes forever the first time**
 First call downloads JWST's ephemeris file (~30 MB). Subsequent calls
 in the same session are fast.
 
-**Wavelength tooltip shows λ > 5.3 μm for PRISM**
-Fixed in `b96f126` — pull and restart. The cutoff is now clamped to
-the grating's intrinsic range.
+**`session.json` from an old vMPT version doesn't load**
+Pre-1.1 sessions (flat top-level `open_shutters`) still load on the
+legacy path. Pre-1.4 sessions used filenames `session_MPT_plan.json`
++ `vmpt_workspace.json`; those are recognised as fallback names and
+still work.
 
 ---
 
@@ -279,32 +322,40 @@ the grating's intrinsic range.
 
 ```
 app/
-├── main.py            Bokeh server entry; UI wiring
+├── main.py            Bokeh server entry; UI wiring; on_tap / on_export
 ├── coords.py          V2/V3 ↔ RA/Dec transforms (pysiaf-backed)
 ├── msa.py             MSA shutter grid + CRDS operability loader
 ├── wavelengths.py     Analytic per-grating dispersion + cutoffs
 ├── image_io.py        FITS + JPG-with-sidecar loaders
 ├── catalog.py         CSV/ASCII/FITS catalog reader
-├── empt_io.py         eMPT-format export writers
-└── session_io.py      JSON save/load of picking session
+├── empt_io.py         eMPT-format + MPT-catalog writers
+├── session_io.py      Bundle save/load (MPT plan + workspace sidecar)
+├── mpt_io.py          APT MPT JSON parser + .aptx archive reader
+├── static/            favicon.svg
+└── templates/         index.html (injects the favicon as a data URI)
 
 data/
 └── nirspec_msa_v2v3.npz   Per-shutter V2/V3 coordinates (4×171×365)
 
-tests/                 pytest suite (50 tests, ~6 s)
+tests/                 pytest suite (60+ tests, ~7 s)
 example_a370/          Abell 370 cluster FITS (44 MB)
 example_r0600/         RXCJ0600 JPG + sidecar (240 MB)
+exports/               default output dir for bundles
 ```
 
 ### Performance
 
-`refresh_overlays` runs in ~10 ms when the operable-shutter layer is
-toggled off (the default), and ~70 ms when it's on. The hot path is
-pure-numpy: precomputed V2/V3 offsets for all 249,660 shutters, a
-single WCS inverse-Jacobian computed at the pointing pixel per
-refresh, and two matmuls (rotation by PA, then sky→pixel). PA slider
-drag is real-time (light refresh during drag, full refresh on
-release).
+`refresh_overlays` runs in ~10 ms for the light path (MSA outline +
+pointing handle only, during slider drags) and ~70 ms for the full
+path with operable + spec-overlap layers on. The hot path is pure
+numpy: precomputed V2/V3 offsets for all 249,660 shutters, a single
+WCS inverse-Jacobian per refresh, and two matmuls (rotation by PA,
+then sky→pixel).
+
+The operable-shutter layer is filtered to *unaffected, ready-to-pick*
+shutters only (excludes user-opens, stuck-opens, spec-overlap rows),
+keeping the rendered polygon count well below the `MAX_OPERABLE_RENDER`
+cap (10,000) at the typical "looking at one quadrant" zoom level.
 
 ---
 
@@ -315,6 +366,11 @@ release).
   (35″ V2 half-extent), M/H gratings are approximations
   (200″ and 500″ respectively). For research-quality numbers,
   replace with JDox-sourced or CRDS-derived constants.
+- **`plannerSpecification` in MPT plan JSON**: written with sensible
+  defaults (matching the reference G395H_F290LP plan schema field
+  for field) but the dither / search-grid parameters don't reflect
+  any vMPT internal state — APT uses them as starting values for
+  re-planning if you choose to.
 - **Bokeh single-session state**: opening the same server in two
   browser tabs lets picks bleed across them. Use one tab per user.
 - **JPG/sidecar dimension mismatch**: a `>10 %` mismatch warns but
@@ -328,7 +384,8 @@ release).
   A&A 672 A40 — [arXiv:2302.10957](https://arxiv.org/abs/2302.10957) /
   [GitHub](https://github.com/esdc-esac-esa-int/eMPT_v1)
 - **JWST PA conventions**: [JDox PA reference](https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/jwst-position-angles-ranges-and-offsets)
-- **NIRSpec MOS / MPT**: [JDox MPT page](https://jwst-docs.stsci.edu/jwst-astronomers-proposal-tool-overview/apt-workflow-articles/apt-mosaic-spectroscopy/mos-mode-msa-planning-tool)
+- **NIRSpec MOS / MPT**: [JDox MPT page](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template)
+- **MPT catalog format**: [JDox MPT Catalogs](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs)
 - **MSA operability**: STScI CRDS `jwst_nirspec_msaoper_*.json` (auto-loaded if `CRDS_PATH` is set)
 - **jwst_gtvt** (visibility): [GitHub](https://github.com/spacetelescope/jwst_gtvt)
 
@@ -340,5 +397,5 @@ MIT. See [LICENSE](LICENSE).
 
 If vMPT helps you plan an observation that ends up in a paper, a
 mention is appreciated. The export-bundle format is calibrated
-against eMPT and please cite Bonaventura et al. 2023 if you use the
-eMPT export path.
+against eMPT; please cite Bonaventura et al. 2023 if you use the
+`eMPT_*` files.

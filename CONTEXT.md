@@ -1,249 +1,496 @@
-# vMPT (visual MSA Planning Tool) — Project Context
+# vMPT — Project Context
 
-Cold-start reference for the interactive NIRSpec-MSA-on-image **planning** tool. Think of it as a hand-driven MPT/eMPT: load an image, drop a target catalog on top, pick a pointing (RA, Dec, APA_V3), hand-pick which shutters to open, then export a configuration that can be loaded into APT.
+Cold-start reference for the interactive NIRSpec MSA planning tool.
+Captures the decisions an agent (human or otherwise) needs to know
+before touching the code — invariants, file roles, the bundle layout,
+key formulas, and the gotchas we've already paid for in bug-hunts.
 
----
-
-## Goal
-
-A local app that:
-
-1. **Loads an image**:
-   - FITS with embedded WCS (primary path), or
-   - JPG/PNG paired with a **sidecar FITS** whose header supplies the WCS. The image array comes from the JPG, the WCS comes from the FITS header — the JPG and FITS must share the same pixel grid (or at least the same WCS solution).
-2. **Loads a target catalog** (CSV/FITS with at least `ID, RA, DEC`; optional `priority, mag, z, label`) and overlays target markers on the image.
-3. **Overlays the NIRSpec MSA** at a user-chosen pointing **(RA₀, Dec₀)** and **APA_V3** (= "NIRSpec PA"; aperture PA of the V3 axis, in degrees). One PA per session — no multi-PA stacking.
-4. **Toggles** overlay layers:
-   - Full MSA outline (4 quadrants).
-   - All shutters (LOD-aware: only those inside view + margin).
-   - **Operable** shutters only (failed-closed/failed-open masked out and colored differently).
-   - **Open shutters** the user has selected (highlighted).
-   - **Spectral trace** of each open slitlet for the chosen disperser/filter (shows the dispersed-light footprint on the sky so the user can avoid overlap and bad-pixel rows).
-5. **Hand-picks shutters / slitlets**:
-   - Click a target → app proposes the nearest operable shutter and a 3-shutter slitlet centered on it (NIRSpec MOS standard, with the target in the center shutter; the other two are used for nod-and-shuffle sky).
-   - Click any shutter directly to add/remove it from the open set.
-   - Detect and warn on spectral-trace conflicts between open slitlets.
-6. For any shutter the user picks (or hovers), compute the **λ_blue, λ_red, λ_gap_lo, λ_gap_hi** of the dispersed spectrum given the chosen disperser/filter (G140M/F070LP, G140M/F100LP, G235M/F170LP, G395M/F290LP, G140H/F070LP, G140H/F100LP, G235H/F170LP, G395H/F290LP, PRISM/CLEAR).
-7. **Exports a configuration** that can be ingested back by APT (or at least by hand-translation into APT's MPT). Concretely: pointing (RA, Dec, APA_V3), disperser/filter, and the full list of open shutters with their `(q, d, s)` indices plus the host target ID for each. See **MPT-style JSON** below.
+For end-user docs (install, two-minute tour, troubleshooting) see
+[`README.md`](README.md).
 
 ---
 
-## Coordinate plumbing (do not re-derive, copy from `footprint_emerald.ipynb`)
+## What the tool does
 
-### Data file: `nirspec_msa_v2v3.npz`
+1. Loads a JWST-field image (FITS with WCS, or JPG + sidecar FITS).
+2. Optionally loads a target catalog (CSV / ASCII / FITS) and overlays
+   marker circles on the image.
+3. Overlays the NIRSpec MSA at a user-chosen pointing (RA, Dec, V3 PA),
+   the 5 fixed slits, and the CRDS operability mask.
+4. Lets the user hand-pick **N-shutter slitlets** (N ∈ {1, 2, 3, 5})
+   by clicking the image. The clicked shutter snaps to the nearest
+   operable shutter; clicking an open one closes it + siblings.
+5. Computes live **spectral-overlap warnings** based on the chosen
+   disperser/filter and the open + stuck-open shutter set.
+6. Exports a bundle (`Save session` / `Export eMPT bundle`) that
+   round-trips back into vMPT AND loads into APT MPT.
+7. Imports plans from APT MPT JSON, shutter-mask CSVs, or `.aptx`
+   archives (local or fetched directly from STScI by program ID).
 
-Stored at `/Users/sunfengwu/jwst_cycle4/nirspec_msa_v2v3.npz` (copy to `data/` here on first use; ~4 MB).
+---
 
-```python
-d = np.load("nirspec_msa_v2v3.npz")
-v2_msa = d["v2_msa"]   # (4, 171, 365), float64, arcsec in V2
-v3_msa = d["v3_msa"]   # (4, 171, 365), float64, arcsec in V3
+## Architecture (live, current state)
+
+```
+app/
+├── main.py            Bokeh server entry; UI wiring; refresh_overlays
+├── coords.py          V2/V3 ↔ RA/Dec transforms (pysiaf-backed)
+├── msa.py             MSA shutter grid + CRDS operability loader
+├── wavelengths.py     Per-grating dispersion model + cutoffs
+├── image_io.py        FITS + JPG-with-sidecar loaders (LoadedImage)
+├── catalog.py         Catalog reader → Catalog dataclass
+├── empt_io.py         eMPT-format writers + MPT-importable .cat writer
+├── session_io.py      Bundle save/load (MPT plan + workspace sidecar)
+├── mpt_io.py          APT MPT JSON parser + .aptx archive reader
+├── static/favicon.svg vMPT favicon (MSA grid + pointing cross)
+└── templates/index.html  Injects favicon via data URI
+
+data/
+└── nirspec_msa_v2v3.npz   (4 × 171 × 365) shutter V2/V3 arcsec
+
+tests/                 pytest suite (60+ tests; ~7 s)
+example_a370/          Abell 370 FITS (44 MB)
+example_r0600/         RXCJ0600 JPG + sidecar (240 MB)
+exports/               default output dir
 ```
 
-Indexing convention (matches MPT JSON `slitlets` and the notebook):
+---
+
+## Coordinate plumbing (do not re-derive)
+
+### Per-shutter V2/V3 grid
+
+`data/nirspec_msa_v2v3.npz` carries two `(4, 171, 365)` arrays in
+arcsec. Indexing convention (matches APT MPT JSON `slitlets`):
+
 - axis 0: **quadrant q − 1**  (q ∈ {1,2,3,4})
-- axis 1: **shutter row s − 1**  (s ∈ {1…171})  — the "horizontal stripe" index
-- axis 2: **shutter column d − 1**  (d ∈ {1…365}) — the "dispersion-direction" index along V2
+- axis 1: **shutter row s − 1**  (s ∈ {1…171})
+- axis 2: **shutter column d − 1**  (d ∈ {1…365})
 
 Quadrant V2/V3 bounding boxes (sanity check):
-- Q1: V2 ∈ [399.55, 533.73],  V3 ∈ [−503.04, −370.62]
-- Q2: V2 ∈ [316.00, 448.20],  V3 ∈ [−406.62, −275.99]
-- Q3: V2 ∈ [309.20, 442.30],  V3 ∈ [−583.70, −450.22]
-- Q4: V2 ∈ [226.02, 357.41],  V3 ∈ [−486.74, −355.33]
 
-Shutter pitch: **0.20″ along V2** (within a row), **~0.40″ along V3** (between rows). The shutter open area is **0.20″ × 0.46″** with a small bar between adjacent shutters in the row direction.
+| Q | V2 range | V3 range |
+|---|---|---|
+| Q1 | [+399.55, +533.73] | [−503.04, −370.62] |
+| Q2 | [+316.00, +448.20] | [−406.62, −275.99] |
+| Q3 | [+309.20, +442.30] | [−583.70, −450.22] |
+| Q4 | [+226.02, +357.41] | [−486.74, −355.33] |
 
-The MSA is rotated by **138.5°** within the V2/V3 frame (this is the constant from the notebook's `rot_matrix(138.5)` in `shutter_corners_v2v3`). That rotation maps "shutter-local x/y" → V2/V3 displacement so the corners come out aligned with the MSA grid.
+Detector pairing (used by spec-overlap calc):
+- **NRS1** images **Q1 + Q3**
+- **NRS2** images **Q2 + Q4**
+- Cross-quadrant overlap only happens within these pairs.
 
-### Apertures from pysiaf
+Shutter pitch: **0.20″ along V2** (within a row), **~0.40″ along V3**.
+The open aperture per shutter is **0.20″ × 0.46″**. The MSA is
+rotated **138.5°** within the V2/V3 frame
+(`coords.V3_IDL_Y_ANGLE ≈ 138.5746°`).
 
-```python
-import pysiaf
-siaf = pysiaf.Siaf('NIRSpec')
-msa_ap = siaf['NRS_FULL_MSA']         # full MSA, gives V2Ref, V3Ref
-msa1, msa2, msa3, msa4 = (siaf[f'NRS_FULL_MSA{i}'] for i in (1,2,3,4))
-# msa_ap.V2Ref, msa_ap.V3Ref ≈ (378.563, -428.403) arcsec
-# msaN.closed_polygon_points(to_frame='tel') → quadrant outline in (V2,V3)
-```
+### Critical relations
 
-### V2/V3 → RA/Dec at a given fiducial and PA_V3
+- **APA = V3 PA + V3IdlYAngle (mod 360)**  — the NIRSpec aperture PA
+  vs. the V3 axis PA. Used everywhere we cross between APT inputs
+  and vMPT's V3-PA state. Stored as `state["pa_v3"]`.
+- **`v2v3_to_radec`** (`coords.py:33`): rotates V2/V3 offsets into the
+  sky tangent plane via `rot_matrix(pa_v3)`, then applies
+  `SkyCoord.spherical_offsets_by`.
+- **`_sky_to_v2v3`** (`main.py:1331`): inverse, using
+  `SkyCoord.spherical_offsets_to` which has the `cos(dec)` correction
+  built in. We fixed a +1/cos(dec) bug here for Dec≠0 fields
+  (Dec=−20° was off by 6 % = ~140 px).
 
-Verbatim from the notebook (do not change the sign conventions):
+### Loading the WCS
 
-```python
-def rot_matrix(rotation=30):
-    th = np.radians(rotation)
-    c, s = np.cos(th), np.sin(th)
-    return np.array(((c, -s), (s, c)))
-
-def shutter_corners_v2v3(v2c, v3c, w=0.20, h=0.46):
-    """4 corners of one shutter in V2/V3 (arcsec). Order: LL, LR, UR, UL."""
-    return np.array([v2c, v3c]) + np.dot(
-        np.array([[-w/2,  w/2, w/2, -w/2],
-                  [-h/2, -h/2, h/2,  h/2]]).T,
-        rot_matrix(138.5),
-    )
-
-def v2v3_to_radec(coord_c, pa_v3, corners_v2v3):
-    """coord_c: SkyCoord fiducial (typically corresponding to msa_ap V2Ref,V3Ref).
-       pa_v3:   APA_V3 in degrees. corners_v2v3: (N,2) in arcsec."""
-    offsets = corners_v2v3 - np.array([msa_ap.V2Ref, msa_ap.V3Ref])
-    offsets = np.dot(offsets, rot_matrix(pa_v3))      # rotate into sky frame
-    return coord_c.spherical_offsets_by(
-        offsets.T[0]*u.arcsec, offsets.T[1]*u.arcsec
-    )
-```
-
-`spherical_offsets_by` takes (Δlon east, Δlat north). The sign convention is right because of the 138.5° pre-rotation: tangent-plane "east" lines up with rotated-V2.
-
-### RA/Dec → image pixel
-
-Use the image's `astropy.wcs.WCS` plus `astropy.wcs.utils.skycoord_to_pixel`. For JPG/PNG inputs, the app builds a WCS from user-supplied parameters (see "JPG mode" in `PLAN.md`).
-
----
-
-## Export formats (APT ingestion)
-
-We will emit **the same three artifacts eMPT (Bonaventura et al. 2023) writes**, because that pipeline is documented, has been used by us before, and gives us a known-working path into APT/MPT. Reference: arxiv.org/abs/2302.10957 and github.com/esdc-esac-esa-int/eMPT_v1 (`eMPT_user_guide_release_v1_doc_v1.1.pdf` §4).
-
-The APT ingestion workflow (which we'll mirror in the export panel's instructions):
-
-1. In APT **Form Editor → Targets**, "Import MSA Source Catalog" → load our `observed_targets.cat`.
-2. In APT **MSA Planner** tab, paste `PA_AP`, RA, Dec from our `pointing_summary.txt` into the Search Grid panel; set search box width/height to 0 and Number of configurations to 1; **Generate Plan**.
-3. For each nod row in the generated plan, **Edit Configuration → Edit → Import CSV** → load our `shutter_mask.csv`. This overwrites APT/MPT's auto-generated mask with our exact one.
-
-### 1. `observed_targets.cat` — source catalog
-
-Plain text, whitespace-separated, eMPT column convention:
-
-```
-# No   No_sub      No_cat    Pr    RA[deg]     Dec[deg]
-   1        1        14170   1   53.1633910  -27.7756740
-   2        1         8821   2   53.1641205  -27.7748813
-   ...
-```
-
-- `No` — running index over rows actually placed in this configuration.
-- `No_sub` — sub-index for multi-shutter sources; `1` for ordinary point sources.
-- `No_cat` — original target ID from the user-supplied catalog.
-- `Pr` — priority class (1 = highest; integer).
-- `RA[deg]`, `Dec[deg]` — decimal degrees.
-
-Only targets whose host slitlet is in the open-shutter set get written here.
-
-### 2. `pointing_summary.txt` — pointings & PA
-
-Free-form text, human-read, **copy-pasted manually into APT** (no auto-import). Must contain at minimum:
-
-```
-RA, Dec of Central Pointing:
- Nod 0:    189.1234567   62.2109876
-Official Assigned APT/MPT roll angle:
- PA_AP:    273.000000
-PA_V3:     <derived from APA_V3 = APA_aperture + V3IdlYAngle of the aperture used>
-```
-
-Even though our tool works in a single PA per session, we still emit a `Nod 1`/`Nod 2` block (with the same RA/Dec as `Nod 0`) so the file parses cleanly in APT's expected layout. The "PA_AP vs PA_V3" distinction matters for APT — confirm at M6 time which our session-level `apa_v3_deg` maps to.
-
-### 3. `shutter_mask.csv` — MSA shutter configuration (the APT-loadable one)
-
-CSV grid; one cell per shutter. Cell alphabet (from eMPT's `reference_files/shutter_routines_new.f90`):
-
-- `x` — failed-closed (operability)
-- `s` — failed-open (operability)
-- `1` — functional, commanded closed
-- `0` — commanded open ← the user's picks
-
-The grid layout tiles the four quadrants into one matrix. Documented dimensions per the eMPT writer: **730 rows × 365 cols**, with rows 1–365 carrying the left half (Q1 + Q2 stacked) and rows 366–730 carrying the right half (Q3 + Q4 stacked). **Verify by reading `trial_00/m_pick_output/pointing_100/shutter_mask.csv` from the eMPT repo before finalizing the writer at M6** — exact tiling and row/column orientation must match byte-for-byte or APT's import will silently mis-place shutters.
-
-Header line is literal:
-
-```
-# This CSV indicates which shutters should be open/closed on the MSA - created by ESA NIRSpec Team
-```
-
-We'll keep that header (drop-in compatibility) and add a second `#` comment line with our tool name and the source pointing.
-
-### Internal session format (separate concern)
-
-For session save/load inside our tool (round-tripping the user's picks without going through APT), we'll still use a JSON like:
-
-```json
-{
-  "pointing":   {"ra_deg": 189.12, "dec_deg": 62.21, "apa_v3_deg": 273.0},
-  "instrument": {"disperser": "G395M", "filter": "F290LP"},
-  "open_shutters": [
-    {"q": 2, "d": 200, "s": 86, "target_id": 123456, "role": "target"},
-    {"q": 2, "d": 200, "s": 85, "target_id": 123456, "role": "sky"},
-    {"q": 2, "d": 200, "s": 87, "target_id": 123456, "role": "sky"}
-  ],
-  "image_path": "/path/to/loaded.fits",
-  "catalog_path": "/path/to/catalog.fits"
-}
-```
-
-This is **internal only**; it doesn't go to APT. The three eMPT files above do.
-
----
-
-## Target-catalog format
-
-Minimum: `ID, RA, DEC` (decimal degrees). Optional columns the UI will use if present:
-
-- `priority` / `Priority` — numeric, higher = more important; controls marker size/color.
-- `mag_F444W` (or any single `mag_*` column) — numeric, controls marker color.
-- `zspec`, `z` — numeric; if a line is configured, the app can show where it falls in the chosen disperser.
-- `label` / `name` — string for hover/label text.
-
-Accepted file types: CSV, ASCII (whitespace-separated with `astropy.io.ascii`), and FITS table.
+- FITS path → `astropy.wcs.WCS(header).celestial`.
+- JPG + sidecar → `WCS` from the sidecar header, then rescaled to the
+  downsampled JPG dimensions. The sidecar lives next to the JPG;
+  vMPT auto-discovers it when loading a session that points only at
+  the JPG.
 
 ---
 
 ## Operability mask
 
-NIRSpec MSA shutters are individually failed-open / failed-closed / operable. STScI maintains the operability state per epoch:
+Loaded once at startup from CRDS via `app/msa.py`. Exposes:
 
-- Reference files are distributed via **CRDS** as `jwst_nirspec_msaoper_*.json` (see jwst-docs MSA operability page).
-- The JSON is a list of failure entries with fields `Q`, `x` (= column d), `y` (= row s), `state` (e.g. "open", "stuck closed", "stuck open").
+- `OPERABLE` — `(4, 171, 365)` bool. True if the shutter is commandable.
+- `REASON`  — `(4, 171, 365)` int8. `0`=operable, `1`=failed-closed,
+              `2`=failed-open (stuck open).
 
-Action item: fetch the latest `msaoper_*.json` once into `data/` and provide a loader that returns a `(4,171,365)` boolean array `operable[q-1, s-1, d-1]`. Keep both "failed-open" and "failed-closed" reasons in a parallel array so the UI can color them differently.
+Flattened views (`_FLAT_REASON`) are used in `refresh_overlays` for
+fast vectorised masking.
 
-Until then, treat all shutters as operable.
+There are **22 stuck-open shutters** in the current CRDS reference
+(`jwst_nirspec_msaoper_0014.json` or similar). Stuck-opens always
+disperse light — they contribute to the spec-overlap calculation
+even if the user hasn't opened them.
 
 ---
 
-## Wavelength cutoffs per shutter
+## State (single global `state` dict in `main.py`)
 
-NIRSpec is a slit spectrograph: the location of a shutter on the MSA determines the wavelength range that lands on each detector (NRS1, NRS2), with a physical gap between them. Computing **λ_blue, λ_gap_lo, λ_gap_hi, λ_red** for each (shutter, disperser, filter) requires the JWST WCS pipeline.
+| Key | Meaning |
+|---|---|
+| `image` | `LoadedImage` or `None`. Carries `data`, `wcs`, `shape`, `source_path`, `mode`, and (JPG-only) `wcs_sidecar_path`. |
+| `catalog` | `Catalog` or `None`. RA/Dec/IDs/priority/mag/z arrays + `source_path`. |
+| `ra_deg`, `dec_deg` | Pointing center. |
+| `pa_v3` | V3 PA in degrees (mod 360). APA = `pa_v3 + V3_IDL_Y_ANGLE`. |
+| `disperser`, `filter` | e.g. `"PRISM"`, `"CLEAR"`. |
+| `slitlet_height` | N ∈ {1, 2, 3, 5}. Determines `_slitlet_offsets` and toggle-off siblings. |
+| `open_shutters` | `dict[(q, s, d) → OpenShutter]`. The user's picks. |
+| `highlighted` | `set[(q, s, d)]` — cyan-edge visual flag, not exported. |
+| `history` | Undo stack (capped at 50 snapshots of `open_shutters`). |
+| `shutter_to_catids` | `dict[(q, s, d) → [source_id, …]]` — catalog sources whose footprint lands in each shutter. Rebuilt on pointing / PA / catalog change. |
+| `snap_to_operable` | When a target click misses, snap to the nearest operable shutter. |
 
-Two viable routes:
+---
 
-1. **`jwst.assign_wcs.nirspec`** — given an MSA shutter (q, s, d), grating, and filter, produce a `gwcs` object that maps shutter coordinates → detector (x_det, y_det) → λ. Walk along the spectral trace and find where it leaves NRS1 (start of gap), enters NRS2, and leaves NRS2. This requires the `jwst` calibration package and the relevant CRDS reference files (camera, collimator, fpa, msa, disperser, filteroffset, wavelengthrange).
-2. **Precomputed lookup tables** — for each (disperser, filter) pair, run route 1 once over a (q, s, d) grid (or its V2/V3 equivalent) at app-build time and cache as a NetCDF/Parquet file: columns `q, s, d, disp, filt, lam_blue, lam_gap_lo, lam_gap_hi, lam_red`. At runtime, just look up.
+## Render pipeline (`refresh_overlays`)
 
-Recommend **route 2** for the app (instant, no CRDS dependency at runtime). Route 1 only as a one-shot offline build step.
+Heavy path, runs on every pointing / PA / disperser / open-shutter
+change. Order matters — later layers read masks computed earlier:
 
-Dispersers/filters to support initially: G140M/F070LP, G140M/F100LP, G235M/F170LP, G395M/F290LP, G140H/F070LP, G140H/F100LP, G235H/F170LP, G395H/F290LP, PRISM/CLEAR.
+1. **MSA outline** (4 dodgerblue quadrant rectangles).
+2. **In-view mask** — `_in_view_mask`: projects all 249,660 shutter
+   centres to image pixels and masks to the figure's current
+   `x_range` × `y_range` bbox (post-zoom). Reused by all per-shutter
+   layers.
+3. **Stuck-open** (`REASON == 2`, always visible) — thick dark-red
+   outline (`#b30000`, 2.5 px), light red fill (α=0.15).
+4. **Spectral-overlap** — see below.
+5. **Operable, unaffected** — silver edge (α=0.20), no fill. Filtered
+   to `REASON == 0 ∧ in_view ∧ NOT in open_shutters ∧ NOT in
+   overlap_idx`. Capped at `MAX_OPERABLE_RENDER = 10000`; above the
+   cap the layer is blanked rather than stride-sampled.
+6. **Open shutters** — red fill (`#ff8888`, α=0.35) + thicker red edge.
+7. **Highlighted** — cyan-edge overlay.
+8. **Fixed slits** — gold polygons.
+9. **Pointing handle** — lime cross.
+10. **Catalog targets** — yellow circles (if layer toggled on).
+
+### Spec-overlap calculation (the subtle one)
+
+For each dispersion source (every user-open + every stuck-open
+shutter), the set of overlap-affected operable shutters is:
+
+```
+(s ∈ open ± SHVAL_S_TOLERANCE)   AND
+(q ∈ same_detector_half)         AND  // NRS1={Q1,Q3}; NRS2={Q2,Q4}
+(|ΔV2| < v2_overlap_distance(disperser, filter))
+```
+
+Current values:
+- `SHVAL_S_TOLERANCE = 1` — only the open shutter's row + immediate
+  neighbours above/below disperse onto overlapping detector pixels
+  (matches eMPT's `shval ≈ s` exactly).
+- `v2_overlap_distance`: PRISM = 35″, M-gratings = 200″,
+  H-gratings = 500″ (`wavelengths.SPECTRUM_V2_HALFEXTENT`).
+- Detector pairing prevents H-gratings (500″ window covers most of
+  the MSA in V2) from spuriously lighting up Q1↔Q2 or Q3↔Q4.
+
+The overlap polygons are drawn fill-only (orange, α=0.10, **no
+edge**) so multiple dispersion sources stack and the colour
+intensifies where many spectra overlap.
+
+---
+
+## Slitlet picking semantics
+
+`_slitlet_offsets(N)` returns the relative-s offsets from the
+clicked shutter:
+
+| N | offsets | role layout |
+|---|---|---|
+| 1 | `[0]` | clicked = target |
+| 2 | `[-1, 0]` | s=clicked-1 → sky; s=clicked → target |
+| 3 | `[-1, 0, +1]` | sky / **target** / sky |
+| 5 | `[-2,-1,0,+1,+2]` | sky / sky / **target** / sky / sky |
+
+The clicked shutter is always at offset 0 ("target" role).
+`_add_slitlet` skips offsets that fall outside `s ∈ [1, 171]` or land
+on a failed-closed shutter.
+
+If the slitlet has no caller-supplied `target_id`, `_add_slitlet`
+looks up `state["shutter_to_catids"]` for each opened shutter and
+adopts the first catalog source ID it finds. All shutters in the
+slitlet share that ID. The status bar surfaces the auto-match.
+
+---
+
+## Bundle output (six files)
+
+Naming convention: prefix by role.
+
+```
+<export_dir>/
+├── MPT_plan.json                   ← APT MPT plan
+├── <catalog_stem>.cat              ← APT-importable Target List
+├── vMPT_workspace.json             ← vMPT-only state (paths, target_id, roles)
+├── eMPT_observed_targets.cat       ← eMPT pipeline input
+├── eMPT_pointing_summary.txt       ← eMPT pipeline input
+└── eMPT_shutter_mask.csv           ← eMPT pipeline input
+```
+
+Filenames are constants in [`app/session_io.py`](app/session_io.py)
+(`MPT_PLAN_FILENAME`, `MPT_CATALOG_FILENAME`, `WORKSPACE_FILENAME`,
+`EMPT_*`). Pre-1.4 names (`session_MPT_plan.json`,
+`vmpt_workspace.json`) are still recognised on load.
+
+### `MPT_plan.json` — APT MPT plan
+
+Mirrors the reference plan structure field-for-field
+(verified against `exports/empt_bundle_*/G395H_F290LP.json` etc.):
+
+```
+instrument, name, aperturePA, theta, catalog, referencePointing,
+configs[{name, version, info, masterBackground, slitlets, exposures,
+         primaryIds, fillerIds}],
+stats, errors,
+plannerSpecification{gratingSpecification, planName, planAngle,
+                     theta, candidates, slitSpecification,
+                     searchParameters{spectralOverlapShutterOffsetMap, …},
+                     slitSearchSpecification, maskingSpecification,
+                     pointingSpecification, searchGridSpecification,
+                     wavelengthRangeSpecification}
+```
+
+Key encoded values:
+
+- `aperturePA` = `pa_v3 + V3_IDL_Y_ANGLE` (mod 360).
+- `configs[0].slitlets` = `_group_into_slitlets(open_shutters)` —
+  consecutive-s runs at fixed `(q, d)` collapsed into `{q, d, s, h}`.
+- `configs[0].primaryIds` = list of catalog target_ids, in slitlet
+  order (slitlets WITH a target_id come first; slitlets without are
+  appended after — so positional `primaryIds[j] ↔ slitlets[j]`
+  alignment holds for the targeted prefix).
+- `configs[0].exposures[0].gratingFilter` = `"{disperser}_{filter}"`,
+  e.g. `"PRISM_CLEAR"`.
+- `configs[0].exposures[0].msaSlitlet` = `"ONE_SHUTTER"` /
+  `"TWO_SHUTTER"` / `"THREE_SHUTTER"` / `"FIVE_SHUTTER"`.
+- `catalog.name` = `catalog.primariesName` =
+  `plannerSpecification.candidates.{primaries, catalog}` =
+  **the stem of the `.cat` file in the bundle**. So importing the
+  `.cat` under its default name on the APT side, then loading the
+  plan, binds them automatically.
+- `plannerSpecification.searchParameters.spectralOverlapShutterOffsetMap`
+  = `"JWST_NIRSPEC_<DISPERSER>"`, e.g. `"JWST_NIRSPEC_G395H"`.
+
+### `<catalog_stem>.cat` — MPT-importable target list
+
+ASCII, **tab-separated**, `#`-prefixed header. Column names match
+the [JDox MPT Catalogs spec](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs)
+exactly:
+
+| Column | JDox role | vMPT use |
+|---|---|---|
+| `ID` | integer source id | `No_cat` |
+| `RA` | decimal degrees | (no `[deg]` suffix — APT matches the bare token) |
+| `DEC` | decimal degrees | |
+| `Weight` | numeric priority weight | from input catalog's `priority`/`Pr` (default 1; synth = 5) |
+| `Primary` | Number-typed flag | 1 = primary, 0 = filler — user can edit to split the list |
+| `Label` | free text (recognized label) | **`real`** for input-catalog matches, **`vMPT_synth`** for entries we synthesized at slitlet centres |
+
+```
+# ID	RA	DEC	Weight	Primary	Label
+1	39.9826125000	-1.5916444000	1	1	real
+2	39.9870166600	-1.5891333000	5	1	vMPT_synth
+…
+```
+
+Downstream the user can filter on `Label == "vMPT_synth"` inside APT
+(or in any text editor) to see which rows weren't in their input
+catalog and decide whether to keep them.
+
+### Shutter ↔ source matching ("Unconstrained")
+
+`_rebuild_shutter_catalog_index` matches each catalog source to the
+nearest operable shutter, allowing the source centre to sit **anywhere
+inside the full MSA shutter pitch** (≈0.27″ × 0.53″) — not just inside
+the narrower open aperture (0.20″ × 0.46″). This mirrors APT's
+[*Unconstrained* Source Centering Constraint](https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-planner):
+a source whose centre falls behind a bar still matches the
+neighbouring shutter, because the geometry forces it to be inside one
+shutter's Voronoi cell.
+
+Implementation: half-pitch box `(SHUTTER_HALF_PITCH_V2,
+SHUTTER_HALF_PITCH_V3) = (0.135″, 0.265″)`. Sources outside that box
+must be entirely off the MSA grid; they're discarded.
+
+Filename basename: if the user loaded a catalog file the stem is
+`Path(catalog.source_path).stem`; otherwise `MPT_catalog`. Either
+way it matches `catalog.name` in `MPT_plan.json`.
+
+The rows include:
+1. **Real catalog sources** tied to user picks (look up via
+   `state["shutter_to_catids"]` at export time).
+2. **Fake entries** synthesised at the centre of any open-shutter
+   slitlet with no real source. Priority `5`; ID is the smallest
+   unused integer. Stuck-open shutters never get faked entries.
+
+### `vMPT_workspace.json` — vMPT-only state
+
+Carries everything `MPT_plan.json` can't: per-shutter `target_id` +
+`role`, highlighted set, image / sidecar / catalog paths, slitlet
+height, exact `pa_v3_deg` (the plan only carries `aperturePA`).
+Lossless round-trip for the picking session.
+
+### `eMPT_*.cat / .txt / .csv`
+
+Same writers vMPT has shipped since M5 — formats reverse-engineered
+from `refs/eMPT_v1/reference_files/shutter_routines_new.f90` and
+matching the `trial_00/` example byte-for-byte for `shutter_mask.csv`.
+
+### Loading the bundle
+
+`import_session_json` accepts EITHER `MPT_plan.json` or
+`vMPT_workspace.json` — the sibling is auto-discovered. Also
+supports two legacy schemas:
+- pre-1.4 filenames `session_MPT_plan.json` + `vmpt_workspace.json`
+- pre-1.1 single-file format (flat top-level `open_shutters`,
+  `pointing` block).
+
+Image is routed by extension: `.fits/.fit/.fts` → `load_fits`;
+`.jpg/.jpeg/.png` → `load_jpg_with_sidecar` (auto-finds the WCS
+FITS in the same directory if the workspace doesn't name one).
+If the recorded `image_path` is no longer on disk, the picks /
+pointing still restore — the status bar tells the user to load an
+image manually.
+
+---
+
+## Wavelength dispersion model
+
+`app/wavelengths.py`. Linear-shift model per grating:
+
+```
+λ(V2) = λ_min + (V2 - MSA_V2_REF) × (λ_max - λ_min) / V2_DISP_EXTENT
+```
+
+with `V2_DISP_EXTENT = 180″` and per-grating `(λ_min, λ_max)` from
+JDox. Endpoints are **clamped** to the grating's intrinsic range —
+prevents the old "PRISM shows λ > 5.3 µm" bug.
+
+`v2_overlap_distance(disperser, filter)` returns the V2 half-extent
+used by the spec-overlap calculation (35″ PRISM, 200″ M, 500″ H).
+
+---
+
+## Importing APT plans (MPT tab)
+
+`app/mpt_io.py`:
+
+- `parse_mpt_json(path)` — top-level → list of `MPTPlan`. Picks the
+  first **dispersed** exposure (skips `gratingFilter: null` target
+  acquisition / imaging steps) for grating + RA/Dec. Falls back to
+  `exposures[0]` for plans with no dispersed step (e.g. shutter-mask
+  preview configs).
+- `list_mpt_plans_in_aptx(aptx_path)` / `parse_mpt_json_in_aptx` —
+  treats `.aptx` as a zip archive; finds embedded JSONs with both
+  `configs` and `aperturePA` keys.
+- `download_apt_program(program_id)` — fetches
+  `https://www.stsci.edu/jwst-program-info/download/jwst/apt/<pid>/`,
+  verifies zip magic bytes, writes to a tempfile. Some programs
+  return 404 (unreleased).
+- `parse_shutter_csv(path)` — open-mask CSV (730×342) → flat list of
+  `OpenShutter`. Tiling: rows 1–365 carry Q1+Q2, rows 366–730 carry
+  Q3+Q4; cols 1–171 carry Q1/Q3 s-indices, cols 172–342 carry Q2/Q4.
+
+`_apply_plan` in `main.py` writes the parsed plan into the live UI:
+RA/Dec/PA/disperser-filter/open_shutters. If no image is loaded yet,
+emits a warning ("Plan loaded; load an image to see overlay") but
+the state still applies — and a subsequently-loaded image keeps the
+plan's pointing instead of recentering.
+
+---
+
+## Loading-overlay UX
+
+`_show_loading(msg)` / `_hide_loading()` toggle a full-page spinner
+overlay. The widget is a zero-size Bokeh Div whose inner HTML uses
+`position: fixed` to escape the layout and cover the whole viewport.
+84-px amber ring on a 45 % black backdrop with 2 px blur; CSS
+`@keyframes vmpt-spin` rotates the ring every 0.9 s; 180 ms fade-in.
+
+Triggered by: image loads, JPG+sidecar loads, catalog loads,
+.aptx fetches, jwst_gtvt queries, **and** every pointing / V3 PA /
+APA / disperser change. The change handlers defer the actual
+recompute to the next document tick (`_deferred(_do)`) so the
+spinner paints before the heavy work starts; a `finally:
+_hide_loading()` clause guarantees it disappears even on error.
+60 s safety timeout backstops broken callsites.
+
+---
+
+## Tests
+
+```
+pytest tests/    # 60+ tests, ~7 s
+```
+
+Notable coverage:
+- `tests/test_session_io.py` — round-trip, legacy-schema fallback,
+  workspace sidecar pairing, MPT-side load (`parse_mpt_json` on
+  exported `MPT_plan.json`), "no file paths in MPT plan".
+- `tests/test_mpt_io.py` — APT MPT JSON parse, `.aptx` round-trip,
+  shutter CSV matches JSON unfolding.
+- `tests/test_empt_io.py` — eMPT shutter-mask byte compatibility,
+  observed-targets formatting, MPT-catalog writer header/data.
+- `tests/test_end_to_end.py` — full bundle write + parse cycle.
+- `tests/test_wavelengths.py` — fiducial wavelengths match published
+  values, gap behaviour, clamping.
 
 ---
 
 ## Environment
 
-- Activate with `conda activate stenv` (path: `/Users/sunfengwu/anaconda3`). `stenv` has `astropy`, `pysiaf`, `jwst`, `numpy`, `matplotlib`. **Do not** rely on system `python3` — it lacks numpy.
-- `pysiaf` version note: stenv reports "PRDOPSSOC-068 doesn't match online PRDOPSSOC-072". The 138.5° MSA tilt and V2/V3 reference values are stable across these PRDs; safe to ignore unless precision <0.05″ matters. Upgrade only if a real disagreement shows up.
+- Activate with `conda activate stenv` (path: `/Users/sunfengwu/anaconda3`).
+  `stenv` ships `astropy`, `pysiaf`, `jwst`, `numpy`. Add `bokeh` +
+  `jwst_gtvt` with pip.
+- `pysiaf` PRD note: stenv may report "PRDOPSSOC-068 doesn't match
+  online PRDOPSSOC-072". The 138.5° MSA tilt and V2/V3 reference
+  values are stable across these PRDs; safe to ignore unless
+  precision <0.05″ matters.
 
 ---
 
-## Files in this directory
+## Bug-history (don't pay these costs twice)
 
-- `CONTEXT.md` — this file (what / where / why).
-- `PLAN.md` — milestone-level implementation plan.
-- (later) `app/` — application code.
-- (later) `data/` — copy of `nirspec_msa_v2v3.npz`, MSA operability JSON, wavelength-cutoff lookup tables.
-- (later) `notebooks/` — prototypes & one-shot builders.
+- **`+1/cos(dec)` Jacobian bug** (Dec≠0 fields off by 6 % at Dec=−20°).
+  Fixed by using `SkyCoord.spherical_offsets_to` instead of
+  hand-rolled offsets in `_sky_to_v2v3`. Commit `4682571`.
+- **PRISM showing λ > 5.3 µm**: linear shift model didn't clamp to
+  the grating range. Fixed in `b96f126` — `wavelengths.cutoffs`
+  clamps to `[lam_min, lam_max]`.
+- **TapTool fading non-selected open shutters to 20 % alpha**:
+  Bokeh's default nonselection rendering. Fix: drop the `TapTool`
+  entirely, keep `fig.on_event(Tap, on_tap)`.
+- **Spurious cross-quadrant orange tints** with H-gratings: the
+  500″ V2 window passed for any pair of quadrants regardless of
+  which detector they image. Fix: enforce NRS1={Q1,Q3} /
+  NRS2={Q2,Q4} pairing in `refresh_overlays`.
+- **`parse_mpt_json` missed grating when `exposures[0]` was target
+  acquisition**: configs like `step1 copy` had `gratingFilter: null`
+  on the first 1–2 exposures, the dispersed step came later. Fix:
+  scan `exposures[]` for the first non-null `gratingFilter`.
+- **`_set_image_and_recenter` overwrote APT-plan pointing**: loading
+  an image after a plan clobbered the plan's RA/Dec. Fix: preserve
+  RA/Dec if `ra_input.value` and `dec_input.value` are both already
+  set.
+- **APT couldn't load our session.json**: extra top-level `vmpt` key
+  + missing `stats/errors/plannerSpecification` blocks. Fix: move
+  vMPT-only data to a sidecar `vMPT_workspace.json`; fill all the
+  nested null blocks with the reference shape.
+
+---
 
 ## External references
 
-- Source of MSA file & all coordinate code: `/Users/sunfengwu/jwst_cycle4/footprint_emerald.ipynb` (cells around In[54], In[151], In[164], In[166], In[125]).
-- MSA operability docs: jwst-docs.stsci.edu → NIRSpec → MSA → Operability.
-- pysiaf NIRSpec apertures: `NRS_FULL_MSA`, `NRS_FULL_MSA1..4`, `NRS_S200A1_SLIT`, fixed-slit names live in the same SIAF.
+- **eMPT** (export format inspiration): Bonaventura et al. 2023,
+  A&A 672 A40 — [arXiv:2302.10957](https://arxiv.org/abs/2302.10957)
+  / [GitHub](https://github.com/esdc-esac-esa-int/eMPT_v1).
+- **JDox MPT Catalogs**: <https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs>
+- **JDox JWST PA reference**: <https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/jwst-position-angles-ranges-and-offsets>
+- **STScI APT downloader**: `https://www.stsci.edu/jwst-program-info/download/jwst/apt/<program_id>/`
+- **MSA operability** (CRDS): `jwst_nirspec_msaoper_*.json`
+- **Source of coordinate code**: `/Users/sunfengwu/jwst_cycle4/footprint_emerald.ipynb`
+  (cells around In[54], In[151], In[164], In[166], In[125]).

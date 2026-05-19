@@ -11,3 +11,7 @@ example_a370/
 refs/
 .venv*/
 *.egg-info/
+# Slide-deck build artefacts (source is build_vmpt_slide.js, kept).
+vmpt_summary.pptx
+vmpt_summary.pdf
+slide-*.jpg
