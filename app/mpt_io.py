@@ -134,18 +134,29 @@ def parse_mpt_json(path: str) -> list[MPTPlan]:
                     f"{path}: malformed slitlet [{i}][{j}]: {e}"
                 ) from e
 
-        # Derive RA/Dec and grating from first exposure
+        # Derive RA/Dec and grating from the first DISPERSED exposure.
+        # APT plans interleave target-acquisition/imaging steps (which have
+        # `gratingFilter: null`) with the science exposure that carries the
+        # grating + filter — sometimes the dispersed exposure isn't first.
+        # Fall back to exposures[0] for plans with no dispersed step at all
+        # (e.g. an MSA shutter-mask preview).
         exps = cfg.get("exposures") or []
         ra = dec = None
         grating = filt = None
-        if exps:
-            first = exps[0]
+        primary = None
+        for e in exps:
+            if isinstance(e, dict) and e.get("gratingFilter"):
+                primary = e
+                break
+        if primary is None and exps:
+            primary = exps[0] if isinstance(exps[0], dict) else None
+        if primary is not None:
             try:
-                ra = float(first.get("ra")) if first.get("ra") is not None else None
-                dec = float(first.get("dec")) if first.get("dec") is not None else None
+                ra = float(primary.get("ra")) if primary.get("ra") is not None else None
+                dec = float(primary.get("dec")) if primary.get("dec") is not None else None
             except (TypeError, ValueError):
                 pass
-            gf = first.get("gratingFilter") or ""
+            gf = primary.get("gratingFilter") or ""
             if "_" in gf:
                 grating, filt = gf.split("_", 1)
             elif "/" in gf:

@@ -127,3 +127,71 @@ def test_pointing_summary_roundtrip(tmp_path):
     assert parsed["dec_deg"] == pytest.approx(-27.7919712, abs=1e-7)
     assert parsed["pa_ap_deg"] == pytest.approx(99.579041, abs=1e-6)
     assert parsed["pa_v3_deg"] == pytest.approx(321.004456, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# MPT-importable catalog (APT format)
+# ---------------------------------------------------------------------------
+
+
+def test_write_mpt_catalog_header_and_data(tmp_path):
+    from app.empt_io import write_mpt_catalog
+    out = tmp_path / "MPT_catalog.cat"
+    write_mpt_catalog(str(out), [
+        {"No_cat": 1, "Pr": 1, "ra_deg": 39.9826125,   "dec_deg": -1.5916444},
+        {"No_cat": 2, "Pr": 5, "ra_deg": 39.98701666,  "dec_deg": -1.5891333,
+         "label": "vMPT_synth"},
+    ])
+    text = out.read_text()
+    lines = text.strip().splitlines()
+    # Header must start with "#" and use the EXACT column names APT
+    # recognizes — bare "RA"/"DEC", not "RA[deg]" / "DEC[deg]".
+    assert lines[0].startswith("#")
+    header_tokens = lines[0].lstrip("#").strip().split("\t")
+    assert header_tokens == ["ID", "RA", "DEC", "Weight", "Primary", "Label"], header_tokens
+    # 1 header + 2 data rows; tab-separated so APT's column parser binds
+    # each data field to one labelled column.
+    assert len(lines) == 3
+    for data_line in lines[1:]:
+        tokens = data_line.split("\t")
+        assert len(tokens) == 6, f"expected 6 tab-separated fields, got {tokens}"
+    # First data row carries the ID, RA, Dec, weight, Primary=1, Label=real
+    id1, ra1, dec1, w1, prim1, lab1 = lines[1].split("\t")
+    assert int(id1) == 1
+    assert float(ra1) == 39.9826125
+    assert float(dec1) == -1.5916444
+    assert int(w1) == 1
+    assert int(prim1) == 1
+    assert lab1 == "real"
+    # Second data row was tagged as synthesized
+    _, _, _, w2, _, lab2 = lines[2].split("\t")
+    assert int(w2) == 5
+    assert lab2 == "vMPT_synth"
+
+
+def test_write_mpt_catalog_distinguishes_real_vs_synth(tmp_path):
+    """The output catalog must let downstream tools tell which rows came
+    from the user's input catalog and which were synthesized by vMPT
+    for unmatched slitlets."""
+    from app.empt_io import write_mpt_catalog
+    out = tmp_path / "MPT_catalog.cat"
+    write_mpt_catalog(str(out), [
+        {"No_cat": 100, "ra_deg": 53.16, "dec_deg": -27.77, "label": "real"},
+        {"No_cat": 101, "ra_deg": 53.16, "dec_deg": -27.77, "label": "vMPT_synth"},
+        {"No_cat": 102, "ra_deg": 53.16, "dec_deg": -27.77},  # default to "real"
+    ])
+    data = out.read_text().strip().splitlines()[1:]
+    labels = [line.split("\t")[5] for line in data]
+    assert labels == ["real", "vMPT_synth", "real"]
+
+
+def test_write_mpt_catalog_uses_only_jdox_column_names(tmp_path):
+    """Guard against accidentally reintroducing unit-suffixed column
+    names like `RA[deg]` — APT's column-detection matches the bare
+    labels listed on the JDox MPT Catalogs page."""
+    from app.empt_io import write_mpt_catalog
+    out = tmp_path / "MPT_catalog.cat"
+    write_mpt_catalog(str(out), [{"No_cat": 1, "ra_deg": 0.0, "dec_deg": 0.0}])
+    text = out.read_text()
+    assert "[deg]" not in text, "do not write `[deg]` suffixes — not a recognized APT label"
+    assert "Priority" not in text, "`Weight` is the JDox-recognized name, not `Priority`"

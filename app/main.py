@@ -53,6 +53,7 @@ from app.coords import (
 from app.empt_io import (
     OpenShutter,
     Pointing,
+    write_mpt_catalog,
     write_observed_targets_cat,
     write_pointing_summary_txt,
     write_shutter_mask_csv,
@@ -67,7 +68,17 @@ from app.mpt_io import (
     parse_mpt_json_in_aptx,
     parse_shutter_csv,
 )
-from app.session_io import Session, export_session_json, import_session_json
+from app.session_io import (
+    EMPT_OBSERVED_FILENAME,
+    EMPT_POINTING_FILENAME,
+    EMPT_SHUTTER_MASK_FILENAME,
+    MPT_CATALOG_FILENAME,
+    MPT_PLAN_FILENAME,
+    Session,
+    WORKSPACE_FILENAME,
+    export_session_json,
+    import_session_json,
+)
 from app.wavelengths import (
     FILTER_BLUE_CUTOFF,
     GRATING_RANGES,
@@ -118,6 +129,10 @@ state: dict = {
     "filter": "CLEAR",
     "slitlet_height": 3,
     "snap_to_operable": True,
+    # Cache: (q,s,d) → [catalog source id, …] for sources falling inside the
+    # shutter footprint at the current pointing + PA. Rebuilt whenever
+    # pointing / PA / catalog changes.
+    "shutter_to_catids": {},
 }
 
 
@@ -194,12 +209,16 @@ visibility_date_input = TextInput(
 visibility_btn = Button(label="Compute allowed V3 PA (jwst_gtvt)", button_type="primary")
 visibility_div = Div(text="<small>Allowed V3 PA windows appear here.</small>", width=320)
 
-# Loading banner — prominent indicator at the top, hidden by default.
+# Full-page loading overlay — a centered translucent backdrop with an
+# animated spinner. The widget itself is a zero-size Bokeh Div, but its
+# inner HTML uses `position: fixed` to escape the layout and cover the
+# whole viewport.
 loading_banner = Div(
-    text="", width=320, height=30, visible=False,
-    styles=dict(background="#fff3cd", color="#664d03",
-                padding="6px 10px", border="1px solid #ffecb5",
-                **{"border-radius": "4px", "font-weight": "bold"}),
+    text="", width=0, height=0, visible=False,
+    # The outer Bokeh container must be invisible — only the position-fixed
+    # inner overlay should render.
+    styles=dict(background="transparent", border="none", padding="0",
+                margin="0"),
 )
 
 # Quick-help panel rendered on the right side of the figure.
@@ -250,10 +269,17 @@ help_div = Div(
 </ul>
 <b>6. Export to APT</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li>Set the export dir, click <b>Export eMPT bundle</b>.</li>
-  <li>Produces: <code>observed_targets.cat</code> (APT source catalog),
-  <code>pointing_summary.txt</code> (PA values to copy-paste), and
-  <code>shutter_mask.csv</code> (per-nod MSA mask, format byte-compatible with eMPT).</li>
+  <li>Set the export dir, click <b>Export eMPT bundle</b>. Produces:</li>
+  <li><b>MPT_*</b> — load into APT MPT:
+    <code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code>
+    (primaries catalog, import as a Target List first; its filename stem
+    matches <code>catalog.name</code> in the plan).</li>
+  <li><b>vMPT_workspace.json</b> — vMPT-only state (image / sidecar /
+    catalog paths, per-shutter target_id + role).</li>
+  <li><b>eMPT_*</b> — for the European eMPT pipeline:
+    <code>eMPT_observed_targets.cat</code>,
+    <code>eMPT_pointing_summary.txt</code>,
+    <code>eMPT_shutter_mask.csv</code>.</li>
 </ul>
 <b>Interactions</b>
 <ul style='margin:4px 0 8px 18px'>
@@ -282,14 +308,24 @@ disperser_filter_select = Select(
 )
 
 layers_box = CheckboxGroup(
-    labels=["Show MSA outline", "Show operable shutters", "Show targets"],
-    # Operable shutters OFF by default — drawing 180k+ polygons is slow.
-    # User can toggle on once zoomed in to a region of interest.
-    active=[0, 2],
+    labels=["Show MSA outline", "Show operable shutters", "Show catalog targets"],
+    # All three layers on by default. The operable-shutter layer is now
+    # filtered to *unaffected* shutters only (excludes user-opens,
+    # stuck-opens, and spec-overlap rows), keeping the polygon count
+    # manageable so it works at typical zoom levels.
+    active=[0, 1, 2],
 )
-MAX_OPERABLE_RENDER = 8000  # hard cap to keep redraws fast even when enabled
+MAX_OPERABLE_RENDER = 10000  # cap for operable-shutter silver-edge layer.
+                              # Below the cap we draw every shutter (no
+                              # stride); above it we skip rendering — user
+                              # zooms in further to see all silver edges.
+# Slitlet selector. Each click opens N shutters at the picked column:
+#   N=1: just the click
+#   N=2: click + the shutter one row below (s-1)
+#   N=3: click ±1 (centred)
+#   N=5: click ±2 (centred)
 slitlet_select = Select(
-    title="Slitlet height", options=["1", "3", "5"], value="3",
+    title="N-shutter slitlet", options=["1", "2", "3", "5"], value="3",
 )
 
 snap_box = CheckboxGroup(labels=["Snap target to nearest operable"], active=[0])
@@ -303,14 +339,14 @@ export_btn = Button(label="Export eMPT bundle", button_type="success")
 # Session save/load: round-trips the full picking state for collaborators.
 session_save_path_input = TextInput(
     title="Session save path",
-    value=str(Path.cwd() / "exports" / "session.json"),
-    placeholder="/path/to/session.json",
+    value=str(Path.cwd() / "exports" / MPT_PLAN_FILENAME),
+    placeholder=f"/path/to/{MPT_PLAN_FILENAME}",
 )
 session_save_btn = Button(label="Save session", button_type="primary")
 session_load_path_input = TextInput(
     title="Session load path",
     value="",
-    placeholder="/path/to/session.json",
+    placeholder=f"/path/to/{MPT_PLAN_FILENAME} (or {WORKSPACE_FILENAME})",
 )
 session_load_btn = Button(label="Load session", button_type="primary")
 
@@ -419,13 +455,16 @@ img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source
 # targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
-    line_color="silver", line_alpha=0.10, line_width=0.5,
+    line_color="silver", line_alpha=0.20, line_width=0.5,
     fill_alpha=0.0,
 )
 stuck_open_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_stuck_open,
-    line_color="#ff2222", line_alpha=0.9, line_width=1.0,
-    fill_color="#ff2222", fill_alpha=0.10,
+    # Thicker, darker outline to distinguish from user-opened shutters
+    # (which are red with 1.5 px lines). Stuck-open is permanent state,
+    # not a user pick — the chunkier border makes that obvious.
+    line_color="#b30000", line_alpha=1.0, line_width=2.5,
+    fill_color="#ff2222", fill_alpha=0.15,
 )
 # Spectral-overlap shutters: any operable shutter in the same s row of the
 # same quadrant as a currently-open shutter. If opened, their dispersed
@@ -524,13 +563,49 @@ def _set_status(msg: str, level: str = "info", clear_after: float = 6.0) -> None
 _LOADING_GENERATION = [0]
 
 
-def _show_loading(msg: str) -> None:
-    """Show the yellow loading banner. Pair with _hide_loading().
+def _loading_overlay_html(msg: str) -> str:
+    """HTML for the full-page loading overlay (escapes the Bokeh layout via
+    position: fixed, so it covers the whole viewport)."""
+    safe_msg = (msg or "Loading…").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        "<style>"
+        "@keyframes vmpt-spin { to { transform: rotate(360deg); } }"
+        "@keyframes vmpt-fadein { from { opacity: 0; } to { opacity: 1; } }"
+        "</style>"
+        '<div style="position: fixed; top: 0; left: 0; right: 0; bottom: 0;'
+        "            z-index: 9999;"
+        "            display: flex; flex-direction: column;"
+        "            align-items: center; justify-content: center;"
+        "            background: rgba(8, 16, 32, 0.55);"
+        "            backdrop-filter: blur(2px);"
+        "            -webkit-backdrop-filter: blur(2px);"
+        '            animation: vmpt-fadein 180ms ease-out;">'
+        '  <div style="width: 84px; height: 84px;'
+        "             border: 7px solid rgba(255,255,255,0.18);"
+        "             border-top-color: #FFB400;"
+        "             border-right-color: #FFB400;"
+        "             border-radius: 50%;"
+        '             animation: vmpt-spin 0.9s linear infinite;"></div>'
+        '  <div style="margin-top: 22px;'
+        "             color: white;"
+        "             font-family: Calibri, Helvetica, Arial, sans-serif;"
+        "             font-size: 16px;"
+        "             font-weight: 600;"
+        "             letter-spacing: 0.3px;"
+        '             text-shadow: 0 1px 4px rgba(0,0,0,0.5);">'
+        f"    {safe_msg}"
+        "  </div>"
+        "</div>"
+    )
 
-    Schedules a 60-second safety timeout so the banner never gets stuck
+
+def _show_loading(msg: str) -> None:
+    """Show the full-page spinner overlay. Pair with _hide_loading().
+
+    Schedules a 60-second safety timeout so the overlay never gets stuck
     if a callback path fails to call _hide_loading.
     """
-    loading_banner.text = f"⏳ {msg}"
+    loading_banner.text = _loading_overlay_html(msg)
     loading_banner.visible = True
     _LOADING_GENERATION[0] += 1
     gen = _LOADING_GENERATION[0]
@@ -894,54 +969,93 @@ def refresh_overlays() -> None:
     stuck_open_idx = np.where(in_view & (_FLAT_REASON == 2))[0]
     src_stuck_open.data = _project_indices_to_cds(stuck_open_idx, pa_v3, fid_pix, jinv)
 
-    # Operable shutters: only if the layer is toggled on. Cap render count.
-    show_shutters = 1 in layers_box.active
-    if show_shutters:
-        op_idx = np.where(in_view & (_FLAT_REASON == 0))[0]
-        if op_idx.size > MAX_OPERABLE_RENDER:
-            stride = max(1, op_idx.size // MAX_OPERABLE_RENDER)
-            op_idx = op_idx[::stride]
-        src_bg_shutters.data = _project_indices_to_cds(op_idx, pa_v3, fid_pix, jinv)
-    else:
-        src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
+    # ── Operable-shutter (silver-edge) layer is built AFTER spec-overlap
+    # below, because it filters out user-opens + spec-overlap + stuck-open
+    # so the silver edge cleanly highlights the *unaffected, ready-to-pick*
+    # shutters. We compute the spec-overlap set first, then this layer.
 
     # Spectral-overlap: operable shutters whose spectrum collides with any
-    # open shutter's spectrum on the detector. The collision condition is
+    # dispersed shutter's spectrum on the detector. Two shutters share a
+    # detector y-row iff (a) they sit on the SAME detector half (Q1/Q3 →
+    # NRS1, Q2/Q4 → NRS2; the MSA's s-axis tiles into a single column on
+    # each detector half, see eMPT's CSV layout) and (b) their s indices
+    # are within SHVAL_S_TOLERANCE. They share dispersed pixels iff their
+    # V2 separation is below v2_overlap_distance(disperser, filter).
     #
-    #   |Δs| <= SHVAL_S_TOLERANCE  (same detector-y row, *any* quadrant)
-    #   AND |ΔV2| < v2_overlap_distance(disperser, filter)
+    # Cross-quadrant pairings other than Q1↔Q3 and Q2↔Q4 image onto
+    # *different* detectors and therefore never overlap, even when their
+    # V2 windows would otherwise pass the distance check (relevant for the
+    # H gratings, whose V2 half-extent is ~500″).
     #
-    # The s-tolerance approximates eMPT's shval matching: eMPT's `shval`
-    # is essentially the MSA row index s, with shval ≈ s ± 1 across both
-    # the d-axis and the four quadrants. With sthresh=3.5 (eMPT default),
-    # cross-quadrant pairs at the same s share a detector-y row, so the
-    # spectrum collision *can* cross the inter-quadrant gap. For PRISM
-    # the V2 cutoff (~35″) keeps things within one quadrant; for M
-    # (~200″) and H (~500″) gratings the V2 window reaches adjacent
-    # quadrants and the orange band spans the MSA.
-    SHVAL_S_TOLERANCE = 3
-    open_keys = state["open_shutters"].keys()
-    if open_keys:
+    # Sources of dispersion: every user-opened shutter AND every shutter
+    # known to be stuck open (REASON == 2). Stuck-opens always disperse
+    # light onto the detector, so their spec-overlap rows must light up
+    # even when the user hasn't picked them.
+    NRS1_QUADS = {1, 3}
+    NRS2_QUADS = {2, 4}
+    # |Δs| ≤ 1 → only the open shutter's row and its immediate neighbour
+    # rows above/below disperse onto overlapping detector pixels. Wider
+    # tolerances over-paint inconvenient (eMPT uses shval ≈ s exactly).
+    SHVAL_S_TOLERANCE = 1
+    user_opens = list(state["open_shutters"].keys())
+    stuck_flat = np.where(_FLAT_REASON == 2)[0]
+    stuck_keys = [
+        (int(f // (171 * 365)) + 1,
+         int((f % (171 * 365)) // 365) + 1,
+         int(f % 365) + 1)
+        for f in stuck_flat
+    ]
+    dispersion_sources = user_opens + stuck_keys
+    if dispersion_sources:
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
+        q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365) + 1
         in_view_op = in_view & (_FLAT_REASON == 0)
         chunks: list[np.ndarray] = []
-        for q_o, s_o, d_o in open_keys:
+        for q_o, s_o, d_o in dispersion_sources:
             open_flat = (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
             v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
-            # Same shval-row across ANY quadrant
+            # Only the matching detector half can share a y-row.
+            partners = NRS1_QUADS if q_o in NRS1_QUADS else NRS2_QUADS
+            same_det = np.isin(q_arr, list(partners))
             same_row = np.abs(s_arr - (s_o - 1)) <= SHVAL_S_TOLERANCE
             near_v2 = np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o) < v2_overlap
-            idx_this = np.where(in_view_op & same_row & near_v2)[0]
+            idx_this = np.where(in_view_op & same_det & same_row & near_v2)[0]
             idx_this = idx_this[idx_this != open_flat]
             if idx_this.size:
                 chunks.append(idx_this)
         overlap_idx = (
-            np.concatenate(chunks) if chunks else np.empty(0, dtype=np.int64)
+            np.unique(np.concatenate(chunks)) if chunks else np.empty(0, dtype=np.int64)
         )
     else:
         overlap_idx = np.empty(0, dtype=np.int64)
     src_spec_overlap.data = _project_indices_to_cds(overlap_idx, pa_v3, fid_pix, jinv)
+
+    # ── Unaffected operable (silver-edge) layer.
+    # Show only shutters that are operable, in view, NOT currently open
+    # (red), NOT stuck-open (dark red), and NOT in the spec-overlap set
+    # (orange). The silver edges then act as a "click here, ready" hint
+    # rather than overlapping the heavier coloured layers underneath.
+    show_shutters = 1 in layers_box.active
+    if show_shutters:
+        op_mask = in_view & (_FLAT_REASON == 0)
+        if state["open_shutters"]:
+            open_flat = np.array([
+                (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+                for (q, s, d) in state["open_shutters"].keys()
+            ], dtype=np.int64)
+            op_mask[open_flat] = False
+        if overlap_idx.size:
+            op_mask[overlap_idx] = False
+        op_idx = np.where(op_mask)[0]
+        if op_idx.size > MAX_OPERABLE_RENDER:
+            # Above the cap: blank rather than stride-sample (a sparse
+            # grid looks broken). User zooms in to see them.
+            src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
+        else:
+            src_bg_shutters.data = _project_indices_to_cds(op_idx, pa_v3, fid_pix, jinv)
+    else:
+        src_bg_shutters.data = dict(xs=[], ys=[], q=[], s=[], d=[])
 
     # Open shutters (always shown)
     src_open_shutters.data = _open_shutters_cds_data(pa_v3, fid_pix, jinv)
@@ -1077,17 +1191,24 @@ def refresh_image_glyph() -> None:
 def _set_image_and_recenter(img: LoadedImage, source_label: str) -> None:
     state["image"] = img
     H, W = img.shape[:2]
-    try:
-        center = img.wcs.pixel_to_world(W / 2, H / 2)
-        ra_input.value = f"{center.ra.deg:.6f}"
-        dec_input.value = f"{center.dec.deg:.6f}"
-        state["ra_deg"] = center.ra.deg
-        state["dec_deg"] = center.dec.deg
-    except Exception:  # noqa: BLE001
-        pass
+    # Preserve an existing pointing (e.g. from a previously loaded APT plan)
+    # so loading an image second doesn't clobber the plan's RA/Dec.
+    has_pointing = bool(
+        (ra_input.value or "").strip() and (dec_input.value or "").strip()
+    )
+    if not has_pointing:
+        try:
+            center = img.wcs.pixel_to_world(W / 2, H / 2)
+            ra_input.value = f"{center.ra.deg:.6f}"
+            dec_input.value = f"{center.dec.deg:.6f}"
+            state["ra_deg"] = center.ra.deg
+            state["dec_deg"] = center.dec.deg
+        except Exception:  # noqa: BLE001
+            pass
     refresh_image_glyph()
     refresh_overlays()
-    _set_status(f"Loaded {source_label} ({W}×{H}).", "ok")
+    extra = " (kept existing pointing)" if has_pointing else ""
+    _set_status(f"Loaded {source_label} ({W}×{H}).{extra}", "ok")
 
 
 def _load_fits_from_path(path: str) -> None:
@@ -1116,6 +1237,7 @@ def _load_catalog_from_path(path: str) -> None:
     try:
         cat = load_catalog(path)
         state["catalog"] = cat
+        _rebuild_shutter_catalog_index()
         refresh_overlays()
         _set_status(f"Catalog loaded: {len(cat.ra_deg)} targets from {Path(path).name}.", "ok")
     except Exception as e:  # noqa: BLE001
@@ -1191,7 +1313,14 @@ def on_pointing(attr, old, new):
         state["dec_deg"] = float(dec_input.value)
     except (TypeError, ValueError):
         return
-    refresh_overlays()
+    _show_loading("Updating pointing…")
+    def _do():
+        try:
+            _rebuild_shutter_catalog_index()
+            refresh_overlays()
+        finally:
+            _hide_loading()
+    _deferred(_do)
 
 
 def _sync_pa_widgets(v3pa: float, source: str | None = None) -> None:
@@ -1229,7 +1358,14 @@ def on_v3pa_slider_done(attr, old, new):
     """Fires once when slider drag ends. Full refresh."""
     if state.get("_syncing_pa"):
         return
-    refresh_overlays()
+    _show_loading("Updating V3 PA…")
+    def _do():
+        try:
+            _rebuild_shutter_catalog_index()
+            refresh_overlays()
+        finally:
+            _hide_loading()
+    _deferred(_do)
 
 
 def on_v3pa_text(attr, old, new):
@@ -1240,7 +1376,14 @@ def on_v3pa_text(attr, old, new):
     except (TypeError, ValueError):
         return
     _sync_pa_widgets(v, source="v3pa_text")
-    refresh_overlays()
+    _show_loading("Updating V3 PA…")
+    def _do():
+        try:
+            _rebuild_shutter_catalog_index()
+            refresh_overlays()
+        finally:
+            _hide_loading()
+    _deferred(_do)
 
 
 def on_apa_text(attr, old, new):
@@ -1251,7 +1394,14 @@ def on_apa_text(attr, old, new):
     except (TypeError, ValueError):
         return
     _sync_pa_widgets(apa - V3_IDL_Y_ANGLE, source="apa_text")
-    refresh_overlays()
+    _show_loading("Updating APA…")
+    def _do():
+        try:
+            _rebuild_shutter_catalog_index()
+            refresh_overlays()
+        finally:
+            _hide_loading()
+    _deferred(_do)
 
 
 def on_layers(attr, old, new):
@@ -1266,7 +1416,13 @@ def on_disperser_filter(attr, old, new):
         return
     state["disperser"] = d_part
     state["filter"] = f_part
-    refresh_overlays()
+    _show_loading(f"Recomputing for {d_part} / {f_part}…")
+    def _do():
+        try:
+            refresh_overlays()
+        finally:
+            _hide_loading()
+    _deferred(_do)
 
 
 def on_slitlet_height(attr, old, new):
@@ -1282,6 +1438,16 @@ def on_snap(attr, old, new):
 # ---------------------------------------------------------------------------
 
 
+def _v2v3_to_radec(v2: float, v3: float, fiducial: SkyCoord, pa_v3: float) -> tuple[float, float]:
+    """Forward map a single (V2, V3) arcsec coord onto (RA, Dec) degrees."""
+    offsets = np.array([[v2 - MSA_V2_REF, v3 - MSA_V3_REF]])
+    rotated = np.dot(offsets, rot_matrix(pa_v3))
+    sky = fiducial.spherical_offsets_by(
+        rotated[0, 0] * u.arcsec, rotated[0, 1] * u.arcsec
+    )
+    return float(sky.ra.deg), float(sky.dec.deg)
+
+
 def _sky_to_v2v3(sky: SkyCoord, fiducial: SkyCoord, pa_v3: float) -> tuple[float, float]:
     """Inverse of v2v3_to_radec: returns (V2, V3) in arcsec for a single sky point."""
     d_lon, d_lat = fiducial.spherical_offsets_to(sky)
@@ -1291,6 +1457,76 @@ def _sky_to_v2v3(sky: SkyCoord, fiducial: SkyCoord, pa_v3: float) -> tuple[float
     rot = rot_matrix(-pa_v3)
     v2_off, v3_off = float(dx * rot[0, 0] + dy * rot[1, 0]), float(dx * rot[0, 1] + dy * rot[1, 1])
     return v2_off + MSA_V2_REF, v3_off + MSA_V3_REF
+
+
+def _rebuild_shutter_catalog_index() -> None:
+    """Vectorised: for every catalog source visible at the current pointing
+    + PA, find the nearest operable shutter and bucket the source id under
+    that shutter. The result lives in state['shutter_to_catids'] as
+    {(q,s,d) → [source_id, …]}. Cleared and rebuilt whenever the
+    pointing, PA, or catalog changes.
+
+    Matching uses APT's "Unconstrained" Source Centering rule
+    (https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/
+    nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-planner):
+    a source still matches the shutter even if its centre falls behind
+    the opaque bars separating shutters. So the matching cell is the
+    full MSA **pitch** (≈0.27″ × 0.53″) — the V2/V3 Voronoi cell of the
+    shutter — not just the narrower open aperture (0.20″ × 0.46″).
+    """
+    state["shutter_to_catids"] = {}
+    cat = state.get("catalog")
+    fiducial = _pointing_skycoord()
+    if cat is None or fiducial is None:
+        return
+    if len(cat.ra_deg) == 0:
+        return
+    pa_v3 = state["pa_v3"]
+    sky = SkyCoord(cat.ra_deg, cat.dec_deg, unit=u.deg, frame="icrs")
+    d_lon, d_lat = fiducial.spherical_offsets_to(sky)
+    dx = d_lon.to_value(u.arcsec)
+    dy = d_lat.to_value(u.arcsec)
+    rot = rot_matrix(-pa_v3)
+    v2_arr = dx * rot[0, 0] + dy * rot[1, 0] + MSA_V2_REF
+    v3_arr = dx * rot[0, 1] + dy * rot[1, 1] + MSA_V3_REF
+    # Half-pitch in V2 / V3 (the full shutter "cell" including the bars).
+    # MSA pitch is ≈0.27″ × 0.53″; half = ≈0.135″ × ≈0.265″.
+    SHUTTER_HALF_PITCH_V2 = 0.135
+    SHUTTER_HALF_PITCH_V3 = 0.265
+    bucket: dict[tuple[int, int, int], list] = {}
+    for i in range(len(v2_arr)):
+        dv2 = V2_MSA - v2_arr[i]
+        dv3 = V3_MSA - v3_arr[i]
+        d2 = dv2 * dv2 + dv3 * dv3
+        idx = int(np.argmin(d2))
+        q = idx // (171 * 365)
+        rem = idx % (171 * 365)
+        s = rem // 365
+        d = rem % 365
+        if not OPERABLE[q, s, d]:
+            continue
+        # "Unconstrained" footprint check: the source must lie within the
+        # full shutter pitch (i.e. closer to this shutter centre than to
+        # any neighbouring shutter). Reject anything outside the pitch
+        # box — that means the source is entirely outside the MSA grid,
+        # not just sitting on a bar.
+        if (abs(dv2.flat[idx]) > SHUTTER_HALF_PITCH_V2
+                or abs(dv3.flat[idx]) > SHUTTER_HALF_PITCH_V3):
+            continue
+        key = (q + 1, s + 1, d + 1)
+        bucket.setdefault(key, []).append(cat.ids[i])
+    state["shutter_to_catids"] = bucket
+
+
+def _shutter_source_id(q: int, s: int, d: int) -> str | None:
+    """Return the catalog source id (as a string) that falls inside this
+    shutter, or None if none does. If multiple sources land in the same
+    shutter we return the first one (catalog order)."""
+    bucket = state.get("shutter_to_catids") or {}
+    ids = bucket.get((int(q), int(s), int(d)))
+    if not ids:
+        return None
+    return str(ids[0])
 
 
 def _nearest_shutter(v2_target: float, v3_target: float,
@@ -1320,15 +1556,55 @@ def _nearest_shutter(v2_target: float, v3_target: float,
     return (q + 1, s + 1, d + 1)
 
 
-def _add_slitlet(q: int, s_center: int, d: int, target_id: str | None) -> int:
-    """Add a slitlet of state['slitlet_height'] shutters centered on (q,s_center,d).
+def _slitlet_offsets(n: int) -> list[int]:
+    """Return the list of s-offsets (relative to the clicked shutter) for an
+    N-shutter slitlet:
+      • N=1 → [0]
+      • N=2 → [-1, 0]      (clicked shutter + one row lower y in detector)
+      • N=3 → [-1, 0, +1]  (centred)
+      • N=5 → [-2,-1,0,+1,+2]
+    Anything else falls back to a centred (or near-centred) layout.
+    """
+    if n <= 1:
+        return [0]
+    if n == 2:
+        return [-1, 0]
+    half = n // 2
+    return list(range(-half, n - half))
 
-    Returns the number of shutters added (operable ones; skips failed)."""
-    h = state["slitlet_height"]
-    half = h // 2
+
+def _add_slitlet(q: int, s_click: int, d: int, target_id: str | None) -> int:
+    """Open an N-shutter slitlet at column (q, d) anchored on the clicked
+    shutter s=s_click. N comes from state['slitlet_height']. The clicked
+    shutter is always opened (and marked 'target' if it's an offset of 0
+    in the layout from `_slitlet_offsets`); siblings are 'sky'.
+
+    If `target_id` is None we check whether any catalog source falls inside
+    each opened shutter's footprint and adopt it as the shutter's target
+    id (so source-IDs propagate automatically into the APT export). All
+    shutters in this slitlet inherit the same id (the first one found
+    when scanning the layout).
+
+    Returns the number of shutters added (operable ones; failed-closed are skipped).
+    """
+    n = int(state["slitlet_height"])
+    offsets = _slitlet_offsets(n)
+    # If the caller didn't already know a target_id, pick the first
+    # catalog source landing inside any opened shutter of this slitlet.
+    if target_id is None:
+        for offset in offsets:
+            s_try = s_click + offset
+            if not (1 <= s_try <= 171):
+                continue
+            if not OPERABLE[q - 1, s_try - 1, d - 1]:
+                continue
+            tid = _shutter_source_id(q, s_try, d)
+            if tid is not None:
+                target_id = tid
+                break
     added = 0
-    for offset in range(-half, half + 1):
-        s = s_center + offset
+    for offset in offsets:
+        s = s_click + offset
         if not (1 <= s <= 171):
             continue
         if not OPERABLE[q - 1, s - 1, d - 1]:
@@ -1353,27 +1629,58 @@ def _data_distance_for_screen_pixels(n_pix: float = 15.0) -> float:
 
 
 def _open_or_toggle_slitlet_at(q: int, s: int, d: int, target_id: str | None) -> None:
-    """Open a slitlet centered at (q, s, d). If it's already open (same key),
+    """Open an N-shutter slitlet anchored on (q, s, d) — N comes from
+    state['slitlet_height']. If the clicked shutter is already open we
     remove it plus its slitlet siblings instead.
+
+    `target_id` may be:
+      • a known catalog id (e.g. user clicked a target marker)
+      • None → `_add_slitlet` looks up a catalog source whose footprint
+        falls inside any of the opened shutters and tags the slitlet
+        with that id automatically.
     """
     key = (q, s, d)
     _push_history()
     if key in state["open_shutters"]:
         sh = state["open_shutters"].pop(key)
-        if sh.target_id:
-            for k in list(state["open_shutters"].keys()):
-                other = state["open_shutters"][k]
-                if (other.target_id == sh.target_id
-                        and other.q == q and other.d == d
-                        and abs(other.s - s) <= state["slitlet_height"] // 2):
-                    del state["open_shutters"][k]
+        # Remove slitlet siblings — siblings share (q, d) and a small Δs.
+        # Match by either target_id (if present on both) or position
+        # alone (so manual single shutters and their N-shutter siblings
+        # still come down together).
+        n = int(state["slitlet_height"])
+        half = max(1, n)  # close up to N rows around the click (≥ 1)
+        for k in list(state["open_shutters"].keys()):
+            other = state["open_shutters"][k]
+            if other.q != q or other.d != d:
+                continue
+            if abs(other.s - s) > half:
+                continue
+            if other.target_id != sh.target_id:
+                # Don't sweep up a different target's slitlet that happens
+                # to sit nearby — only same-target (or both None) siblings.
+                continue
+            del state["open_shutters"][k]
         _set_status(f"Closed shutter ({q},{s},{d}) and slitlet siblings.", "ok")
-    elif target_id is not None:
-        n = _add_slitlet(q, s, d, target_id=target_id)
-        _set_status(f"Target {target_id} → slitlet ({q},{s},{d}), {n} shutters opened.", "ok")
     else:
-        state["open_shutters"][key] = OpenShutter(q=q, s=s, d=d, role="manual")
-        _set_status(f"Opened shutter ({q},{s},{d}) manually.", "ok")
+        n_added = _add_slitlet(q, s, d, target_id=target_id)
+        # Re-read the freshly opened shutter to surface the auto-matched
+        # target id (if any) in the status line.
+        opened = state["open_shutters"].get(key)
+        auto_id = (opened.target_id if opened else None)
+        if auto_id and auto_id != target_id:
+            _set_status(
+                f"Opened {n_added}-shutter slitlet at ({q},{s},{d}); "
+                f"matched catalog source {auto_id}.", "ok"
+            )
+        elif target_id is not None:
+            _set_status(
+                f"Target {target_id} → slitlet ({q},{s},{d}), "
+                f"{n_added} shutters opened.", "ok"
+            )
+        else:
+            _set_status(
+                f"Opened {n_added}-shutter slitlet at ({q},{s},{d}).", "ok"
+            )
     refresh_overlays()
 
 
@@ -1495,34 +1802,132 @@ def on_export():
     except FileExistsError:
         pass
 
-    # observed_targets: one row per unique target_id with an open shutter
+    # ─── Build the observed_targets list ───────────────────────────────────
+    # One row per "real" target_id picked up from the catalog (looked up by
+    # shutter-footprint at pick time, or re-checked here so newly-loaded
+    # catalogs are picked up). For each contiguous slitlet of open shutters
+    # in the same (q, d) column that has NO real catalog source, fake one
+    # entry positioned at the centre shutter's sky location. Stuck-open
+    # shutters never get faked entries.
     cat = state["catalog"]
     targets_rows = []
-    seen = set()
-    for sh in state["open_shutters"].values():
-        if sh.target_id and sh.target_id not in seen:
-            seen.add(sh.target_id)
-            # Look up RA/Dec from catalog if possible
-            ra_d, dec_d = float("nan"), float("nan")
-            pr = 1
-            if cat is not None:
-                ids_str = [str(i) for i in cat.ids]
-                if str(sh.target_id) in ids_str:
-                    k = ids_str.index(str(sh.target_id))
-                    ra_d = float(cat.ra_deg[k])
-                    dec_d = float(cat.dec_deg[k])
-                    if np.isfinite(cat.priority[k]):
-                        pr = int(cat.priority[k])
-            try:
-                target_no = int(sh.target_id)
-            except (ValueError, TypeError):
-                target_no = len(targets_rows) + 1
-            targets_rows.append({
-                "No_cat": target_no,
-                "Pr": pr,
-                "ra_deg": ra_d,
-                "dec_deg": dec_d,
-            })
+    real_ids_seen: set[str] = set()
+    used_target_nos: set[int] = set()
+
+    def _cat_lookup(tid: str) -> tuple[float, float, int, str] | None:
+        """Look up a catalog row by id. Returns (ra, dec, weight, label).
+        `label` is the catalog's `label`/`name` column value when
+        available, else the literal string "real" (so the output
+        catalog's Label column always distinguishes real vs synth)."""
+        if cat is None:
+            return None
+        ids_str = [str(i) for i in cat.ids]
+        if tid not in ids_str:
+            return None
+        k = ids_str.index(tid)
+        pr = int(cat.priority[k]) if np.isfinite(cat.priority[k]) else 1
+        label_val = ""
+        try:
+            label_val = str(cat.label[k]) if cat.label is not None else ""
+        except (AttributeError, IndexError, TypeError):
+            label_val = ""
+        label_val = label_val.strip()
+        if not label_val:
+            label_val = "real"
+        return float(cat.ra_deg[k]), float(cat.dec_deg[k]), pr, label_val
+
+    def _push_target_row(
+        tid: str | None, ra_d: float, dec_d: float, pr: int, label: str,
+    ) -> int:
+        """Append a row and return the assigned No_cat."""
+        try:
+            target_no = int(tid) if tid is not None else None
+        except (ValueError, TypeError):
+            target_no = None
+        if target_no is None or target_no in used_target_nos:
+            # Generate a fresh sequential number that doesn't collide.
+            target_no = max(used_target_nos, default=0) + 1
+            while target_no in used_target_nos:
+                target_no += 1
+        used_target_nos.add(target_no)
+        targets_rows.append({
+            "No_cat": target_no,
+            "Pr": pr,
+            "ra_deg": ra_d,
+            "dec_deg": dec_d,
+            "label": label,
+        })
+        return target_no
+
+    # Step 1: real catalog sources tied to user picks. For each open
+    # user-shutter that has a target_id OR sits inside a catalog source's
+    # footprint, register the source.
+    for (q, s, d), sh in state["open_shutters"].items():
+        tid = sh.target_id or _shutter_source_id(q, s, d)
+        if not tid or tid in real_ids_seen:
+            continue
+        info = _cat_lookup(str(tid))
+        if info is None:
+            continue  # tid we don't know — leave to be re-faked from geometry
+        ra_d, dec_d, pr, label_val = info
+        real_ids_seen.add(str(tid))
+        _push_target_row(str(tid), ra_d, dec_d, pr, label=label_val)
+
+    # Step 2: group open shutters into per-(q,d) consecutive-s runs (slitlets)
+    # and fake an entry for any run that has no real source attached.
+    fiducial = _pointing_skycoord()
+    col_to_s: dict[tuple[int, int], list[tuple[int, str | None]]] = {}
+    for (q, s, d), sh in state["open_shutters"].items():
+        col_to_s.setdefault((q, d), []).append((s, sh.target_id))
+    for (q, d), rows in col_to_s.items():
+        rows.sort(key=lambda t: t[0])
+        # Split into consecutive-s runs
+        runs: list[list[tuple[int, str | None]]] = []
+        run: list[tuple[int, str | None]] = []
+        for s, tid in rows:
+            if run and s == run[-1][0] + 1:
+                run.append((s, tid))
+            else:
+                if run:
+                    runs.append(run)
+                run = [(s, tid)]
+        if run:
+            runs.append(run)
+        # For each run, check if it already has a real catalog source.
+        for run in runs:
+            has_real = any(
+                (tid and str(tid) in real_ids_seen) or
+                (_shutter_source_id(q, s, d) and
+                 str(_shutter_source_id(q, s, d)) in real_ids_seen)
+                for s, tid in run
+            )
+            if has_real:
+                continue
+            # Fake an entry at the middle shutter's RA/Dec; mark it as
+            # synthesized so the output catalog's Label column tells the
+            # user (and APT) which rows weren't in their input catalog.
+            mid = run[len(run) // 2]
+            s_mid = mid[0]
+            v2 = float(V2_MSA[q - 1, s_mid - 1, d - 1])
+            v3 = float(V3_MSA[q - 1, s_mid - 1, d - 1])
+            if fiducial is not None:
+                ra_d, dec_d = _v2v3_to_radec(v2, v3, fiducial, state["pa_v3"])
+            else:
+                ra_d, dec_d = float("nan"), float("nan")
+            no_cat = _push_target_row(
+                None, ra_d, dec_d, pr=5, label="vMPT_synth",
+            )
+            # Tag every shutter in the run with this fake id so later
+            # exporters (MPT plan primaryIds) see consistent target IDs.
+            fake_id = str(no_cat)
+            for s, _ in run:
+                cur = state["open_shutters"].get((q, s, d))
+                if cur is not None and (cur.target_id is None or cur.target_id == ""):
+                    state["open_shutters"][(q, s, d)] = OpenShutter(
+                        q=cur.q, s=cur.s, d=cur.d,
+                        target_id=fake_id,
+                        role=cur.role if cur.role != "manual" else "target" if s == s_mid else "sky",
+                    )
 
     pa_v3 = state["pa_v3"]
     # PA_V3 - PA_AP = -V3IdlYAngle (mod 360); for NRS_FULL_MSA V3IdlYAngle ~ 138.5746°.
@@ -1533,30 +1938,43 @@ def on_export():
         apa_v3_deg=pa_v3,
         pa_ap_deg=pa_ap,
     )
+    # Resolve the MPT catalog filename: align the .cat basename with the
+    # catalog.name we write into the plan JSON. If the user loaded a
+    # specific catalog, mirror its basename; otherwise use the default.
+    if cat is not None and getattr(cat, "source_path", None):
+        mpt_catalog_name = Path(cat.source_path).stem + ".cat"
+    else:
+        mpt_catalog_name = MPT_CATALOG_FILENAME
+
     try:
-        write_observed_targets_cat(str(out_dir / "observed_targets.cat"), targets_rows)
+        # 1) APT-importable primaries catalog (the file APT's Target List
+        # importer wants). The plan JSON's catalog.name matches its stem.
+        write_mpt_catalog(str(out_dir / mpt_catalog_name), targets_rows)
+        # 2) eMPT-style outputs (observed targets, pointing, shutter mask)
+        write_observed_targets_cat(str(out_dir / EMPT_OBSERVED_FILENAME), targets_rows)
         write_pointing_summary_txt(
-            str(out_dir / "pointing_summary.txt"),
+            str(out_dir / EMPT_POINTING_FILENAME),
             pointing, state["disperser"], state["filter"],
             n_targets_total=(len(cat.ra_deg) if cat is not None else 0),
             n_targets_accepted=len(targets_rows),
         )
         open_list = list(state["open_shutters"].values())
         write_shutter_mask_csv(
-            str(out_dir / "shutter_mask.csv"),
+            str(out_dir / EMPT_SHUTTER_MASK_FILENAME),
             open_list, OPERABLE, REASON,
         )
-        # Also drop a session.json next to the APT files so the same
-        # directory can be re-loaded later via Session → Load to restore
-        # picks + pointing + everything.
-        export_session_json(_build_current_session(), str(out_dir / "session.json"))
+        # 3) MPT plan + vMPT workspace sidecar so the bundle round-trips
+        # cleanly: Session → Load on either file restores everything.
+        export_session_json(_build_current_session(), str(out_dir / MPT_PLAN_FILENAME))
         _set_status(
-            f"Exported eMPT bundle + session.json to {out_dir} "
-            f"({len(targets_rows)} targets, {len(open_list)} open shutters).",
-            "ok", clear_after=15,
+            f"Wrote bundle to {out_dir} — {MPT_PLAN_FILENAME} + "
+            f"{mpt_catalog_name} (APT import) + {WORKSPACE_FILENAME} "
+            f"(vMPT state) + 3 eMPT_* files. "
+            f"{len(targets_rows)} targets, {len(open_list)} open shutters.",
+            "ok", clear_after=18,
         )
         # Pre-fill the Session-load input so the user can re-load with one click.
-        session_load_path_input.value = str(out_dir / "session.json")
+        session_load_path_input.value = str(out_dir / MPT_PLAN_FILENAME)
     except Exception as e:  # noqa: BLE001
         _set_status(f"Export failed: {e}", "err")
         traceback.print_exc()
@@ -1584,6 +2002,7 @@ export_btn.on_click(on_export)
 
 
 def _build_current_session() -> Session:
+    img = state["image"]
     return Session(
         pointing_ra_deg=float(state["ra_deg"]),
         pointing_dec_deg=float(state["dec_deg"]),
@@ -1593,7 +2012,8 @@ def _build_current_session() -> Session:
         slitlet_height=int(state["slitlet_height"]),
         open_shutters=list(state["open_shutters"].values()),
         highlighted=list(state["highlighted"]),
-        image_path=(state["image"].source_path if state["image"] else None),
+        image_path=(img.source_path if img else None),
+        wcs_sidecar_path=(getattr(img, "wcs_sidecar_path", None) if img else None),
         catalog_path=(state["catalog"].source_path if state["catalog"] else None),
     )
 
@@ -1613,6 +2033,15 @@ def on_session_save():
         traceback.print_exc()
 
 
+def _resolve_jpg_sidecar(jpg_path: Path, recorded: Optional[str]) -> Optional[str]:
+    """Find the WCS sidecar for a JPG session image. Prefer the path recorded
+    in the session JSON; fall back to a sibling .fits in the same directory."""
+    if recorded and Path(recorded).exists():
+        return recorded
+    candidates = sorted(jpg_path.parent.glob("*.fits"))
+    return str(candidates[0]) if candidates else None
+
+
 def on_session_load():
     path = session_load_path_input.value.strip()
     if not path:
@@ -1627,18 +2056,13 @@ def on_session_load():
     except ValueError as e:
         _set_status(f"Session load failed: {e}", "err")
         return
-    # Apply session to the live UI. Load image/catalog first if paths still exist.
-    if sess.image_path and Path(sess.image_path).exists() and (
-        state["image"] is None
-        or getattr(state["image"], "source_path", None) != sess.image_path
-    ):
-        fits_path_input.value = sess.image_path  # triggers on_fits_path
-    if sess.catalog_path and Path(sess.catalog_path).exists() and (
-        state["catalog"] is None
-        or getattr(state["catalog"], "source_path", None) != sess.catalog_path
-    ):
-        catalog_path_input.value = sess.catalog_path
-    # Pointing & PA — set via the inputs so the standard on_change handlers run
+
+    # Apply pointing/PA/disperser/shutters FIRST so they survive even if the
+    # image fails to load. We push them straight into state and the widgets
+    # rather than via on_change handlers so a missing image doesn't abort
+    # the session restore midway.
+    state["ra_deg"] = float(sess.pointing_ra_deg)
+    state["dec_deg"] = float(sess.pointing_dec_deg)
     ra_input.value = f"{sess.pointing_ra_deg:.6f}"
     dec_input.value = f"{sess.pointing_dec_deg:.6f}"
     _sync_pa_widgets(sess.pa_v3_deg)
@@ -1646,21 +2070,53 @@ def on_session_load():
     if combo_label in DISPERSER_FILTER_LABELS:
         disperser_filter_select.value = combo_label
     else:
-        # Fall back to direct state mutation if the combo isn't in the list
         state["disperser"] = sess.disperser
         state["filter"] = sess.filter_name
     slitlet_select.value = str(sess.slitlet_height)
     state["slitlet_height"] = int(sess.slitlet_height)
-    # Restore the open-shutter dict and highlighted set
     state["open_shutters"] = {
         (sh.q, sh.s, sh.d): sh for sh in sess.open_shutters
     }
     state["highlighted"] = set(sess.highlighted)
     state["history"] = []
+
+    # Now try to load the image. Route by extension so a JPG session goes
+    # through the JPG+sidecar loader, not load_fits. Tolerate failures —
+    # the user keeps the picks and can re-load the image manually.
+    image_note = ""
+    img_path = Path(sess.image_path) if sess.image_path else None
+    if img_path and img_path.exists():
+        ext = img_path.suffix.lower()
+        if ext in (".jpg", ".jpeg", ".png"):
+            sidecar = _resolve_jpg_sidecar(img_path, sess.wcs_sidecar_path)
+            if sidecar is None:
+                image_note = (
+                    f" Image '{img_path.name}' needs a WCS sidecar FITS — "
+                    f"none found alongside it; load the image manually."
+                )
+            else:
+                sidecar_path_input.value = sidecar
+                jpg_path_input.value = str(img_path)  # triggers JPG load
+        elif ext in (".fits", ".fit", ".fts"):
+            fits_path_input.value = str(img_path)  # triggers FITS load
+        else:
+            image_note = f" Unknown image extension {ext!r}; load manually."
+    elif sess.image_path:
+        image_note = f" Image not found at {sess.image_path}; load manually."
+
+    if sess.catalog_path and Path(sess.catalog_path).exists() and (
+        state["catalog"] is None
+        or getattr(state["catalog"], "source_path", None) != sess.catalog_path
+    ):
+        catalog_path_input.value = sess.catalog_path
+
     refresh_overlays()
+    if state["image"] is None and not image_note:
+        image_note = " Load an image to see the overlay."
     _set_status(
         f"Session loaded: {len(state['open_shutters'])} open shutters, "
-        f"{len(state['highlighted'])} highlighted.", "ok", clear_after=10,
+        f"{len(state['highlighted'])} highlighted.{image_note}",
+        "warn" if image_note else "ok", clear_after=14,
     )
 
 
@@ -1761,6 +2217,8 @@ def _apply_plan(plan) -> None:
     if plan.ra_deg is not None and plan.dec_deg is not None:
         ra_input.value = f"{plan.ra_deg:.6f}"
         dec_input.value = f"{plan.dec_deg:.6f}"
+        state["ra_deg"] = plan.ra_deg
+        state["dec_deg"] = plan.dec_deg
     _sync_pa_widgets(plan.v3_pa_deg)
     if plan.grating and plan.filter_name:
         combo = f"{plan.grating} / {plan.filter_name}"
@@ -1769,9 +2227,19 @@ def _apply_plan(plan) -> None:
     state["open_shutters"] = {
         (sh.q, sh.s, sh.d): sh for sh in plan.to_open_shutters()
     }
+    n_open = len(state["open_shutters"])
+    img: LoadedImage | None = state["image"]
+    if img is None:
+        _set_status(
+            f"Loaded plan '{plan.name}': {n_open} open shutters at "
+            f"APA={plan.aperture_pa_deg:.2f}°, V3 PA={plan.v3_pa_deg:.2f}°. "
+            f"Load an image (Image tab) to see and edit the overlay.",
+            "warn", clear_after=20,
+        )
+        return
     refresh_overlays()
     _set_status(
-        f"Loaded plan '{plan.name}': {len(state['open_shutters'])} open shutters, "
+        f"Loaded plan '{plan.name}': {n_open} open shutters, "
         f"APA={plan.aperture_pa_deg:.2f}°, V3 PA={plan.v3_pa_deg:.2f}°.",
         "ok", clear_after=12,
     )
@@ -2198,7 +2666,7 @@ mpt_tab = TabPanel(title="MPT", child=column(
     session_save_btn,
     row(session_load_path_input, session_load_browse_btn),
     session_load_btn,
-    Div(text="<b>Export to APT</b> (eMPT bundle + session.json)"),
+    Div(text=f"<b>Export to APT</b> (eMPT bundle + {MPT_PLAN_FILENAME})"),
     row(export_dir_input, export_dir_browse_btn),
     export_btn,
     width=SIDEBAR_W - 20,

@@ -71,7 +71,83 @@ class OpenShutter:
 
 
 # ---------------------------------------------------------------------------
-# observed_targets.cat
+# MPT catalog (APT-importable target list)
+# ---------------------------------------------------------------------------
+#
+# Format per STScI:
+#   https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/
+#   nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs/mpt-catalogs-examples
+#
+#   • ASCII; optional `#`-prefixed header line naming the columns
+#   • Recognized column names (case-insensitive in the JDox examples):
+#       ID, RA, DEC, Size, Redshift, Reference, Stellarity,
+#       Magnitude, "Magnitude error", R50, Number, Label, Weight, FWHM
+#   • RA / DEC required; degrees or sexagesimal hexadecimal
+#   • Integer ID recommended in the first column
+#   • Acceptable file formats: CSV, TSV, whitespace-separated, VOT
+#   • The JDox examples use tab-separated columns; we follow that.
+#
+# We write a `#`-prefixed header with PLAIN column names — no "[deg]"
+# unit suffix, since APT's column-name lookup is matching the exact
+# tokens `ID`, `RA`, `DEC`, etc.
+#
+#   # ID	RA	DEC	Weight	Primary	Label
+#   1	39.9826125000	-1.5916444000	1	1	real
+#   2	39.9870166600	-1.5891333000	5	1	vMPT_synth
+#   ...
+#
+# The `Primary` column is a Number-typed flag (1 = primary, 0 = filler)
+# that APT users can filter on inside the MPT to split the catalog into
+# Primary and Filler candidate sets. vMPT picks are all primaries by
+# construction, so we write `1` everywhere; downstream the user can
+# edit the file to demote rows to fillers (`Primary=0`).
+#
+# The `Label` column distinguishes the two provenance classes:
+#   • `real`        — source came from the user-loaded input catalog
+#                     (or carries the input catalog's `label`/`name`
+#                     value if it had one).
+#   • `vMPT_synth`  — synthesized entry placed at the centre of an open
+#                     slitlet that had no real catalog match — so the
+#                     APT plan can still resolve a target ID for that
+#                     slitlet.
+# `Label` is one of APT's recognized column names; it's free text that
+# APT carries through to hover / display.
+
+
+_MPT_CAT_HEADER = "# ID\tRA\tDEC\tWeight\tPrimary\tLabel"
+
+
+def write_mpt_catalog(path: str, targets: list[dict]) -> None:
+    """Write a target list in APT MPT-importable format (tab-separated).
+
+    `targets` is a list of dicts each containing:
+      • ``No_cat`` (int ID) — required
+      • ``ra_deg``, ``dec_deg`` — required, decimal degrees
+      • ``Pr``    — weight (int); defaults to 1
+      • ``label`` — text in the Label column; defaults to "real". Use
+                    "vMPT_synth" for entries we made up for unmatched
+                    slitlets; the original catalog's label/name if you
+                    have it.
+
+    All rows are written as primaries (Primary=1); the user can edit
+    the column later to demote rows to fillers (Primary=0).
+    """
+    lines = [_MPT_CAT_HEADER]
+    for t in targets:
+        no_cat = int(t["No_cat"])
+        weight = int(t.get("Pr", 1))
+        ra = float(t["ra_deg"])
+        dec = float(t["dec_deg"])
+        label = str(t.get("label", "real")) or "real"
+        # Scrub anything that would break the tab-separated parse.
+        label = label.replace("\t", " ").replace("\n", " ").strip() or "real"
+        lines.append(f"{no_cat}\t{ra:.10f}\t{dec:.10f}\t{weight}\t1\t{label}")
+    with open(path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
+# ---------------------------------------------------------------------------
+# observed_targets.cat (eMPT-style)
 # ---------------------------------------------------------------------------
 
 

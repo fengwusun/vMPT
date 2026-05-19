@@ -20,6 +20,7 @@ class LoadedImage:
     shape: tuple
     source_path: str
     mode: str
+    wcs_sidecar_path: Optional[str] = None  # set only for jpg+sidecar mode
 
 
 def _first_image_hdu(hdul: fits.HDUList) -> int:
@@ -105,6 +106,7 @@ def load_jpg_with_sidecar(
         shape=shape,
         source_path=jpg_path,
         mode="jpg+sidecar",
+        wcs_sidecar_path=sidecar_fits_path,
     )
 
 
