@@ -3077,7 +3077,11 @@ def _on_update_available(
     update_box.visible = True
 
 
-def _check_for_updates_blocking() -> None:
+def _check_for_updates_blocking(session_doc) -> None:
+    """Run in a background thread. `session_doc` is the user-session doc
+    captured BEFORE the thread started — curdoc() is thread-local, so
+    re-querying it from this thread returns a different (irrelevant)
+    document and the next-tick callback never fires on the user's UI."""
     local = _local_git_head()
     if not local:
         return  # not a git checkout — nothing to compare against
@@ -3094,18 +3098,23 @@ def _check_for_updates_blocking() -> None:
     except (_urllib_error.URLError, _urllib_error.HTTPError, TimeoutError,
             OSError, _json.JSONDecodeError, UnicodeDecodeError):
         return  # offline / rate-limited / unparseable — silently skip
-    # `status` is one of: "ahead", "behind", "identical", "diverged".
-    # Only "behind" means the user is missing remote commits and should
-    # consider pulling. "ahead" or "diverged" → leave them alone.
+    # GitHub's compare/BASE...HEAD reports `status` from HEAD's
+    # perspective relative to BASE. We call compare(<local_sha>...main),
+    # so BASE=local, HEAD=main. The meaningful statuses for us:
+    #   "ahead"     → main has commits the local checkout doesn't (USER NEEDS UPDATE)
+    #   "behind"    → local has commits not on main (user is ahead of remote)
+    #   "identical" → up to date
+    #   "diverged"  → both sides have unique commits (fork / WIP branch)
+    # We only nag on "ahead". Leave "behind"/"diverged"/"identical" alone.
     status = (data.get("status") or "").strip().lower()
-    if status != "behind":
+    if status != "ahead":
         return
     remote_head = ((data.get("commits") or [{}])[-1].get("sha") or "").strip()
     head_commit = (data.get("commits") or [{}])[-1].get("commit") or {}
     commit_msg = (head_commit.get("message") or "").strip()
     n_commits = len(data.get("commits") or [])
     try:
-        curdoc().add_next_tick_callback(
+        session_doc.add_next_tick_callback(
             lambda: _on_update_available(
                 local, remote_head or "main", commit_msg, n_commits,
             )
@@ -3115,7 +3124,13 @@ def _check_for_updates_blocking() -> None:
 
 
 # Only run the version-check when we're being served by Bokeh — not
-# when main.py is imported by the test suite (which collects but doesn't
-# serve), and not from random REPL imports.
-if curdoc().session_context is not None:
-    _threading.Thread(target=_check_for_updates_blocking, daemon=True).start()
+# during pytest imports or REPL imports. Capture the session doc here
+# (on the main session thread); the worker thread can't query curdoc()
+# itself because curdoc() is thread-local.
+_session_doc = curdoc()
+if _session_doc.session_context is not None:
+    _threading.Thread(
+        target=_check_for_updates_blocking,
+        args=(_session_doc,),
+        daemon=True,
+    ).start()
