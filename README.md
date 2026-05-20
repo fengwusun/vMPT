@@ -11,9 +11,18 @@ automated optimization step — you keep full control. Save the state
 as a JSON file, send it to a collaborator, and they pick up where
 you left off.
 
-![status](https://img.shields.io/badge/tests-60%2B%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-63%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
+![release](https://img.shields.io/badge/release-v1.0.0-blueviolet)
+
+![vMPT interface](docs/interface.jpg)
+
+*The vMPT interface running against the RXCJ0600 example: target-field
+image (centre) with the 4 MSA quadrants overlaid at the chosen V3 PA,
+stuck-open shutters as dark-red outlines, user picks as red fills,
+spec-overlap rows in orange. Left sidebar: image / aim / pick / MPT
+tabs. Right panel: rotating tip card + quick-reference legend.*
 
 ---
 
