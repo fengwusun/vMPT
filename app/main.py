@@ -625,28 +625,61 @@ pointing_handle_glyph = fig.scatter(
 # on_tap() below. (Bokeh's PointDrawTool drag interaction was unreliable
 # across versions, so we use a click-with-modifier instead.)
 
+# Tooltips use compact single-row HTML strings rather than Bokeh's
+# default key/value table (which is much taller and wider). Keep one
+# line per tooltip where possible; wrap to a 2nd line only for the
+# open-shutter tooltip which carries λ + gap info.
+_TIP_BASE_STYLE = (
+    "font-family: Calibri, Helvetica, Arial, sans-serif; "
+    "font-size: 11.5px; line-height: 1.35; padding: 3px 6px; "
+    "white-space: nowrap;"
+)
 fig.add_tools(HoverTool(
     renderers=[bg_shutters_glyph],
-    tooltips=[("Q,s,d", "@q,@s,@d"), ("state", "operable")],
+    tooltips=(
+        f'<div style="{_TIP_BASE_STYLE} color:#555;">'
+        f'  Q@q · s@s · d@d &nbsp;<span style="color:#aaa">operable</span>'
+        f'</div>'
+    ),
 ))
 fig.add_tools(HoverTool(
     renderers=[stuck_open_glyph],
-    tooltips=[("Q,s,d", "@q,@s,@d"), ("state", "STUCK OPEN")],
+    tooltips=(
+        f'<div style="{_TIP_BASE_STYLE} color:#b30000; font-weight:600;">'
+        f'  Q@q · s@s · d@d &nbsp;<span style="color:#7a0000">STUCK OPEN</span>'
+        f'</div>'
+    ),
 ))
 fig.add_tools(HoverTool(
     renderers=[open_shutters_glyph],
-    tooltips=[("Q,s,d", "@q,@s,@d"),
-              ("target", "@target"),
-              ("λ blue / red", "@lam_blue{0.00} / @lam_red{0.00} μm"),
-              ("NRS1/NRS2 gap", "@gap_label")],
+    tooltips=(
+        f'<div style="{_TIP_BASE_STYLE} color:#1a3b66;">'
+        f'  <b>Q@q · s@s · d@d</b>'
+        f'  <span style="color:#888;"> · target </span>'
+        f'  <b>@target</b><br>'
+        f'  <span style="color:#888;">λ</span> '
+        f'  <b>@lam_blue{{0.00}}</b><span style="color:#888;">–</span><b>@lam_red{{0.00}}</b> μm'
+        f'  <span style="color:#888;"> · gap </span><b>@gap_label</b>'
+        f'</div>'
+    ),
 ))
 fig.add_tools(HoverTool(
     renderers=[fixed_slits_glyph],
-    tooltips=[("slit", "@name")],
+    tooltips=(
+        f'<div style="{_TIP_BASE_STYLE} color:#8a6300;">'
+        f'  <b>@name</b>'
+        f'</div>'
+    ),
 ))
 fig.add_tools(HoverTool(
     renderers=[target_glyph],
-    tooltips=[("ID", "@id"), ("RA,Dec", "@ra{0.0000}, @dec{0.0000}"), ("Pr", "@pr")],
+    tooltips=(
+        f'<div style="{_TIP_BASE_STYLE} color:#1a3b66;">'
+        f'  <b>@id</b>'
+        f'  <span style="color:#888;"> · </span>@ra{{0.0000}}, @dec{{0.0000}}'
+        f'  <span style="color:#888;"> · Pr </span>@pr'
+        f'</div>'
+    ),
 ))
 
 # ---------------------------------------------------------------------------
