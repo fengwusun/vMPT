@@ -158,7 +158,23 @@ HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 # Bokeh widgets / glyphs
 # ---------------------------------------------------------------------------
 
-status = Div(text="Enter a file path below (or use the upload widgets for small files).", width=420)
+status = Div(
+    text="Enter a file path below (or use the upload widgets for small files).",
+    # Stretch to the sidebar's width (340 px) so the status box can't
+    # overflow horizontally — previously the fixed width=420 was wider
+    # than the sidebar and the wrapped status text would render on top
+    # of the MPT-tab content below it.
+    sizing_mode="stretch_width",
+    styles={
+        "padding": "4px 8px",
+        "font-size": "11.5px",
+        "line-height": "1.35",
+        "border-top": "1px solid #e0e6f0",
+        "box-sizing": "border-box",
+        "overflow-wrap": "anywhere",
+        "word-break": "break-word",
+    },
+)
 
 # Path-based inputs are the primary way to load — no WebSocket size limit, no temp files.
 fits_path_input = TextInput(title="FITS path (local)", value="", placeholder="/path/to/image.fits")
