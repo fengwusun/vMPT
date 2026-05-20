@@ -144,6 +144,17 @@ def _push_history() -> None:
         state["history"].pop(0)
 
 # ---------------------------------------------------------------------------
+# Layout constants — declared early so they're available everywhere
+# (help_panel and sidebar reference these during widget construction
+# before the figure block where the figure dims are used).
+# ---------------------------------------------------------------------------
+FIG_W_HINT = 900     # initial canvas width hint (Bokeh stretches it)
+FIG_H_HINT = 800     # initial canvas height hint
+SIDEBAR_W = 340      # left tab panel (Image / Aim / Pick / MPT)
+HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
+
+
+# ---------------------------------------------------------------------------
 # Bokeh widgets / glyphs
 # ---------------------------------------------------------------------------
 
@@ -295,63 +306,88 @@ _tip_state = {"idx": 0}
 tip_div.text = _render_tip(_tip_state["idx"])
 
 help_div = Div(
-    width=320,
-    styles=dict(
-        background="#f8f9fa", color="#212529",
-        padding="10px 14px", border="1px solid #dee2e6",
-        **{"border-radius": "6px"},
-    ),
+    # Note: the OUTER help_panel column constrains width — match it here
+    # with box-sizing so padding stays inside the 340-px envelope and
+    # the long inline tokens like <code>vMPT_workspace.json</code> can
+    # wrap rather than overflow horizontally.
+    sizing_mode="stretch_width",
+    styles={
+        "background": "#f8f9fa",
+        "color": "#212529",
+        "padding": "8px 10px",
+        "border": "1px solid #dee2e6",
+        "border-radius": "6px",
+        "box-sizing": "border-box",
+        "font-size": "12px",
+        "line-height": "1.4",
+        "overflow-wrap": "anywhere",
+        "word-break": "break-word",
+    },
     text="""
-<h3 style='margin-top:0'>Quick guide</h3>
+<style>
+  /* Local typography for the Quick guide — keeps the nested lists from
+     pushing content off the right edge of the 340-px help panel. */
+  .vmpt-help h3 { margin: 0 0 6px 0; font-size: 14px; }
+  .vmpt-help b  { color: #1a3b66; }
+  .vmpt-help ul { margin: 2px 0 6px 0; padding-left: 16px; }
+  .vmpt-help ul ul { margin: 1px 0 1px 0; padding-left: 12px; }
+  .vmpt-help li { margin: 1px 0; }
+  .vmpt-help code { font-size: 11px; padding: 0 2px;
+                    background: #ececec; border-radius: 2px;
+                    word-break: break-all; }
+</style>
+<div class="vmpt-help">
+<h3>Quick guide</h3>
 <b>1. Load an image</b>
-<ul style='margin:4px 0 8px 18px'>
+<ul>
   <li>One-click <b>Load Abell 370 example</b> or <b>Load RXCJ0600 example</b> from the <b>Image</b> tab — fastest.</li>
   <li>Or paste a local <b>FITS</b> path (with WCS), or a <b>JPG + sidecar FITS</b> pair.</li>
 </ul>
 <b>2. Optional: target catalog</b>
-<ul style='margin:4px 0 8px 18px'>
+<ul>
   <li>CSV / ASCII / FITS with at least <code>ID, RA, DEC</code>.</li>
-  <li>Targets render as yellow circles. A shutter that contains a catalog source auto-tags the slitlet on click.</li>
+  <li>Targets render as yellow circles. A shutter containing a catalog source auto-tags the slitlet on click.</li>
 </ul>
 <b>3. Aim the MSA</b>
-<ul style='margin:4px 0 8px 18px'>
+<ul>
   <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3 PA + 138.575° (mod 360).</li>
-  <li><b>Shift + click</b> on the image to move pointing. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks it.</li>
-  <li>Type a date in <b>Visibility</b> + <b>Compute allowed V3 PA</b> to query jwst_gtvt for the valid window.</li>
+  <li><b>Shift + click</b> to move pointing. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks it.</li>
+  <li>Type a date in <b>Visibility</b> → <b>Compute allowed V3 PA</b> to query jwst_gtvt.</li>
 </ul>
 <b>4. Hand-pick shutters</b>
-<ul style='margin:4px 0 8px 18px'>
-  <li>Pick the <b>N-shutter slitlet</b> size (1, 2, 3, or 5) in the <b>Pick</b> tab.</li>
-  <li><b>Click</b> anywhere → opens an N-shutter slitlet at the nearest operable shutter. Click an open one again → closes the slitlet.</li>
-  <li><b>Double-click</b> any shutter → toggles a <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
+<ul>
+  <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Pick</b>.</li>
+  <li><b>Click</b> → opens N-shutter slitlet at the nearest operable shutter. Click an open shutter to close the slitlet.</li>
+  <li><b>Double-click</b> → toggles <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
   <li>Layers (Pick tab → <b>Layers</b>):
-    <ul style='margin:2px 0 0 16px'>
-      <li><span style='background:silver;padding:0 4px'>silver-edge</span> = operable, ready to pick</li>
+    <ul>
+      <li><span style='background:silver;padding:0 4px'>silver</span> = operable</li>
       <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
-      <li><span style='color:#b30000;font-weight:700'>dark red thick</span> = stuck-open (always dispersing)</li>
-      <li><span style='color:#e26a00;font-weight:700'>orange tint</span> = spec-overlap warning</li>
-      <li><span style='color:gold;font-weight:700'>gold</span> = 5 NIRSpec fixed slits</li>
-      <li><span style='color:#ddd200;font-weight:700'>yellow circle</span> = catalog target (unmatched) · <span style='color:#2e9b3f;font-weight:700'>green circle</span> = catalog target inside an open shutter</li>
+      <li><span style='color:#b30000;font-weight:700'>dark red</span> = stuck-open</li>
+      <li><span style='color:#e26a00;font-weight:700'>orange</span> = spec-overlap warning</li>
+      <li><span style='color:gold;font-weight:700'>gold</span> = fixed slits</li>
+      <li><span style='color:#ddd200;font-weight:700'>yellow ○</span> = catalog target · <span style='color:#2e9b3f;font-weight:700'>green ○</span> = matched to an open shutter</li>
     </ul>
   </li>
 </ul>
 <b>5. Save / share / export</b>
-<ul style='margin:4px 0 8px 18px'>
-  <li><b>MPT</b> tab → <b>Save session</b> writes a bundle. Same writer as Export, just under a chosen path.</li>
-  <li><b>Load session</b> restores the bundle — point at <code>MPT_plan.json</code> OR <code>vMPT_workspace.json</code>, the sibling auto-loads.</li>
-  <li><b>Export eMPT bundle</b> writes a fresh timestamped folder:
-    <ul style='margin:2px 0 0 16px'>
-      <li><code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code> → load into APT MPT</li>
-      <li><code>vMPT_workspace.json</code> → vMPT round-trip state</li>
-      <li><code>eMPT_*</code> three files → for the eMPT pipeline</li>
+<ul>
+  <li><b>MPT</b> tab → <b>Save session</b> writes a bundle.</li>
+  <li><b>Load session</b> — point at <code>MPT_plan.json</code> or <code>vMPT_workspace.json</code>; the sibling auto-loads.</li>
+  <li><b>Export eMPT bundle</b> writes a timestamped folder:
+    <ul>
+      <li><code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code> → APT MPT</li>
+      <li><code>vMPT_workspace.json</code> → vMPT round-trip</li>
+      <li><code>eMPT_*</code> three files → eMPT pipeline</li>
     </ul>
   </li>
 </ul>
 <b>Interactions</b>
-<ul style='margin:4px 0 8px 18px'>
+<ul>
   <li><b>Wheel</b>: zoom · <b>Drag</b>: pan · <b>Box zoom</b>: toolbar → drag</li>
-  <li><b>Reset</b>: toolbar icon · <b>Undo</b>: Pick tab → <b>Undo last</b></li>
+  <li><b>Reset</b>: toolbar · <b>Undo</b>: Pick → <b>Undo last</b></li>
 </ul>
+</div>
 <p style='margin:4px 0'>Full reference in <code>README.md</code> · file roles in <code>CONTEXT.md</code>.</p>
 """,
 )
@@ -366,12 +402,21 @@ def on_help_toggle():
 help_toggle_btn.on_click(on_help_toggle)
 help_panel = column(
     help_toggle_btn, tip_div, help_div,
-    width=340,
+    width=HELPPANEL_W,
     # The Quick guide is long. Make the help panel scroll vertically
     # within whatever height it gets in the page layout, so users on
     # smaller screens can still reach the bottom of the guide.
     height_policy="max",
-    styles={"overflow-y": "auto", "max-height": "100vh"},
+    styles={
+        "overflow-y": "auto",
+        "overflow-x": "hidden",   # never horizontally scroll the guide
+        "max-height": "100vh",
+        # Long inline tokens like vMPT_workspace.json shouldn't push the
+        # panel wider — break them anywhere if needed.
+        "overflow-wrap": "anywhere",
+        "word-break": "break-word",
+        "box-sizing": "border-box",
+    },
 )
 
 disperser_filter_select = Select(
@@ -530,10 +575,9 @@ src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 # scrolling; on a 24"+ monitor it grows up to the row's natural size.
 #
 # Sidebar / help-panel are fixed-width — the canvas absorbs the rest.
-FIG_W_HINT = 900
-FIG_H_HINT = 800
-SIDEBAR_W = 340      # left tab panel (Image / Aim / Pick / MPT)
-HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
+# (FIG_W_HINT / FIG_H_HINT / SIDEBAR_W / HELPPANEL_W are defined earlier
+# in the file because help_panel references HELPPANEL_W during its
+# construction before this point.)
 fig = figure(
     width=FIG_W_HINT, height=FIG_H_HINT,
     sizing_mode="stretch_both",
@@ -2939,11 +2983,15 @@ sidebar_tabs = Tabs(
 )
 
 # Sidebar (no stats — stats now live above the figure as a wide bar).
+# The MPT tab content (import + save/load + export) is taller than the
+# viewport on most laptops, so the sidebar scrolls internally on overflow.
 sidebar = column(
     loading_banner,
     sidebar_tabs,
     status,
     width=SIDEBAR_W,
+    height_policy="max",
+    styles={"overflow-y": "auto", "max-height": "100vh"},
 )
 
 # Figure column: status bar on top (stretches to canvas width) and the
