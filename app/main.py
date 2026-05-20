@@ -364,7 +364,15 @@ def on_help_toggle():
 
 
 help_toggle_btn.on_click(on_help_toggle)
-help_panel = column(help_toggle_btn, tip_div, help_div, width=340)
+help_panel = column(
+    help_toggle_btn, tip_div, help_div,
+    width=340,
+    # The Quick guide is long. Make the help panel scroll vertically
+    # within whatever height it gets in the page layout, so users on
+    # smaller screens can still reach the bottom of the guide.
+    height_policy="max",
+    styles={"overflow-y": "auto", "max-height": "100vh"},
+)
 
 disperser_filter_select = Select(
     title="Disperser / Filter",
@@ -530,13 +538,15 @@ fig = figure(
     width=FIG_W_HINT, height=FIG_H_HINT,
     sizing_mode="stretch_both",
     match_aspect=True,
-    # Explicit Range1d (not DataRange1d) so refresh_overlays adding
-    # wide-extent polygons (PRISM spec-overlap bars spanning a quadrant)
-    # doesn't auto-zoom the figure OUT after a click. Pan / box-zoom /
-    # wheel-zoom tools still mutate Range1d directly, so user-initiated
-    # zoom is unaffected.
-    x_range=Range1d(start=0, end=1, bounds=None),
-    y_range=Range1d(start=0, end=1, bounds=None),
+    # IMPORTANT: leave x_range / y_range at the default DataRange1d.
+    # Per Bokeh docs match_aspect=True only works with DataRange1d —
+    # switching to explicit Range1d silently breaks the aspect lock and
+    # rectangular images (e.g. 2200×2500 FITS) get stretched horizontally
+    # by ~factor canvas_aspect/data_aspect. The earlier Range1d "fix to
+    # prevent auto-zoom-out after a click" is reverted; that potential
+    # zoom-out is harmless in practice (the spec-overlap polygons stay
+    # within the already-visible MSA footprint at the relevant zooms).
+    #
     # No "tap" tool: it auto-selects clicked glyphs, which causes Bokeh's
     # default nonselection-rendering to fade every *other* open shutter
     # to 20% alpha. Mouse clicks come via fig.on_event(Tap, on_tap).
@@ -2935,3 +2945,177 @@ def _advance_tip() -> None:
 
 
 curdoc().add_periodic_callback(_advance_tip, 15_000)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# GitHub version-check (non-blocking)
+# ──────────────────────────────────────────────────────────────────────────
+# On startup, in a background thread, ask GitHub for the latest commit
+# on `main`. If the local checkout's HEAD differs, show a dismissible
+# notification overlay. Failures (no network, no git, rate-limit) are
+# silent — version-checking is a courtesy, not a hard dependency.
+import json as _json
+import subprocess as _subprocess
+import threading as _threading
+import urllib.error as _urllib_error
+import urllib.request as _urllib_request
+
+_GITHUB_OWNER = "fengwusun"
+_GITHUB_REPO = "vMPT"
+_GITHUB_WEB_URL = f"https://github.com/{_GITHUB_OWNER}/{_GITHUB_REPO}"
+
+
+def _github_compare_url(local_sha: str) -> str:
+    """GitHub's compare endpoint tells us whether the user's local HEAD
+    is ahead/behind/diverged from main, plus the list of new commits.
+    We use the API JSON variant (not the HTML page) for status detection."""
+    return (
+        f"https://api.github.com/repos/{_GITHUB_OWNER}/"
+        f"{_GITHUB_REPO}/compare/{local_sha}...main"
+    )
+
+
+def _local_git_head() -> str | None:
+    """Return the SHA of the local checkout's HEAD, or None if not in a
+    git working tree."""
+    try:
+        result = _subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+    except (FileNotFoundError, _subprocess.SubprocessError, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    sha = result.stdout.strip()
+    return sha if len(sha) == 40 else None
+
+
+# The notification widgets — built up-front, hidden by default; the
+# background thread reveals them via a doc tick callback when an update
+# is detected. CSS `position: fixed` makes them float above the layout
+# so they don't displace the canvas.
+update_div = Div(
+    text="",
+    width=360,
+    styles={
+        "background": "linear-gradient(135deg, #fff3cd 0%, #ffe9a0 100%)",
+        "border": "1px solid #ddb84c",
+        "border-radius": "8px",
+        "padding": "12px 14px 6px 14px",
+        "box-shadow": "0 4px 16px rgba(0,0,0,0.15)",
+        "color": "#5a4500",
+        "font-size": "12.5px",
+        "line-height": "1.45",
+    },
+)
+update_dismiss_btn = Button(
+    label="Dismiss", button_type="default", width=80, height=28,
+)
+update_box = column(
+    update_div, update_dismiss_btn,
+    visible=False,
+    styles={
+        "position": "fixed",
+        "top": "70px",
+        "right": "20px",
+        "z-index": "99999",
+        "max-width": "380px",
+    },
+)
+
+
+def _on_update_dismiss() -> None:
+    update_box.visible = False
+
+
+update_dismiss_btn.on_click(_on_update_dismiss)
+curdoc().add_root(update_box)
+
+
+def _on_update_available(
+    local_sha: str, remote_sha: str, commit_msg: str, n_commits: int,
+) -> None:
+    """Runs on the Bokeh document thread. Reveals the update notification."""
+    short_local = local_sha[:7]
+    short_remote = remote_sha[:7] if len(remote_sha) >= 7 else remote_sha
+    safe_msg = (commit_msg or "").splitlines()[0][:140]
+    safe_msg = safe_msg.replace("<", "&lt;").replace(">", "&gt;")
+    commits_label = (
+        f"{n_commits} new commit{'s' if n_commits != 1 else ''} on GitHub"
+        if n_commits else "Newer commits on GitHub"
+    )
+    update_div.text = (
+        '<div style="display:flex; align-items:flex-start; gap:10px;">'
+        '  <div style="font-size:22px; line-height:1; flex-shrink:0;">📦</div>'
+        '  <div style="min-width:0;">'
+        '    <div style="font-weight:700; color:#7a5d00; font-size:13px; '
+        '                margin-bottom:4px; letter-spacing:0.2px;">'
+        '      vMPT update available'
+        '    </div>'
+        '    <div style="font-size:11.5px; color:#6f5b1f; margin-bottom:6px;">'
+        f'      {commits_label}: <code>{short_local}</code> → '
+        f'      <code>{short_remote}</code>'
+        '    </div>'
+        f'    <div style="font-size:11.5px; color:#6f5b1f; margin-bottom:8px; '
+        '                 font-style:italic;">'
+        f'      Latest: {safe_msg}'
+        '    </div>'
+        f'    <a href="{_GITHUB_WEB_URL}/compare/{short_local}...main" '
+        '       target="_blank" rel="noopener" '
+        '       style="color:#7a5d00; font-weight:600; text-decoration:none; '
+        '              font-size:11.5px; border-bottom:1px solid #7a5d0033;">'
+        '      Review changes on GitHub →'
+        '    </a>'
+        '    <div style="font-size:10.5px; color:#8a7530; margin-top:6px;">'
+        '      Run <code>git pull</code> and restart the server to update.'
+        '    </div>'
+        '  </div>'
+        '</div>'
+    )
+    update_box.visible = True
+
+
+def _check_for_updates_blocking() -> None:
+    local = _local_git_head()
+    if not local:
+        return  # not a git checkout — nothing to compare against
+    try:
+        req = _urllib_request.Request(
+            _github_compare_url(local),
+            headers={
+                "Accept": "application/vnd.github+json",
+                "User-Agent": "vMPT-version-check",
+            },
+        )
+        with _urllib_request.urlopen(req, timeout=6) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except (_urllib_error.URLError, _urllib_error.HTTPError, TimeoutError,
+            OSError, _json.JSONDecodeError, UnicodeDecodeError):
+        return  # offline / rate-limited / unparseable — silently skip
+    # `status` is one of: "ahead", "behind", "identical", "diverged".
+    # Only "behind" means the user is missing remote commits and should
+    # consider pulling. "ahead" or "diverged" → leave them alone.
+    status = (data.get("status") or "").strip().lower()
+    if status != "behind":
+        return
+    remote_head = ((data.get("commits") or [{}])[-1].get("sha") or "").strip()
+    head_commit = (data.get("commits") or [{}])[-1].get("commit") or {}
+    commit_msg = (head_commit.get("message") or "").strip()
+    n_commits = len(data.get("commits") or [])
+    try:
+        curdoc().add_next_tick_callback(
+            lambda: _on_update_available(
+                local, remote_head or "main", commit_msg, n_commits,
+            )
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
+# Only run the version-check when we're being served by Bokeh — not
+# when main.py is imported by the test suite (which collects but doesn't
+# serve), and not from random REPL imports.
+if curdoc().session_context is not None:
+    _threading.Thread(target=_check_for_updates_blocking, daemon=True).start()
