@@ -3,8 +3,6 @@
   vMPT — visual MSA Planning Tool
 </h1>
 
-<sub>The logo distils the app at a glance: the four <b style="color:#3a7eff">blue squares</b> are the MSA quadrants, the <b style="color:#ff4d4d">red pixels</b> are open shutters, and the <b style="color:#7fff00">lime cross</b> at the centre is the pointing.</sub>
-
 Interactive Bokeh app for hand-picking JWST/NIRSpec MSA shutter
 configurations on an image of the target field. Lets you (and your
 collaborators) pick shutters one at a time, see the spectral
