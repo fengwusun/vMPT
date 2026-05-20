@@ -464,28 +464,31 @@ slitlet_select = Select(
 
 snap_box = CheckboxGroup(labels=["Snap target to nearest operable"], active=[0])
 
-# ── Overlay appearance sliders ───────────────────────────────────────────
-# Live-tune the alpha and stroke of the two heavy overlay layers. Wired
-# in to the glyph models below (after they're constructed), so the
-# update is immediate (no refresh_overlays needed).
-op_alpha_slider = Slider(
-    start=0.0, end=0.8, step=0.05, value=0.20,
-    title="Operable edge alpha",
+# ── Overlay-appearance picker ────────────────────────────────────────────
+# One dropdown + two sliders (alpha, stroke) that retarget themselves at
+# whichever layer the user selects. The mapping from each layer name to
+# its glyph properties is in `_OVERLAY_LAYER_CONFIG` further down; the
+# slider on_change callbacks read that config to decide which glyph
+# attribute to mutate.
+overlay_layer_select = Select(
+    title="Adjust layer",
+    options=[
+        "Operable shutters",
+        "Overlapping shutters",
+        "Picked shutters",
+        "Stuck open",
+        "Catalog sources",
+    ],
+    value="Operable shutters",
+)
+overlay_alpha_slider = Slider(
+    start=0.0, end=1.0, step=0.05, value=0.20,
+    title="Alpha",
     width=SIDEBAR_W - 40,
 )
-op_width_slider = Slider(
-    start=0.0, end=2.5, step=0.05, value=0.75,
-    title="Operable edge width (px)",
-    width=SIDEBAR_W - 40,
-)
-overlap_alpha_slider = Slider(
-    start=0.0, end=0.6, step=0.02, value=0.10,
-    title="Spec-overlap fill alpha",
-    width=SIDEBAR_W - 40,
-)
-overlap_width_slider = Slider(
-    start=0.0, end=2.0, step=0.05, value=0.0,
-    title="Spec-overlap stroke (px)",
+overlay_stroke_slider = Slider(
+    start=0.0, end=3.0, step=0.05, value=0.75,
+    title="Stroke (px)",
     width=SIDEBAR_W - 40,
 )
 
@@ -2783,33 +2786,111 @@ _bind_browse(export_dir_browse_btn, export_dir_input,
 snap_box.on_change("active", on_snap)
 
 
-# ── Overlay-appearance slider callbacks ──────────────────────────────────
-# These flip glyph model attributes directly, no refresh_overlays needed —
-# Bokeh propagates the property change to the renderer client-side.
-def _on_op_alpha(attr, old, new):
-    bg_shutters_glyph.glyph.line_alpha = float(new)
+# ── Overlay-appearance picker callbacks ──────────────────────────────────
+# Each layer entry describes which glyph property the alpha and stroke
+# sliders write to, the slider ranges/steps, and the layer's default
+# values. When the user changes the dropdown, the sliders are
+# reconfigured to that layer's profile.
+#
+# `stroke_attr` is normally "line_width" but for catalog markers we use
+# "size" (marker diameter in screen px) since stroke is data-driven there.
+_OVERLAY_LAYER_CONFIG = {
+    "Operable shutters":     {
+        "glyph": bg_shutters_glyph,
+        "alpha_attr": "line_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 3.0, 0.05),
+        "stroke_label": "Stroke (px)",
+    },
+    "Overlapping shutters":  {
+        "glyph": spec_overlap_glyph,
+        "alpha_attr": "fill_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 0.8, 0.02), "stroke_range": (0.0, 3.0, 0.05),
+        "stroke_label": "Stroke (px)",
+        # When the user moves stroke off 0, also reveal line_alpha so the
+        # outline actually shows.
+        "stroke_extra": lambda v: setattr(
+            spec_overlap_glyph.glyph, "line_alpha", 0.6 if v > 0 else 0.0
+        ),
+    },
+    "Picked shutters":       {
+        "glyph": open_shutters_glyph,
+        "alpha_attr": "fill_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 4.0, 0.1),
+        "stroke_label": "Stroke (px)",
+    },
+    "Stuck open":            {
+        "glyph": stuck_open_glyph,
+        "alpha_attr": "line_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 5.0, 0.1),
+        "stroke_label": "Stroke (px)",
+    },
+    "Catalog sources":       {
+        "glyph": target_glyph,
+        "alpha_attr": "line_alpha", "stroke_attr": "size",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (4.0, 30.0, 1.0),
+        "stroke_label": "Marker size (px)",
+    },
+}
+
+# Guard flag — programmatic slider updates from _on_overlay_layer
+# shouldn't cascade back through _on_overlay_alpha / _on_overlay_stroke
+# and stomp on the glyph properties we just read out.
+_overlay_syncing = {"flag": False}
 
 
-def _on_op_width(attr, old, new):
-    bg_shutters_glyph.glyph.line_width = float(new)
+def _on_overlay_layer(attr, old, new):
+    cfg = _OVERLAY_LAYER_CONFIG.get(new)
+    if cfg is None:
+        return
+    _overlay_syncing["flag"] = True
+    try:
+        a_lo, a_hi, a_step = cfg["alpha_range"]
+        s_lo, s_hi, s_step = cfg["stroke_range"]
+        overlay_alpha_slider.update(start=a_lo, end=a_hi, step=a_step)
+        overlay_stroke_slider.update(
+            start=s_lo, end=s_hi, step=s_step, title=cfg["stroke_label"],
+        )
+        # Read current values from the glyph and reflect them.
+        cur_alpha = getattr(cfg["glyph"].glyph, cfg["alpha_attr"])
+        cur_stroke = getattr(cfg["glyph"].glyph, cfg["stroke_attr"])
+        # Bokeh string-field references aren't numbers — fall back to a
+        # sensible default if the property is data-driven.
+        try:
+            overlay_alpha_slider.value = max(a_lo, min(a_hi, float(cur_alpha)))
+        except (TypeError, ValueError):
+            overlay_alpha_slider.value = a_lo
+        try:
+            overlay_stroke_slider.value = max(s_lo, min(s_hi, float(cur_stroke)))
+        except (TypeError, ValueError):
+            overlay_stroke_slider.value = s_lo
+    finally:
+        _overlay_syncing["flag"] = False
 
 
-def _on_overlap_alpha(attr, old, new):
-    spec_overlap_glyph.glyph.fill_alpha = float(new)
+def _on_overlay_alpha(attr, old, new):
+    if _overlay_syncing["flag"]:
+        return
+    cfg = _OVERLAY_LAYER_CONFIG.get(overlay_layer_select.value)
+    if cfg is None:
+        return
+    setattr(cfg["glyph"].glyph, cfg["alpha_attr"], float(new))
 
 
-def _on_overlap_width(attr, old, new):
-    w = float(new)
-    spec_overlap_glyph.glyph.line_width = w
-    # alpha=0 hides the stroke entirely; if the user pulls the stroke
-    # back up, re-enable line_alpha so it's visible.
-    spec_overlap_glyph.glyph.line_alpha = 0.6 if w > 0 else 0.0
+def _on_overlay_stroke(attr, old, new):
+    if _overlay_syncing["flag"]:
+        return
+    cfg = _OVERLAY_LAYER_CONFIG.get(overlay_layer_select.value)
+    if cfg is None:
+        return
+    setattr(cfg["glyph"].glyph, cfg["stroke_attr"], float(new))
+    extra = cfg.get("stroke_extra")
+    if extra is not None:
+        extra(float(new))
 
 
-op_alpha_slider.on_change("value", _on_op_alpha)
-op_width_slider.on_change("value", _on_op_width)
-overlap_alpha_slider.on_change("value", _on_overlap_alpha)
-overlap_width_slider.on_change("value", _on_overlap_width)
+overlay_layer_select.on_change("value", _on_overlay_layer)
+overlay_alpha_slider.on_change("value", _on_overlay_alpha)
+overlay_stroke_slider.on_change("value", _on_overlay_stroke)
 
 
 # ---------------------------------------------------------------------------
@@ -3015,10 +3096,9 @@ pick_tab = TabPanel(title="Pick", child=column(
     slitlet_select,
     snap_box,
     Div(text="<b>Overlay appearance</b>"),
-    op_alpha_slider,
-    op_width_slider,
-    overlap_alpha_slider,
-    overlap_width_slider,
+    overlay_layer_select,
+    overlay_alpha_slider,
+    overlay_stroke_slider,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
     width=SIDEBAR_W - 20,
