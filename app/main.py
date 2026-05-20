@@ -31,6 +31,7 @@ from bokeh.models import (
     CustomJSTickFormatter,
     Div,
     HoverTool,
+    Range1d,
     Select,
     Slider,
     TabPanel,
@@ -223,6 +224,76 @@ loading_banner = Div(
 
 # Quick-help panel rendered on the right side of the figure.
 help_toggle_btn = Button(label="Hide help", button_type="default", width=110)
+
+# ── Rotating tip strip ───────────────────────────────────────────────────────
+# The help panel shows a rotating one-liner tip on top, and the full
+# reference below it. Tips fade in/out every 15 s so the help feels alive
+# without being annoying. See `_TIPS` for content; rotation is wired by
+# `_advance_tip` registered as a periodic callback further down.
+_TIPS = [
+    ("🎯", "Pick mode", "Click anywhere on the image — vMPT snaps to the nearest operable shutter and opens an <b>N-shutter slitlet</b> (set N=1/2/3/5 in the <b>Pick</b> tab)."),
+    ("✋", "Move the pointing", "<b>Shift + click</b> anywhere on the image to recentre the pointing on that spot. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks the current pointing."),
+    ("🔁", "Toggle a slitlet", "Click an already-open shutter to close it. Its slitlet siblings come down with it."),
+    ("🎨", "Cyan flag", "Double-click a shutter to toggle a <span style='color:#0aa;font-weight:600'>cyan highlight</span> — a visual flag for your own review. It's not exported."),
+    ("🔭", "Pick a roll", "In the <b>Aim</b> tab, enter a visibility date and click <b>Compute allowed V3 PA</b>. jwst_gtvt reports the valid window for the date."),
+    ("🌈", "Wavelength check", "Hover any open shutter to see its λ<sub>blue</sub> / λ<sub>red</sub> and the NRS1 / NRS2 detector-gap range for the current disperser."),
+    ("⚠️", "Orange = collision", "Orange-tinted shutters share a dispersed-y row with an open or stuck-open shutter — opening them would put two spectra on the same detector pixels."),
+    ("🪞", "Cross-quadrant", "Spec-overlap correctly pairs Q1↔Q3 (NRS1) and Q2↔Q4 (NRS2). A pick in Q1 will never light up Q2 or Q4."),
+    ("💎", "Catalog match", "Open a shutter with a catalog source inside it — vMPT auto-tags the slitlet with that source's ID. Status bar names the match."),
+    ("📤", "Export bundle", "<b>MPT</b> tab → <b>Export eMPT bundle</b> writes a folder with <code>MPT_plan.json</code>, an APT-importable <code>.cat</code> target list, and the eMPT pipeline's three files."),
+    ("⏪", "Undo", "<b>Pick</b> tab → <b>Undo last</b> reverts the most recent slitlet open/close action. History is 50 deep."),
+    ("📐", "Slitlet sizes", "N=2 means clicked-shutter + one row of lower-y on the detector. N=3/5 are centred on the click. Switch any time in <b>Pick</b>."),
+    ("🛰️", "Two ways to load APT", "<b>MPT</b> tab → either point at a local <code>.aptx</code>, or just type a JWST program ID (e.g. <code>1208</code>) and vMPT pulls it from STScI."),
+]
+
+tip_div = Div(
+    sizing_mode="stretch_width",
+    styles=dict(
+        background="linear-gradient(135deg, #fef9e7 0%, #fff5d6 100%)",
+        color="#5a4a00",
+        padding="10px 14px",
+        border="1px solid #f0d990",
+        **{"border-radius": "6px",
+            "transition": "opacity 350ms ease",
+            "font-size": "12.5px",
+            "line-height": "1.45",
+            "min-height": "62px",
+        },
+    ),
+    text="",  # populated below
+)
+
+
+def _render_tip(idx: int) -> str:
+    """One-tip card. Each render carries an explicit @keyframes block so a
+    fresh DOM swap (Bokeh redoes the inner HTML when `text` changes) restarts
+    the fade-in animation."""
+    emoji, header, body = _TIPS[idx % len(_TIPS)]
+    return (
+        '<style>'
+        '@keyframes vmpt-tip-fadein { '
+        '  0% { opacity: 0; transform: translateY(4px); } '
+        '  100% { opacity: 1; transform: translateY(0); } '
+        '}'
+        '</style>'
+        '<div style="display: flex; gap: 10px; align-items: flex-start; '
+        '            animation: vmpt-tip-fadein 350ms ease-out;">'
+        f'  <div style="font-size: 22px; line-height: 1; flex-shrink: 0;">{emoji}</div>'
+        '  <div>'
+        '    <div style="font-weight: 700; color: #8a6300; letter-spacing: 0.3px; '
+        '                margin-bottom: 3px; font-size: 11.5px; text-transform: uppercase;">'
+        f'      Tip · {header}'
+        '    </div>'
+        f'    <div>{body}</div>'
+        '  </div>'
+        '</div>'
+    )
+
+
+# Index lives in module-state so the periodic callback can advance it.
+_tip_state = {"idx": 0}
+tip_div.text = _render_tip(_tip_state["idx"])
+
 help_div = Div(
     width=320,
     styles=dict(
@@ -232,74 +303,68 @@ help_div = Div(
     ),
     text="""
 <h3 style='margin-top:0'>Quick guide</h3>
-<b>1. Load image</b>
+<b>1. Load an image</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li>Paste a local <b>FITS path</b>, or</li>
-  <li>Paste a <b>JPG path</b> + <b>sidecar FITS</b> path (sidecar supplies WCS).</li>
+  <li>One-click <b>Load Abell 370 example</b> or <b>Load RXCJ0600 example</b> from the <b>Image</b> tab — fastest.</li>
+  <li>Or paste a local <b>FITS</b> path (with WCS), or a <b>JPG + sidecar FITS</b> pair.</li>
 </ul>
 <b>2. Optional: target catalog</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li>CSV/ASCII/FITS with at least <code>ID, RA, DEC</code>.</li>
+  <li>CSV / ASCII / FITS with at least <code>ID, RA, DEC</code>.</li>
+  <li>Targets render as yellow circles. A shutter that contains a catalog source auto-tags the slitlet on click.</li>
 </ul>
-<b>3. Set pointing</b>
+<b>3. Aim the MSA</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3PA + 138.575° (mod 360).</li>
-  <li>Click <b>Compute allowed V3 PA</b> after entering a date to query jwst_gtvt.</li>
-  <li><b>Shift+click</b> anywhere on the image to move the pointing center there. The <span style='color:lime;font-weight:bold'>lime cross</span> shows the current pointing.</li>
+  <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3 PA + 138.575° (mod 360).</li>
+  <li><b>Shift + click</b> on the image to move pointing. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks it.</li>
+  <li>Type a date in <b>Visibility</b> + <b>Compute allowed V3 PA</b> to query jwst_gtvt for the valid window.</li>
 </ul>
 <b>4. Hand-pick shutters</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li><b>Click anywhere</b> on the image → snaps to the nearest shutter and toggles it open.
-  Click near a yellow target → opens a 3-shutter slitlet on that target.</li>
-  <li><b>Double-click</b> a shutter → toggles its <span style='color:cyan;font-weight:bold;background:#222;padding:0 4px'>cyan highlight</span>
-  (visual flag, not exported).</li>
-  <li><span style='color:#ff3333;font-weight:bold'>Open shutters</span> are red-filled.
-  <span style='color:#ff2222;font-weight:bold'>Stuck-open</span> shutters: red edge.
-  Failed-closed shutters are hidden.</li>
-  <li><span style='color:orange;font-weight:bold'>Orange-tinted</span> shutters share an s-row with
-  an open shutter — their spectra would overlap on the detector.</li>
-  <li><span style='color:gold;font-weight:bold'>Gold</span> polygons are the 5 NIRSpec fixed slits.</li>
+  <li>Pick the <b>N-shutter slitlet</b> size (1, 2, 3, or 5) in the <b>Pick</b> tab.</li>
+  <li><b>Click</b> anywhere → opens an N-shutter slitlet at the nearest operable shutter. Click an open one again → closes the slitlet.</li>
+  <li><b>Double-click</b> any shutter → toggles a <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
+  <li>Layers (Pick tab → <b>Layers</b>):
+    <ul style='margin:2px 0 0 16px'>
+      <li><span style='background:silver;padding:0 4px'>silver-edge</span> = operable, ready to pick</li>
+      <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
+      <li><span style='color:#b30000;font-weight:700'>dark red thick</span> = stuck-open (always dispersing)</li>
+      <li><span style='color:#e26a00;font-weight:700'>orange tint</span> = spec-overlap warning</li>
+      <li><span style='color:gold;font-weight:700'>gold</span> = 5 NIRSpec fixed slits</li>
+      <li><span style='color:#ddd200;font-weight:700'>yellow circle</span> = catalog target (unmatched) · <span style='color:#2e9b3f;font-weight:700'>green circle</span> = catalog target inside an open shutter</li>
+    </ul>
+  </li>
 </ul>
-<b>5. Save / share session</b>
+<b>5. Save / share / export</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li><b>Save session</b> → writes a JSON snapshot of pointing, PA, all
-  open shutters, highlighted shutters, and the image/catalog paths.</li>
-  <li><b>Load session</b> → restores the snapshot. Hand the JSON to a
-  collaborator to continue picking where you left off.</li>
-</ul>
-<b>6. Export to APT</b>
-<ul style='margin:4px 0 8px 18px'>
-  <li>Set the export dir, click <b>Export eMPT bundle</b>. Produces:</li>
-  <li><b>MPT_*</b> — load into APT MPT:
-    <code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code>
-    (primaries catalog, import as a Target List first; its filename stem
-    matches <code>catalog.name</code> in the plan).</li>
-  <li><b>vMPT_workspace.json</b> — vMPT-only state (image / sidecar /
-    catalog paths, per-shutter target_id + role).</li>
-  <li><b>eMPT_*</b> — for the European eMPT pipeline:
-    <code>eMPT_observed_targets.cat</code>,
-    <code>eMPT_pointing_summary.txt</code>,
-    <code>eMPT_shutter_mask.csv</code>.</li>
+  <li><b>MPT</b> tab → <b>Save session</b> writes a bundle. Same writer as Export, just under a chosen path.</li>
+  <li><b>Load session</b> restores the bundle — point at <code>MPT_plan.json</code> OR <code>vMPT_workspace.json</code>, the sibling auto-loads.</li>
+  <li><b>Export eMPT bundle</b> writes a fresh timestamped folder:
+    <ul style='margin:2px 0 0 16px'>
+      <li><code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code> → load into APT MPT</li>
+      <li><code>vMPT_workspace.json</code> → vMPT round-trip state</li>
+      <li><code>eMPT_*</code> three files → for the eMPT pipeline</li>
+    </ul>
+  </li>
 </ul>
 <b>Interactions</b>
 <ul style='margin:4px 0 8px 18px'>
-  <li><b>Wheel</b>: zoom both axes equally.</li>
-  <li><b>Drag</b>: pan the view.</li>
-  <li><b>Box zoom</b>: select box-zoom icon, then drag.</li>
-  <li><b>Reset</b>: toolbar reset icon.</li>
+  <li><b>Wheel</b>: zoom · <b>Drag</b>: pan · <b>Box zoom</b>: toolbar → drag</li>
+  <li><b>Reset</b>: toolbar icon · <b>Undo</b>: Pick tab → <b>Undo last</b></li>
 </ul>
-<p style='margin:4px 0'>See <code>README.md</code> in the project for the full reference.</p>
+<p style='margin:4px 0'>Full reference in <code>README.md</code> · file roles in <code>CONTEXT.md</code>.</p>
 """,
 )
 
 
 def on_help_toggle():
     help_div.visible = not help_div.visible
+    tip_div.visible = not tip_div.visible
     help_toggle_btn.label = "Hide help" if help_div.visible else "Show help"
 
 
 help_toggle_btn.on_click(on_help_toggle)
-help_panel = column(help_toggle_btn, help_div, width=340)
+help_panel = column(help_toggle_btn, tip_div, help_div, width=340)
 
 disperser_filter_select = Select(
     title="Disperser / Filter",
@@ -398,15 +463,24 @@ apt_plan_select = Select(
 )
 apt_load_btn = Button(label="Load selected plan", button_type="primary", disabled=True)
 
-# Statistics panel — always-visible counts.
+# Status bar — wide strip above the figure showing pointing / PA /
+# disperser / open-shutter count / spec-conflict count. Always visible
+# regardless of which sidebar tab the user is on; designed so a planner
+# can glance up from picking and confirm their state in one read.
 stats_div = Div(
-    width=320,
+    sizing_mode="stretch_width", height=44,
     styles=dict(
-        background="#eef5ff", color="#1a3b66",
-        padding="6px 10px", border="1px solid #b8d4ff",
-        **{"border-radius": "4px", "font-size": "12px"},
+        background="linear-gradient(180deg, #f7fbff 0%, #eaf2ff 100%)",
+        color="#1a3b66",
+        padding="6px 14px",
+        border="1px solid #c2d6f0",
+        **{"border-radius": "6px",
+            "font-size": "13px",
+            "line-height": "1.35",
+            "box-shadow": "0 1px 2px rgba(0,0,0,0.04)",
+        },
     ),
-    text="<b>Stats:</b> waiting for image…",
+    text="<i>Loading vMPT… pick an example from the Image tab to begin.</i>",
 )
 
 # Glyph data sources
@@ -426,19 +500,39 @@ src_open_shutters = ColumnDataSource(
 src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
-src_targets = ColumnDataSource(data=dict(x=[], y=[], id=[], ra=[], dec=[], pr=[]))
+src_targets = ColumnDataSource(data=dict(
+    x=[], y=[], id=[], ra=[], dec=[], pr=[],
+    # Per-target rendering: matched sources (their id is the target_id of
+    # at least one open shutter) flip to green with a thicker line so the
+    # user can see at a glance which catalogue entries they've already
+    # placed in slitlets.
+    line_color=[], line_width=[],
+))
 src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
 fig = figure(
+    # `scale_both` + match_aspect=True → canvas fits within the
+    # browser viewport (regardless of loaded image aspect) while
+    # preserving the data 1:1 ratio. We still pass width/height as the
+    # initial / preferred extent.
     width=900, height=900,
+    sizing_mode="scale_both",
+    match_aspect=True,
+    # Explicit Range1d (not the default DataRange1d) so refresh_overlays
+    # adding wide-extent polygons (e.g. PRISM spec-overlap bars spanning
+    # a whole quadrant) doesn't auto-zoom the figure OUT after a click.
+    # The pan / box-zoom / wheel-zoom tools still mutate these ranges
+    # directly; user-initiated zoom is unaffected.
+    x_range=Range1d(start=0, end=1, bounds=None),
+    y_range=Range1d(start=0, end=1, bounds=None),
     # No "tap" tool: it auto-selects clicked glyphs, which causes Bokeh's
     # default nonselection-rendering to fade every *other* open shutter to
     # 20% alpha — making them look "pale" after a click. We still receive
     # mouse clicks via fig.on_event(Tap, on_tap) without a TapTool present.
     tools="pan,box_zoom,reset,save",
-    match_aspect=True,
     output_backend="webgl",
-    title="vMPT — visual MSA Planning Tool",
+    title=None,  # Title bar wastes vertical space — contextual info lives
+                 # in the top status bar instead. See `_refresh_status_bar`.
     x_axis_label="RA (deg)", y_axis_label="Dec (deg)",
 )
 # Custom WheelZoomTool: scroll always zooms both axes equally, even when the
@@ -455,7 +549,7 @@ img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source
 # targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
-    line_color="silver", line_alpha=0.20, line_width=0.5,
+    line_color="silver", line_alpha=0.20, line_width=0.75,
     fill_alpha=0.0,
 )
 stuck_open_glyph = fig.multi_polygons(
@@ -496,7 +590,10 @@ fixed_slits_glyph = fig.multi_polygons(
 )
 target_glyph = fig.scatter(
     x="x", y="y", source=src_targets,
-    size=10, marker="circle", line_color="yellow", fill_alpha=0.0, line_width=1.5,
+    size=10, marker="circle",
+    line_color="line_color",   # field-driven: yellow normally, green when matched
+    line_width="line_width",
+    fill_alpha=0.0,
 )
 pointing_handle_glyph = fig.scatter(
     x="x", y="y", source=src_pointing_handle,
@@ -1087,16 +1184,36 @@ def refresh_overlays() -> None:
             mask &= np.where(np.isnan(cat.priority), False, cat.priority <= pr_cutoff)
         if mag_cutoff is not None:
             mask &= np.where(np.isnan(cat.mag), False, cat.mag <= mag_cutoff)
+        ids = [str(i) for i in np.asarray(cat.ids)[mask]]
+        # Highlight catalog entries that already correspond to an open
+        # shutter's target_id: green ring, thicker line.
+        matched_target_ids = {
+            str(sh.target_id) for sh in state["open_shutters"].values()
+            if sh.target_id is not None
+        }
+        line_colors = [
+            "#2e9b3f" if tid in matched_target_ids else "yellow"
+            for tid in ids
+        ]
+        line_widths = [
+            2.5 if tid in matched_target_ids else 1.5
+            for tid in ids
+        ]
         src_targets.data = dict(
             x=x[mask].tolist(),
             y=y[mask].tolist(),
-            id=[str(i) for i in np.asarray(cat.ids)[mask]],
+            id=ids,
             ra=cat.ra_deg[mask].tolist(),
             dec=cat.dec_deg[mask].tolist(),
             pr=cat.priority[mask].tolist(),
+            line_color=line_colors,
+            line_width=line_widths,
         )
     else:
-        src_targets.data = dict(x=[], y=[], id=[], ra=[], dec=[], pr=[])
+        src_targets.data = dict(
+            x=[], y=[], id=[], ra=[], dec=[], pr=[],
+            line_color=[], line_width=[],
+        )
 
     # Update stats panel and status with the current configuration.
     n_op = len(state["open_shutters"])
@@ -1108,14 +1225,60 @@ def refresh_overlays() -> None:
     fid_sky = SkyCoord(fiducial.ra.deg, fiducial.dec.deg, unit=u.deg)
     ra_hms = fid_sky.ra.to_string(unit=u.hour, sep=":", precision=2, pad=True)
     dec_dms = fid_sky.dec.to_string(unit=u.deg, sep=":", precision=1, alwayssign=True, pad=True)
+    # Wide single-row status bar above the figure. Each cell is a
+    # labelled key/value chip; spec-conflict count is colour-coded
+    # (green=0, yellow=<100, orange=<1000, red=>=1000).
+    if n_overlap == 0:
+        oc = "#16803c"   # green
+    elif n_overlap < 100:
+        oc = "#9a7400"   # amber
+    elif n_overlap < 1000:
+        oc = "#cc6a00"   # orange
+    else:
+        oc = "#b3261e"   # red
+    img_label = state["image"].source_path.split("/")[-1] if state["image"] else "—"
+    cell = (
+        "display:inline-block; padding:0 12px; "
+        "border-right:1px solid #c2d6f0; line-height:32px; vertical-align:middle;"
+    )
+    label_style = "color:#5a6b85; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;"
+    val_style   = "color:#1a3b66; font-weight:600; font-size:14px; margin-left:4px;"
     stats_div.text = (
-        f"<b>Pointing</b>: {fiducial.ra.deg:.5f}, {fiducial.dec.deg:.5f} "
-        f"&nbsp;<span style='color:#666'>({ra_hms}, {dec_dms})</span><br>"
-        f"<b>V3 PA</b> {pa_v3:.2f}° &nbsp;|&nbsp; <b>NIRSpec APA</b> {apa:.2f}°<br>"
-        f"<b>Open</b>: {n_op} shutters across {n_tgt_open} targets &nbsp;|&nbsp; "
-        f"<b>Highlight</b>: {n_hl}<br>"
-        f"<b>Spectral conflicts</b>: {n_overlap} shutters &nbsp;|&nbsp; "
-        f"<b>{state['disperser']}/{state['filter']}</b>"
+        f'<div style="display:flex; flex-wrap:wrap; align-items:center; gap:0;">'
+        f'  <span style="{cell}">'
+        f'    <span style="{label_style}">Image</span>'
+        f'    <span style="{val_style}">{img_label}</span>'
+        f'  </span>'
+        f'  <span style="{cell}">'
+        f'    <span style="{label_style}">RA · Dec</span>'
+        f'    <span style="{val_style}">{fiducial.ra.deg:.5f} · {fiducial.dec.deg:.5f}</span>'
+        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:6px;">'
+        f'      ({ra_hms} · {dec_dms})'
+        f'    </span>'
+        f'  </span>'
+        f'  <span style="{cell}">'
+        f'    <span style="{label_style}">V3 PA</span>'
+        f'    <span style="{val_style}">{pa_v3:.2f}°</span>'
+        f'    <span style="{label_style}; margin-left:10px;">APA</span>'
+        f'    <span style="{val_style}">{apa:.2f}°</span>'
+        f'  </span>'
+        f'  <span style="{cell}">'
+        f'    <span style="{label_style}">Disperser</span>'
+        f'    <span style="{val_style}">{state["disperser"]} / {state["filter"]}</span>'
+        f'  </span>'
+        f'  <span style="{cell}">'
+        f'    <span style="{label_style}">Open</span>'
+        f'    <span style="{val_style}">{n_op}</span>'
+        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">'
+        f'      across {n_tgt_open} target{"s" if n_tgt_open != 1 else ""}'
+        f'    </span>'
+        f'  </span>'
+        f'  <span style="{cell} border-right:none;">'
+        f'    <span style="{label_style}">Conflicts</span>'
+        f'    <span style="color:{oc}; font-weight:700; font-size:14px; margin-left:4px;">{n_overlap}</span>'
+        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">shutters</span>'
+        f'  </span>'
+        f'</div>'
     )
     _set_status(
         f"{n_op} open shutters covering {n_tgt_open} targets. "
@@ -1134,17 +1297,11 @@ def refresh_image_glyph() -> None:
     fig.x_range.end = W
     fig.y_range.start = 0
     fig.y_range.end = H
-    # Match figure aspect to image aspect so each FITS pixel is a square
-    # screen pixel (no horizontal/vertical stretching). match_aspect=True
-    # locks the data ratio through pan/zoom. Assumes square arcsec/pix in
-    # the WCS, which is the case for typical JWST/HST drizzled mosaics.
-    base = 900
-    if W >= H:
-        fig.width = base
-        fig.height = max(300, int(base * H / W))
-    else:
-        fig.height = base
-        fig.width = max(300, int(base * W / H))
+    # Figure sizing is `scale_both` + `match_aspect=True` (configured at
+    # figure-construction time), so the canvas always fits within the
+    # browser viewport while preserving data 1:1 aspect — regardless of
+    # the loaded image's dimensions or aspect ratio. We DON'T manually
+    # set fig.width / fig.height here anymore: scale_both handles it.
     # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
     # WCS. Linear approximation around the image center — accurate at the
     # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
@@ -1188,17 +1345,44 @@ def refresh_image_glyph() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _set_image_and_recenter(img: LoadedImage, source_label: str) -> None:
+def _set_image_and_recenter(
+    img: LoadedImage, source_label: str, force_recenter: bool = False,
+) -> None:
+    """Install a freshly-loaded image as the active canvas.
+
+    `force_recenter=True` (used by the "Load Abell 370 / RXCJ0600 example"
+    buttons) overrides the preserve-existing-pointing guard. The guard
+    exists so that loading an image AFTER an APT plan doesn't clobber
+    the plan's pointing; but when the user is explicitly switching
+    examples, they expect the pointing to follow. We also auto-recenter
+    if the existing pointing is more than 30 arcmin away from the new
+    image (then no MSA would land on the image anyway).
+    """
     state["image"] = img
     H, W = img.shape[:2]
-    # Preserve an existing pointing (e.g. from a previously loaded APT plan)
-    # so loading an image second doesn't clobber the plan's RA/Dec.
     has_pointing = bool(
         (ra_input.value or "").strip() and (dec_input.value or "").strip()
     )
-    if not has_pointing:
+    auto_recentered = False
+    try:
+        center = img.wcs.pixel_to_world(W / 2, H / 2)
+    except Exception:  # noqa: BLE001
+        center = None
+    if has_pointing and not force_recenter and center is not None:
+        # Detect "pointing is on a different sky" — if the current
+        # pointing is more than 30' from the new image's centre, no MSA
+        # would land on it. Recenter rather than leave the user staring
+        # at an image with no overlay.
         try:
-            center = img.wcs.pixel_to_world(W / 2, H / 2)
+            cur = SkyCoord(float(ra_input.value), float(dec_input.value),
+                           unit=u.deg, frame="icrs")
+            if cur.separation(center).to_value(u.arcmin) > 30.0:
+                force_recenter = True
+                auto_recentered = True
+        except (ValueError, TypeError):
+            pass
+    if (force_recenter or not has_pointing) and center is not None:
+        try:
             ra_input.value = f"{center.ra.deg:.6f}"
             dec_input.value = f"{center.dec.deg:.6f}"
             state["ra_deg"] = center.ra.deg
@@ -1207,14 +1391,23 @@ def _set_image_and_recenter(img: LoadedImage, source_label: str) -> None:
             pass
     refresh_image_glyph()
     refresh_overlays()
-    extra = " (kept existing pointing)" if has_pointing else ""
-    _set_status(f"Loaded {source_label} ({W}×{H}).{extra}", "ok")
+    if force_recenter and auto_recentered:
+        suffix = " — auto-recentered (previous pointing was outside this field)"
+    elif force_recenter:
+        suffix = ""
+    elif has_pointing:
+        suffix = " (kept existing pointing)"
+    else:
+        suffix = ""
+    _set_status(f"Loaded {source_label} ({W}×{H}).{suffix}", "ok")
 
 
-def _load_fits_from_path(path: str) -> None:
+def _load_fits_from_path(path: str, force_recenter: bool = False) -> None:
     try:
         img = load_fits(path)
-        _set_image_and_recenter(img, f"FITS {Path(path).name}")
+        _set_image_and_recenter(
+            img, f"FITS {Path(path).name}", force_recenter=force_recenter,
+        )
     except Exception as e:  # noqa: BLE001
         _set_status(f"FITS load failed: {e}", "err")
         traceback.print_exc()
@@ -1222,10 +1415,15 @@ def _load_fits_from_path(path: str) -> None:
         _hide_loading()
 
 
-def _load_jpg_pair_from_paths(jpg_path: str, sidecar_path: str) -> None:
+def _load_jpg_pair_from_paths(
+    jpg_path: str, sidecar_path: str, force_recenter: bool = False,
+) -> None:
     try:
         img = load_jpg_with_sidecar(jpg_path, sidecar_path, max_dim=6000)
-        _set_image_and_recenter(img, f"JPG+sidecar {Path(jpg_path).name}")
+        _set_image_and_recenter(
+            img, f"JPG+sidecar {Path(jpg_path).name}",
+            force_recenter=force_recenter,
+        )
     except Exception as e:  # noqa: BLE001
         _set_status(f"JPG+sidecar load failed: {e}", "err")
         traceback.print_exc()
@@ -2131,11 +2329,21 @@ session_load_btn.on_click(on_session_load)
 
 _EX_DIR = Path(__file__).resolve().parent.parent
 
+def _reset_pointing_inputs() -> None:
+    """Clear RA/Dec inputs so the next image-load auto-recenters."""
+    ra_input.value = ""
+    dec_input.value = ""
+
+
 def on_example_a370():
     p = _EX_DIR / "example_a370" / "a370_f182m_f200w_f210m.fits"
     if not p.exists():
         _set_status(f"Example missing: {p}", "err")
         return
+    # Example buttons are a hard reset: clear pointing so the new image
+    # auto-recenters (otherwise loading R0600 after A370 leaves pointing
+    # at A370 and the MSA disappears off-screen).
+    _reset_pointing_inputs()
     fits_path_input.value = str(p)
 
 
@@ -2145,7 +2353,7 @@ def on_example_r0600():
     if not (jpg.exists() and wcs.exists()):
         _set_status("Example r0600 files missing.", "err")
         return
-    # Set sidecar first so the JPG callback finds it.
+    _reset_pointing_inputs()
     sidecar_path_input.value = str(wcs)
     jpg_path_input.value = str(jpg)
 
@@ -2677,15 +2885,33 @@ sidebar_tabs = Tabs(
     width=SIDEBAR_W,
 )
 
-# Stats banner and status pinned above/below the tabs so they stay
-# visible regardless of which tab the user is on.
+# Sidebar (no stats — stats now live above the figure as a wide bar).
 sidebar = column(
     loading_banner,
-    stats_div,
     sidebar_tabs,
     status,
     width=SIDEBAR_W,
 )
 
-curdoc().add_root(row(sidebar, fig, help_panel))
+# Figure column: wide status bar on top, the figure below. The figure
+# uses sizing_mode='scale_both' so it fills available vertical space
+# under the status bar while preserving the data aspect ratio.
+figure_column = column(
+    stats_div,
+    fig,
+    sizing_mode="stretch_both",
+)
+
+curdoc().add_root(row(sidebar, figure_column, help_panel, sizing_mode="stretch_height"))
 curdoc().title = "vMPT — visual MSA Planning Tool"
+
+
+# Rotate the tip card every 15 s. _render_tip carries its own @keyframes
+# fade-in block; setting the Bokeh Div's `text` swaps the DOM so the
+# animation restarts cleanly without us needing to hand-splice strings.
+def _advance_tip() -> None:
+    _tip_state["idx"] = (_tip_state["idx"] + 1) % len(_TIPS)
+    tip_div.text = _render_tip(_tip_state["idx"])
+
+
+curdoc().add_periodic_callback(_advance_tip, 15_000)
