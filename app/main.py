@@ -510,17 +510,25 @@ src_targets = ColumnDataSource(data=dict(
 ))
 src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
-# Fixed canvas dimensions — the viewport stays the same shape and size
-# whether the user has loaded a 16000×16000 JPG or a 5000×3000 FITS.
-# `match_aspect=True` then guarantees image data renders 1:1 in pixel
-# coords (letterboxed inside the canvas when the image aspect ≠ canvas
-# aspect). The WCS's CDELT/CD matrix already bakes the cos(Dec) factor
-# into pixel scale for drizzled tangent-plane mosaics, so 1:1 pixel
-# display is also angularly correct.
-FIG_W = 980
-FIG_H = 880
+# Canvas size adapts to the browser window: the figure stretches both
+# axes to fill the centre cell of the layout, while `match_aspect=True`
+# locks the DATA aspect to 1:1 (image pixels are square on screen,
+# letterboxed if the canvas aspect ≠ image aspect).
+#
+# We keep the *initial* width/height as a hint for the layout engine,
+# but the actual size is set by `sizing_mode='stretch_both'` against
+# the parent row's stretch_both. On a laptop (1280–1440 px wide) the
+# canvas shrinks so the sidebars stay visible without horizontal
+# scrolling; on a 24"+ monitor it grows up to the row's natural size.
+#
+# Sidebar / help-panel are fixed-width — the canvas absorbs the rest.
+FIG_W_HINT = 900
+FIG_H_HINT = 800
+SIDEBAR_W = 340      # left tab panel (Image / Aim / Pick / MPT)
+HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 fig = figure(
-    width=FIG_W, height=FIG_H,
+    width=FIG_W_HINT, height=FIG_H_HINT,
+    sizing_mode="stretch_both",
     match_aspect=True,
     # Explicit Range1d (not DataRange1d) so refresh_overlays adding
     # wide-extent polygons (PRISM spec-overlap bars spanning a quadrant)
@@ -2809,7 +2817,8 @@ slitlet_select.on_change("value", on_slitlet_height)
 # Layout
 # ---------------------------------------------------------------------------
 
-SIDEBAR_W = 340
+# SIDEBAR_W / HELPPANEL_W are defined above (near the figure init) and
+# referenced by the figure-sizing comment. Don't redeclare here.
 
 # Compact sidebar organised as tabs around the natural workflow:
 # Load (image + catalog) → Aim (pointing + PA + visibility) →
@@ -2895,16 +2904,25 @@ sidebar = column(
     width=SIDEBAR_W,
 )
 
-# Figure column: status bar (stretches to canvas width) on top, then
-# the fixed-size canvas. The canvas dimensions don't change as the
-# user switches images — viewport stays stable.
+# Figure column: status bar on top (stretches to canvas width) and the
+# stretch-both canvas below. The whole column fills the centre cell of
+# the root row, which itself stretches to fit the browser window.
+#
+# Layout shape on a 1440-wide laptop:
+#   [ sidebar 340 ][ status bar | canvas (stretches) ][ help 340 ]
+#                                      ~760 px wide
+# On a 1920-wide monitor the canvas just gets bigger (~1240 px).
+# `match_aspect=True` on the figure keeps data pixels 1:1 regardless.
 figure_column = column(
     stats_div,
     fig,
-    width=FIG_W,
+    sizing_mode="stretch_both",
 )
 
-curdoc().add_root(row(sidebar, figure_column, help_panel))
+curdoc().add_root(row(
+    sidebar, figure_column, help_panel,
+    sizing_mode="stretch_both",
+))
 curdoc().title = "vMPT — visual MSA Planning Tool"
 
 

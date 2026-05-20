@@ -2,4 +2,22 @@
 
 {% block preamble %}
   <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+CiAgPHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTAiIGZpbGw9IiMwYjEwMjAiLz4KICA8ZyBmaWxsPSJub25lIiBzdHJva2U9IiMzYTdlZmYiIHN0cm9rZS13aWR0aD0iMi41Ij4KICAgIDxyZWN0IHg9IjYiICB5PSI2IiAgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iMiIvPgogICAgPHJlY3QgeD0iMzQiIHk9IjYiICB3aWR0aD0iMjQiIGhlaWdodD0iMjQiIHJ4PSIyIi8+CiAgICA8cmVjdCB4PSI2IiAgeT0iMzQiIHdpZHRoPSIyNCIgaGVpZ2h0PSIyNCIgcng9IjIiLz4KICAgIDxyZWN0IHg9IjM0IiB5PSIzNCIgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iMiIvPgogIDwvZz4KICA8ZyBmaWxsPSIjZmY0ZDRkIj4KICAgIDxyZWN0IHg9IjEyIiB5PSIxMSIgd2lkdGg9IjMiIGhlaWdodD0iMyIvPgogICAgPHJlY3QgeD0iMTIiIHk9IjE0IiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+CiAgICA8cmVjdCB4PSIxMiIgeT0iMTciIHdpZHRoPSIzIiBoZWlnaHQ9IjMiLz4KICAgIDxyZWN0IHg9IjQzIiB5PSIyMiIgd2lkdGg9IjMiIGhlaWdodD0iMyIvPgogICAgPHJlY3QgeD0iNDMiIHk9IjI1IiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+CiAgICA8cmVjdCB4PSI0MyIgeT0iMjgiIHdpZHRoPSIzIiBoZWlnaHQ9IjMiLz4KICAgIDxyZWN0IHg9IjIwIiB5PSI0NiIgd2lkdGg9IjMiIGhlaWdodD0iMyIvPgogICAgPHJlY3QgeD0iMjAiIHk9IjQ5IiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+CiAgICA8cmVjdCB4PSIyMCIgeT0iNTIiIHdpZHRoPSIzIiBoZWlnaHQ9IjMiLz4KICAgIDxyZWN0IHg9IjQ4IiB5PSI0MCIgd2lkdGg9IjMiIGhlaWdodD0iMyIvPgogICAgPHJlY3QgeD0iNDgiIHk9IjQzIiB3aWR0aD0iMyIgaGVpZ2h0PSIzIi8+CiAgICA8cmVjdCB4PSI0OCIgeT0iNDYiIHdpZHRoPSIzIiBoZWlnaHQ9IjMiLz4KICA8L2c+CiAgPGcgc3Ryb2tlPSIjN2ZmZjAwIiBzdHJva2Utd2lkdGg9IjMuNSIgc3Ryb2tlLWxpbmVjYXA9InJvdW5kIj4KICAgIDxsaW5lIHgxPSIzMiIgeTE9IjI2IiB4Mj0iMzIiIHkyPSIzOCIvPgogICAgPGxpbmUgeDE9IjI2IiB5MT0iMzIiIHgyPSIzOCIgeTI9IjMyIi8+CiAgPC9nPgo8L3N2Zz4K">
+  <style>
+    /* Make the document fill the viewport so Bokeh's sizing_mode='stretch_both'
+       on the root layout actually has a finite parent to stretch into.
+       Bokeh's default body styles set display:flow-root with no fixed
+       height, which collapses any stretch-both child to its content's
+       natural size. */
+    html, body {
+      height: 100vh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+    }
+    /* Bokeh wraps the root model in a div under <body>. Make it fill. */
+    body > .bk-Row, body > .bk-Column, body > div {
+      height: 100% !important;
+    }
+  </style>
 {% endblock %}
