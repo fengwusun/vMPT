@@ -448,6 +448,31 @@ slitlet_select = Select(
 
 snap_box = CheckboxGroup(labels=["Snap target to nearest operable"], active=[0])
 
+# ── Overlay appearance sliders ───────────────────────────────────────────
+# Live-tune the alpha and stroke of the two heavy overlay layers. Wired
+# in to the glyph models below (after they're constructed), so the
+# update is immediate (no refresh_overlays needed).
+op_alpha_slider = Slider(
+    start=0.0, end=0.8, step=0.05, value=0.20,
+    title="Operable edge alpha",
+    width=SIDEBAR_W - 40,
+)
+op_width_slider = Slider(
+    start=0.0, end=2.5, step=0.05, value=0.75,
+    title="Operable edge width (px)",
+    width=SIDEBAR_W - 40,
+)
+overlap_alpha_slider = Slider(
+    start=0.0, end=0.6, step=0.02, value=0.10,
+    title="Spec-overlap fill alpha",
+    width=SIDEBAR_W - 40,
+)
+overlap_width_slider = Slider(
+    start=0.0, end=2.0, step=0.05, value=0.0,
+    title="Spec-overlap stroke (px)",
+    width=SIDEBAR_W - 40,
+)
+
 undo_btn = Button(label="Undo last", button_type="default")
 clear_btn = Button(label="Clear open", button_type="warning")
 
@@ -1389,15 +1414,15 @@ def refresh_image_glyph() -> None:
     arr = _image_array_for_bokeh(img)
     H, W = arr.shape
     src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
-    fig.x_range.start = 0
-    fig.x_range.end = W
-    fig.y_range.start = 0
-    fig.y_range.end = H
-    # Figure sizing is `scale_both` + `match_aspect=True` (configured at
-    # figure-construction time), so the canvas always fits within the
-    # browser viewport while preserving data 1:1 aspect — regardless of
-    # the loaded image's dimensions or aspect ratio. We DON'T manually
-    # set fig.width / fig.height here anymore: scale_both handles it.
+    # Re-fit figure ranges to the new image's pixel extent. We use a
+    # single atomic update per axis (via `.update()`) so match_aspect's
+    # aspect-locking pass sees a coherent change and re-evaluates the
+    # constraint. Setting `.start` and `.end` separately on DataRange1d
+    # can leave the ranges in an intermediate state where match_aspect
+    # doesn't fire — that was the "switch from A370 to a JPG and the
+    # aspect comes out wrong" bug.
+    fig.x_range.update(start=0, end=W)
+    fig.y_range.update(start=0, end=H)
     # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
     # WCS. Linear approximation around the image center — accurate at the
     # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
@@ -2742,6 +2767,35 @@ _bind_browse(export_dir_browse_btn, export_dir_input,
 snap_box.on_change("active", on_snap)
 
 
+# ── Overlay-appearance slider callbacks ──────────────────────────────────
+# These flip glyph model attributes directly, no refresh_overlays needed —
+# Bokeh propagates the property change to the renderer client-side.
+def _on_op_alpha(attr, old, new):
+    bg_shutters_glyph.glyph.line_alpha = float(new)
+
+
+def _on_op_width(attr, old, new):
+    bg_shutters_glyph.glyph.line_width = float(new)
+
+
+def _on_overlap_alpha(attr, old, new):
+    spec_overlap_glyph.glyph.fill_alpha = float(new)
+
+
+def _on_overlap_width(attr, old, new):
+    w = float(new)
+    spec_overlap_glyph.glyph.line_width = w
+    # alpha=0 hides the stroke entirely; if the user pulls the stroke
+    # back up, re-enable line_alpha so it's visible.
+    spec_overlap_glyph.glyph.line_alpha = 0.6 if w > 0 else 0.0
+
+
+op_alpha_slider.on_change("value", _on_op_alpha)
+op_width_slider.on_change("value", _on_op_width)
+overlap_alpha_slider.on_change("value", _on_overlap_alpha)
+overlap_width_slider.on_change("value", _on_overlap_width)
+
+
 # ---------------------------------------------------------------------------
 # Drag-pointing handle and double-tap highlight
 # ---------------------------------------------------------------------------
@@ -2944,6 +2998,11 @@ pick_tab = TabPanel(title="Pick", child=column(
     Div(text="<b>Slitlet</b>"),
     slitlet_select,
     snap_box,
+    Div(text="<b>Overlay appearance</b>"),
+    op_alpha_slider,
+    op_width_slider,
+    overlap_alpha_slider,
+    overlap_width_slider,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
     width=SIDEBAR_W - 20,
