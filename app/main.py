@@ -510,29 +510,31 @@ src_targets = ColumnDataSource(data=dict(
 ))
 src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
+# Fixed canvas dimensions — the viewport stays the same shape and size
+# whether the user has loaded a 16000×16000 JPG or a 5000×3000 FITS.
+# `match_aspect=True` then guarantees image data renders 1:1 in pixel
+# coords (letterboxed inside the canvas when the image aspect ≠ canvas
+# aspect). The WCS's CDELT/CD matrix already bakes the cos(Dec) factor
+# into pixel scale for drizzled tangent-plane mosaics, so 1:1 pixel
+# display is also angularly correct.
+FIG_W = 980
+FIG_H = 880
 fig = figure(
-    # `scale_both` + match_aspect=True → canvas fits within the
-    # browser viewport (regardless of loaded image aspect) while
-    # preserving the data 1:1 ratio. We still pass width/height as the
-    # initial / preferred extent.
-    width=900, height=900,
-    sizing_mode="scale_both",
+    width=FIG_W, height=FIG_H,
     match_aspect=True,
-    # Explicit Range1d (not the default DataRange1d) so refresh_overlays
-    # adding wide-extent polygons (e.g. PRISM spec-overlap bars spanning
-    # a whole quadrant) doesn't auto-zoom the figure OUT after a click.
-    # The pan / box-zoom / wheel-zoom tools still mutate these ranges
-    # directly; user-initiated zoom is unaffected.
+    # Explicit Range1d (not DataRange1d) so refresh_overlays adding
+    # wide-extent polygons (PRISM spec-overlap bars spanning a quadrant)
+    # doesn't auto-zoom the figure OUT after a click. Pan / box-zoom /
+    # wheel-zoom tools still mutate Range1d directly, so user-initiated
+    # zoom is unaffected.
     x_range=Range1d(start=0, end=1, bounds=None),
     y_range=Range1d(start=0, end=1, bounds=None),
     # No "tap" tool: it auto-selects clicked glyphs, which causes Bokeh's
-    # default nonselection-rendering to fade every *other* open shutter to
-    # 20% alpha — making them look "pale" after a click. We still receive
-    # mouse clicks via fig.on_event(Tap, on_tap) without a TapTool present.
+    # default nonselection-rendering to fade every *other* open shutter
+    # to 20% alpha. Mouse clicks come via fig.on_event(Tap, on_tap).
     tools="pan,box_zoom,reset,save",
     output_backend="webgl",
-    title=None,  # Title bar wastes vertical space — contextual info lives
-                 # in the top status bar instead. See `_refresh_status_bar`.
+    title=None,  # vertical-space saver; identity lives in the top status bar.
     x_axis_label="RA (deg)", y_axis_label="Dec (deg)",
 )
 # Custom WheelZoomTool: scroll always zooms both axes equally, even when the
@@ -2893,16 +2895,16 @@ sidebar = column(
     width=SIDEBAR_W,
 )
 
-# Figure column: wide status bar on top, the figure below. The figure
-# uses sizing_mode='scale_both' so it fills available vertical space
-# under the status bar while preserving the data aspect ratio.
+# Figure column: status bar (stretches to canvas width) on top, then
+# the fixed-size canvas. The canvas dimensions don't change as the
+# user switches images — viewport stays stable.
 figure_column = column(
     stats_div,
     fig,
-    sizing_mode="stretch_both",
+    width=FIG_W,
 )
 
-curdoc().add_root(row(sidebar, figure_column, help_panel, sizing_mode="stretch_height"))
+curdoc().add_root(row(sidebar, figure_column, help_panel))
 curdoc().title = "vMPT — visual MSA Planning Tool"
 
 
