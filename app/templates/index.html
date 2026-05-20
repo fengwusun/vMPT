@@ -15,8 +15,20 @@
       padding: 0;
       overflow: hidden;
     }
-    /* Bokeh wraps the root model in a div under <body>. Make it fill. */
-    body > .bk-Row, body > .bk-Column, body > div {
+    /* Bokeh wraps the root layout in an anonymous div under <body>.
+       Stretch ONLY those wrappers, not other body-level children
+       (notably the tooltip popup, which Bokeh also appends as a
+       body > div — a blanket `body > div { height: 100% }` would
+       force the tooltip to span the entire viewport height).
+       :has() picks out body > div whose immediate child is a Bokeh
+       layout (bk-Row or bk-Column). */
+    body > div:has(> .bk-Row),
+    body > div:has(> .bk-Column) {
+      height: 100% !important;
+    }
+    /* Inside the wrapper, the Bokeh layout itself fills too. */
+    body > div > .bk-Row,
+    body > div > .bk-Column {
       height: 100% !important;
     }
     /* Hover-tooltip slim-down. Bokeh's default tooltip has generous
