@@ -625,13 +625,12 @@ pointing_handle_glyph = fig.scatter(
 # on_tap() below. (Bokeh's PointDrawTool drag interaction was unreliable
 # across versions, so we use a click-with-modifier instead.)
 
-# Tooltips use compact single-row HTML strings rather than Bokeh's
-# default key/value table (which is much taller and wider). Keep one
-# line per tooltip where possible; wrap to a 2nd line only for the
-# open-shutter tooltip which carries λ + gap info.
+# Tooltips: single-line HTML strings. The Bokeh wrapper `.bk-tooltip`
+# is also tightened via CSS in templates/index.html so the popup is a
+# thin pill rather than a paragraph block.
 _TIP_BASE_STYLE = (
     "font-family: Calibri, Helvetica, Arial, sans-serif; "
-    "font-size: 11.5px; line-height: 1.35; padding: 3px 6px; "
+    "font-size: 11px; line-height: 1.25; padding: 0 2px; "
     "white-space: nowrap;"
 )
 fig.add_tools(HoverTool(
@@ -654,12 +653,12 @@ fig.add_tools(HoverTool(
     renderers=[open_shutters_glyph],
     tooltips=(
         f'<div style="{_TIP_BASE_STYLE} color:#1a3b66;">'
-        f'  <b>Q@q · s@s · d@d</b>'
-        f'  <span style="color:#888;"> · target </span>'
-        f'  <b>@target</b><br>'
-        f'  <span style="color:#888;">λ</span> '
-        f'  <b>@lam_blue{{0.00}}</b><span style="color:#888;">–</span><b>@lam_red{{0.00}}</b> μm'
-        f'  <span style="color:#888;"> · gap </span><b>@gap_label</b>'
+        f'<b>Q@q s@s d@d</b>'
+        f'<span style="color:#888"> · </span>@target'
+        f'<span style="color:#888"> · </span>'
+        f'<b>@lam_blue{{0.00}}</b><span style="color:#888">–</span>'
+        f'<b>@lam_red{{0.00}}</b><span style="color:#888"> μm · gap </span>'
+        f'<b>@gap_label</b>'
         f'</div>'
     ),
 ))

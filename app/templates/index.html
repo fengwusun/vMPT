@@ -19,5 +19,27 @@
     body > .bk-Row, body > .bk-Column, body > div {
       height: 100% !important;
     }
+    /* Compact hover tooltips — Bokeh's default .bk-tooltip wrapper has
+       generous padding (8px+), a thick arrow, and a margin per row.
+       Our custom HTML tooltips are already a single line; shrink the
+       wrapper so the whole popup is just a thin pill. */
+    .bk-tooltip {
+      padding: 1px 2px !important;
+      font-size: 11px !important;
+      line-height: 1.25 !important;
+      max-width: 360px !important;
+      border-radius: 4px !important;
+      background: rgba(255, 255, 255, 0.96) !important;
+      border: 1px solid rgba(0, 0, 0, 0.12) !important;
+      box-shadow: 0 2px 6px rgba(0, 0, 0, 0.10) !important;
+    }
+    .bk-tooltip > div { padding: 0 !important; margin: 0 !important; }
+    .bk-tooltip-row-label, .bk-tooltip-row-value {
+      font-size: 11px !important;
+      padding: 0 2px !important;
+    }
+    .bk-Tooltip { /* Bokeh 3.x class name; safety net for the same goal. */
+      padding: 1px 2px !important;
+    }
   </style>
 {% endblock %}
