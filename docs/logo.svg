@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <rect width="64" height="64" rx="10" fill="#0b1020"/>
+  <g fill="none" stroke="#3a7eff" stroke-width="2.5">
+    <rect x="6"  y="6"  width="24" height="24" rx="2"/>
+    <rect x="34" y="6"  width="24" height="24" rx="2"/>
+    <rect x="6"  y="34" width="24" height="24" rx="2"/>
+    <rect x="34" y="34" width="24" height="24" rx="2"/>
+  </g>
+  <g fill="#ff4d4d">
+    <rect x="12" y="11" width="3" height="3"/>
+    <rect x="12" y="14" width="3" height="3"/>
+    <rect x="12" y="17" width="3" height="3"/>
+    <rect x="43" y="22" width="3" height="3"/>
+    <rect x="43" y="25" width="3" height="3"/>
+    <rect x="43" y="28" width="3" height="3"/>
+    <rect x="20" y="46" width="3" height="3"/>
+    <rect x="20" y="49" width="3" height="3"/>
+    <rect x="20" y="52" width="3" height="3"/>
+    <rect x="48" y="40" width="3" height="3"/>
+    <rect x="48" y="43" width="3" height="3"/>
+    <rect x="48" y="46" width="3" height="3"/>
+  </g>
+  <g stroke="#7fff00" stroke-width="3.5" stroke-linecap="round">
+    <line x1="32" y1="26" x2="32" y2="38"/>
+    <line x1="26" y1="32" x2="38" y2="32"/>
+  </g>
+</svg>
