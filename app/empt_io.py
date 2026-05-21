@@ -134,23 +134,18 @@ def write_mpt_catalog(path: str, targets: list[dict]) -> None:
     """
     lines = [_MPT_CAT_HEADER]
     for t in targets:
-        no_cat = t["No_cat"]
-        # Catalogs in the wild use string IDs ("RJ0600-10274-P0", "JADES-1234").
-        # Preserve them verbatim; only coerce to int form if the value is
-        # already integer-shaped (a numpy int, a bare int, or a string of
-        # digits). The JDox MPT catalog spec lists ID as "useful as an
-        # integer" but does not strictly require it — APT accepts the
-        # tokens we hand it.
-        if isinstance(no_cat, (int, np.integer)):
-            id_str = str(int(no_cat))
-        else:
-            s = str(no_cat).strip()
-            try:
-                id_str = str(int(s))   # "123" → "123"
-            except (ValueError, TypeError):
-                id_str = s              # leave non-integer IDs verbatim
-        # Scrub anything that would break the tab-separated parse.
-        id_str = id_str.replace("\t", " ").replace("\n", " ")
+        # `No_cat` MUST be coerce-able to int — APT MPT expects the ID
+        # column to be integer-typed. Caller is responsible for deriving
+        # an integer from any source-side string ID (see `on_export`
+        # which extracts the longest digit run, e.g. "RJ0600-10274-P0"
+        # → 10274). Anything we can't cast raises a clear error rather
+        # than producing a malformed `.cat`.
+        try:
+            no_cat = int(t["No_cat"])
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"MPT catalog ID must be an integer; got {t['No_cat']!r}"
+            ) from e
         primary = int(t.get("Primary", 1))
         weight = int(t.get("Pr", 1))
         ra = float(t["ra_deg"])
@@ -158,7 +153,7 @@ def write_mpt_catalog(path: str, targets: list[dict]) -> None:
         label = str(t.get("label", "real")) or "real"
         label = label.replace("\t", " ").replace("\n", " ").strip() or "real"
         lines.append(
-            f"{id_str}\t{ra:.10f}\t{dec:.10f}\t{weight}\t{primary}\t{label}"
+            f"{no_cat}\t{ra:.10f}\t{dec:.10f}\t{weight}\t{primary}\t{label}"
         )
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")

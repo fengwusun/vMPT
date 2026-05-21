@@ -169,25 +169,32 @@ def test_write_mpt_catalog_header_and_data(tmp_path):
     assert lab2 == "vMPT_synth"
 
 
-def test_write_mpt_catalog_preserves_string_ids(tmp_path):
-    """If the input catalog used non-integer IDs (e.g. "RJ0600-10274-P0"),
-    the output MPT catalog should preserve those IDs verbatim — the
-    user's downstream tooling depends on the same identifiers carrying
-    through."""
+def test_write_mpt_catalog_rejects_non_integer_ids(tmp_path):
+    """APT MPT expects the ID column to be integer-typed; the writer
+    must REFUSE to write a row whose No_cat can't be coerced. Callers
+    (notably on_export) are responsible for deriving an int via the
+    `_to_int_id` helper, e.g. "RJ0600-10274-P0" → 10274."""
     from app.empt_io import write_mpt_catalog
-    out = tmp_path / "RJ0600-targets.cat"
+    out = tmp_path / "bad.cat"
+    with pytest.raises(ValueError, match="must be an integer"):
+        write_mpt_catalog(str(out), [
+            {"No_cat": "RJ0600-10274-P0", "ra_deg": 90.0, "dec_deg": -20.1},
+        ])
+
+
+def test_write_mpt_catalog_accepts_int_and_int_string(tmp_path):
+    """Both bare int and a string of digits are accepted as No_cat."""
+    from app.empt_io import write_mpt_catalog
+    out = tmp_path / "ok.cat"
     write_mpt_catalog(str(out), [
-        {"No_cat": "RJ0600-10274-P0", "ra_deg": 90.039845, "dec_deg": -20.136384,
-         "label": "real"},
-        {"No_cat": "RJ0600-8846-P0",  "ra_deg": 90.038126, "dec_deg": -20.140741,
-         "label": "real"},
-        # A synthesized row with an int ID
-        {"No_cat": 9001, "ra_deg": 90.04, "dec_deg": -20.13, "label": "vMPT_synth"},
+        {"No_cat": 10274, "ra_deg": 90.039845, "dec_deg": -20.136384,
+         "label": "RJ0600-10274-P0"},
+        {"No_cat": "8846", "ra_deg": 90.038126, "dec_deg": -20.140741,
+         "label": "RJ0600-8846-P0"},
     ])
-    lines = out.read_text().strip().splitlines()
-    assert lines[1].split("\t")[0] == "RJ0600-10274-P0"
-    assert lines[2].split("\t")[0] == "RJ0600-8846-P0"
-    assert lines[3].split("\t")[0] == "9001"
+    rows = [ln.split("\t") for ln in out.read_text().strip().splitlines()[1:]]
+    assert int(rows[0][0]) == 10274 and rows[0][5] == "RJ0600-10274-P0"
+    assert int(rows[1][0]) == 8846  and rows[1][5] == "RJ0600-8846-P0"
 
 
 def test_write_mpt_catalog_distinguishes_real_vs_synth(tmp_path):

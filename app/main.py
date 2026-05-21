@@ -5,6 +5,7 @@ Run:  bokeh serve app/ --show
 from __future__ import annotations
 
 import base64
+import re
 import sys
 import tempfile
 import traceback
@@ -2150,13 +2151,57 @@ def on_export():
     cat = state["catalog"]
     targets_rows = []
     real_ids_seen: set[str] = set()
-    used_target_nos: set = set()  # mixed str / int — keys preserved verbatim
+    used_int_ids: set[int] = set()
+    # Preserve the original (possibly string) catalog token in the Label
+    # column. Output No_cat is always an int derived via _to_int_id.
+    # Match unsigned digit runs only — hyphens in catalog IDs like
+    # "RJ0600-10274-P0" are separators, NOT minus signs (taking them
+    # as signs would turn the source number negative).
+    _digit_run_re = re.compile(r"\d+")
+
+    def _to_int_id(raw, taken: set[int]) -> int:
+        """Coerce an arbitrary source ID into a unique positive integer.
+
+        Strategy:
+          1. If the raw value parses directly as an int, use it.
+          2. Otherwise pick the **largest** digit run in the string —
+             in JWST catalog IDs like "RJ0600-10274-P0" the unique
+             source number (10274) is always the biggest integer in
+             the token, dwarfing the field prefix (0600 = 600) and
+             priority-class suffix (P0 = 0). "Largest" beats "longest"
+             when two runs share a length (0600 vs 8846 → 8846 wins).
+          3. On collision with a previously-used ID, walk forward to
+             the next free integer.
+        """
+        s = str(raw).strip()
+        candidates: list[int] = []
+        try:
+            candidates.append(int(s))
+        except (ValueError, TypeError):
+            pass
+        for r in _digit_run_re.findall(s):
+            try:
+                n = int(r)
+                if n > 0:
+                    candidates.append(n)
+            except ValueError:
+                pass
+        # Largest first — that's the source ID in conventional catalogs.
+        candidates.sort(reverse=True)
+        for c in candidates:
+            if c not in taken:
+                return c
+        # Last resort: next free positive integer.
+        n = max((c for c in taken if c > 0), default=0) + 1
+        while n in taken:
+            n += 1
+        return n
 
     def _cat_lookup(tid: str) -> tuple[float, float, int, str] | None:
         """Look up a catalog row by id. Returns (ra, dec, weight, label).
         `label` is the catalog's `label`/`name` column value when
-        available, else the literal string "real" (so the output
-        catalog's Label column always distinguishes real vs synth)."""
+        available, else the original raw ID (so the trace from MPT-side
+        integer ID back to the user's source-list name is preserved)."""
         if cat is None:
             return None
         ids_str = [str(i) for i in cat.ids]
@@ -2171,29 +2216,29 @@ def on_export():
             label_val = ""
         label_val = label_val.strip()
         if not label_val:
-            label_val = "real"
+            label_val = tid  # original string ID as the Label
         return float(cat.ra_deg[k]), float(cat.dec_deg[k]), pr, label_val
 
     def _push_target_row(
-        tid: str | None, ra_d: float, dec_d: float, pr: int, label: str,
-    ) -> str:
-        """Append a target row. If `tid` is given (an original catalog ID),
-        it's preserved verbatim. If None, a fresh integer ID is generated
-        that doesn't collide with anything in the row set yet."""
-        if tid is None:
-            # Generate a fresh sequential integer; skip values already
-            # consumed by real catalog rows (which may themselves be
-            # integers).
-            int_taken = {n for n in used_target_nos
-                         if isinstance(n, int) or
-                         (isinstance(n, str) and n.isdigit())}
-            int_taken = {int(n) for n in int_taken}
-            target_no = max(int_taken, default=0) + 1
-            while target_no in int_taken:
+        raw_tid: str | None,
+        ra_d: float,
+        dec_d: float,
+        pr: int,
+        label: str,
+    ) -> int:
+        """Append a target row. Always returns the assigned integer ID.
+
+        If `raw_tid` is None, a fresh sequential integer is generated.
+        Otherwise the integer is derived from `raw_tid` via _to_int_id
+        (e.g. "RJ0600-10274-P0" → 10274).
+        """
+        if raw_tid is None:
+            target_no = max(used_int_ids, default=0) + 1
+            while target_no in used_int_ids:
                 target_no += 1
         else:
-            target_no = tid
-        used_target_nos.add(target_no)
+            target_no = _to_int_id(raw_tid, used_int_ids)
+        used_int_ids.add(target_no)
         targets_rows.append({
             "No_cat": target_no,
             "Pr": pr,
@@ -2201,11 +2246,12 @@ def on_export():
             "dec_deg": dec_d,
             "label": label,
         })
-        return str(target_no)
+        return target_no
 
-    # Step 1: open shutters with a known catalog source. Register them
-    # with their ORIGINAL catalog ID so the output `.cat` preserves the
-    # user's naming convention (e.g. "RJ0600-10274-P0" stays as such).
+    # Step 1: open shutters with a known catalog source. The output
+    # `.cat` row's integer ID is derived from the original catalog
+    # token (digit-run extraction). The original token survives in the
+    # Label column for downstream traceability.
     for (q, s, d), sh in state["open_shutters"].items():
         tid = sh.target_id or _shutter_source_id(q, s, d)
         if not tid or tid in real_ids_seen:
@@ -2218,11 +2264,9 @@ def on_export():
         _push_target_row(str(tid), ra_d, dec_d, pr, label=label_val)
 
     # Step 1b: append ALL OTHER sources from the loaded input catalog —
-    # whether or not they're inside any open shutter. The user wants the
-    # output `.cat` to be a strict superset of the input list (so
-    # collaborators can see what was on the original list, including
-    # rejected / unobserved targets). Each row keeps its original ID,
-    # weight, and label.
+    # whether or not they're inside any open shutter. Output is a
+    # strict superset of the input list so collaborators see the full
+    # context (rejected / unobserved targets included).
     if cat is not None:
         for i in range(len(cat.ra_deg)):
             tid = str(cat.ids[i])
@@ -2237,7 +2281,7 @@ def on_export():
             except (AttributeError, IndexError, TypeError):
                 label_val = ""
             if not label_val:
-                label_val = "real"
+                label_val = tid  # preserve the original ID string as Label
             _push_target_row(
                 tid,
                 float(cat.ra_deg[i]),
@@ -2287,9 +2331,9 @@ def on_export():
                 ra_d, dec_d = _v2v3_to_radec(v2, v3, fiducial, state["pa_v3"])
             else:
                 ra_d, dec_d = float("nan"), float("nan")
-            fake_id = _push_target_row(
+            fake_id = str(_push_target_row(
                 None, ra_d, dec_d, pr=5, label="vMPT_synth",
-            )
+            ))
             # Tag every shutter in the run with this fake id so later
             # exporters (MPT plan primaryIds) see consistent target IDs.
             for s, _ in run:
