@@ -514,7 +514,7 @@ overlay_alpha_slider = Slider(
     width=SIDEBAR_W - 40,
 )
 overlay_stroke_slider = Slider(
-    start=0.0, end=3.0, step=0.05, value=0.75,
+    start=0.0, end=3.0, step=0.05, value=1.0,
     title="Stroke (px)",
     width=SIDEBAR_W - 40,
 )
@@ -684,7 +684,7 @@ img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source
 # targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
-    line_color="silver", line_alpha=0.20, line_width=0.75,
+    line_color="silver", line_alpha=0.20, line_width=1.0,
     fill_alpha=0.0,
 )
 stuck_open_glyph = fig.multi_polygons(
@@ -700,11 +700,14 @@ stuck_open_glyph = fig.multi_polygons(
 # spectra would overlap on the detector (MPT-style spectral conflict).
 spec_overlap_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap,
-    # No edge — overlap shutters are fill-only, alpha 0.1 per conflict so
-    # the colour intensifies where multiple open shutters' spectra
-    # contribute (alpha compositing stacks).
-    line_alpha=0.0, line_width=0,
-    fill_color="orange", fill_alpha=0.10,
+    # No edge by default — overlap shutters are fill-only, alpha 0.2
+    # per conflict so the colour intensifies where multiple open
+    # shutters' spectra contribute (alpha compositing stacks). The
+    # stroke slider in the appearance picker reveals the edge by
+    # bumping line_alpha; line_color is set to orange here so the
+    # outline matches the fill (default would be Bokeh's blue-grey).
+    line_color="#d97a00", line_alpha=0.0, line_width=0,
+    fill_color="orange", fill_alpha=0.20,
 )
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
