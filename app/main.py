@@ -119,7 +119,10 @@ DISPERSER_FILTER_LABELS = [f"{d} / {f}" for d, f in DISPERSER_FILTER_COMBOS]
 
 state: dict = {
     "image": None,
-    "catalog": None,
+    "catalog": None,         # merged-active cache; rebuilt from "catalogs"
+    "catalogs": [],          # list of {"name", "catalog", "enabled"} entries
+                             # — the source of truth. `state["catalog"]` is
+                             # recomputed on every add/remove/toggle.
     "tmp_sidecar_path": None,
     "open_shutters": {},  # (q,s,d) -> OpenShutter
     "highlighted": set(), # set of (q,s,d) tuples — visual flag, not exported
@@ -182,6 +185,12 @@ fits_path_input = TextInput(title="FITS path (local)", value="", placeholder="/p
 jpg_path_input = TextInput(title="JPG path (local)", value="", placeholder="/path/to/image.jpg")
 sidecar_path_input = TextInput(title="Sidecar FITS path (WCS for JPG)", value="", placeholder="/path/to/wcs.fits")
 catalog_path_input = TextInput(title="Catalog path (local)", value="", placeholder="/path/to/catalog.csv")
+catalog_add_btn = Button(label="Add", button_type="primary", width=70)
+# Dynamic list of loaded catalogs — populated by `_render_catalog_list()`
+# whenever state["catalogs"] changes. Each row in this column is a
+# row(CheckboxGroup, Button) pair: checkbox toggles the catalog
+# on/off (recomputes the merged target overlay), button × removes it.
+catalog_list_column = column(width=SIDEBAR_W - 20)
 
 # Upload widgets work for small files but Bokeh's default WebSocket limit (~20 MB) will
 # silently truncate larger ones. Start the server with --websocket-max-message-size if
@@ -1572,13 +1581,115 @@ def _load_jpg_pair_from_paths(
         _hide_loading()
 
 
+def _rebuild_merged_catalog() -> None:
+    """Combine all ENABLED entries in state['catalogs'] into the single
+    `state['catalog']` cache that the rest of the app (overlay, source
+    matching, export) reads. Disabled / removed catalogs drop out
+    automatically. With one or zero enabled, the merge is a no-op
+    pass-through to avoid unnecessary array allocations."""
+    enabled = [e["catalog"] for e in state["catalogs"] if e["enabled"]]
+    if not enabled:
+        state["catalog"] = None
+        return
+    if len(enabled) == 1:
+        state["catalog"] = enabled[0]
+        return
+    ids = np.concatenate([np.asarray(c.ids, dtype=object) for c in enabled])
+    ra = np.concatenate([c.ra_deg for c in enabled])
+    dec = np.concatenate([c.dec_deg for c in enabled])
+    pri = np.concatenate([c.priority for c in enabled])
+    mag = np.concatenate([c.mag for c in enabled])
+    z = np.concatenate([c.z for c in enabled])
+    label = np.concatenate([
+        np.asarray(c.label, dtype=object) if c.label is not None
+        else np.array([""] * len(c.ra_deg), dtype=object)
+        for c in enabled
+    ])
+    state["catalog"] = Catalog(
+        ids=ids, ra_deg=ra, dec_deg=dec, priority=pri,
+        mag=mag, z=z, label=label,
+        source_path=" + ".join(c.source_path for c in enabled),
+    )
+
+
+def _render_catalog_list() -> None:
+    """Rebuild the catalog_list_column from state['catalogs']. One row
+    per loaded catalog: a single-item CheckboxGroup (on/off) and a
+    delete-× button."""
+    rows = []
+    for idx, entry in enumerate(state["catalogs"]):
+        name = entry["name"]
+        n = len(entry["catalog"].ra_deg)
+        cb = CheckboxGroup(
+            labels=[f"{name} ({n})"],
+            active=[0] if entry["enabled"] else [],
+            width=SIDEBAR_W - 70,
+        )
+        del_btn = Button(
+            label="×", button_type="warning",
+            width=30, height=28,
+        )
+
+        def _make_toggle(i):
+            def _cb(attr, old, new):
+                if 0 <= i < len(state["catalogs"]):
+                    state["catalogs"][i]["enabled"] = (0 in new)
+                    _rebuild_merged_catalog()
+                    _rebuild_shutter_catalog_index()
+                    refresh_overlays()
+            return _cb
+
+        def _make_delete(i, label_name):
+            def _cb():
+                if 0 <= i < len(state["catalogs"]):
+                    del state["catalogs"][i]
+                    _rebuild_merged_catalog()
+                    _rebuild_shutter_catalog_index()
+                    _render_catalog_list()
+                    refresh_overlays()
+                    _set_status(f"Removed catalog: {label_name}", "ok")
+            return _cb
+
+        cb.on_change("active", _make_toggle(idx))
+        del_btn.on_click(_make_delete(idx, name))
+        rows.append(row(cb, del_btn))
+    catalog_list_column.children = rows
+
+
 def _load_catalog_from_path(path: str) -> None:
     try:
         cat = load_catalog(path)
-        state["catalog"] = cat
+        name = Path(path).name
+        # Refuse duplicates: if the same path is already loaded, just
+        # re-enable it rather than appending a redundant copy.
+        for entry in state["catalogs"]:
+            if entry["catalog"].source_path == cat.source_path:
+                entry["enabled"] = True
+                _rebuild_merged_catalog()
+                _rebuild_shutter_catalog_index()
+                _render_catalog_list()
+                refresh_overlays()
+                _set_status(
+                    f"Catalog already loaded — re-enabled {name} "
+                    f"({len(cat.ra_deg)} targets).", "ok",
+                )
+                return
+        state["catalogs"].append({
+            "name": name,
+            "catalog": cat,
+            "enabled": True,
+        })
+        _rebuild_merged_catalog()
         _rebuild_shutter_catalog_index()
+        _render_catalog_list()
         refresh_overlays()
-        _set_status(f"Catalog loaded: {len(cat.ra_deg)} targets from {Path(path).name}.", "ok")
+        n_total = sum(len(e["catalog"].ra_deg) for e in state["catalogs"]
+                      if e["enabled"])
+        _set_status(
+            f"Catalog added: {name} ({len(cat.ra_deg)} targets). "
+            f"{len(state['catalogs'])} catalog(s) loaded, {n_total} "
+            f"active targets total.", "ok",
+        )
     except Exception as e:  # noqa: BLE001
         _set_status(f"Catalog load failed: {e}", "err")
         traceback.print_exc()
@@ -1631,8 +1742,25 @@ def on_jpg_path(attr, old, new):
 
 
 def on_catalog_path(attr, old, new):
+    """Path change → load + append the catalog. Convenient for the
+    pastes-a-path flow. The explicit "Add" button is a parallel
+    trigger so the user can re-load a catalog that was previously
+    removed without first clearing the path."""
     p = catalog_path_input.value.strip()
     if not p:
+        return
+    if not Path(p).exists():
+        _set_status(f"Catalog path not found: {p}", "err")
+        return
+    _show_loading(f"Loading catalog: {Path(p).name}…")
+    _deferred(_load_catalog_from_path, p)
+
+
+def on_catalog_add():
+    """Explicit Add button — re-uses whatever's in catalog_path_input."""
+    p = catalog_path_input.value.strip()
+    if not p:
+        _set_status("Set a catalog path first.", "warn")
         return
     if not Path(p).exists():
         _set_status(f"Catalog path not found: {p}", "err")
@@ -2419,6 +2547,21 @@ export_btn.on_click(on_export)
 
 def _build_current_session() -> Session:
     img = state["image"]
+    # `catalog_paths` is the multi-catalog source of truth; the
+    # legacy single-`catalog_path` field is kept in lockstep (set to
+    # the first enabled entry) so vMPT 1.0 bundles still round-trip.
+    catalog_entries = [
+        {
+            "path": e["catalog"].source_path,
+            "enabled": bool(e.get("enabled", True)),
+        }
+        for e in state["catalogs"]
+        if getattr(e.get("catalog"), "source_path", None)
+    ]
+    first_enabled = next(
+        (e["path"] for e in catalog_entries if e["enabled"]),
+        catalog_entries[0]["path"] if catalog_entries else None,
+    )
     return Session(
         pointing_ra_deg=float(state["ra_deg"]),
         pointing_dec_deg=float(state["dec_deg"]),
@@ -2430,7 +2573,8 @@ def _build_current_session() -> Session:
         highlighted=list(state["highlighted"]),
         image_path=(img.source_path if img else None),
         wcs_sidecar_path=(getattr(img, "wcs_sidecar_path", None) if img else None),
-        catalog_path=(state["catalog"].source_path if state["catalog"] else None),
+        catalog_path=first_enabled,
+        catalog_paths=catalog_entries,
     )
 
 
@@ -2520,19 +2664,52 @@ def on_session_load():
     elif sess.image_path:
         image_note = f" Image not found at {sess.image_path}; load manually."
 
-    if sess.catalog_path and Path(sess.catalog_path).exists() and (
-        state["catalog"] is None
-        or getattr(state["catalog"], "source_path", None) != sess.catalog_path
-    ):
-        catalog_path_input.value = sess.catalog_path
+    # Restore catalogs. New bundles (vMPT 1.1+) record an ordered list
+    # in `catalog_paths`; older bundles store a single `catalog_path`,
+    # which session_io.py normalises into a one-entry list. We replace
+    # the in-memory catalog list with the session's entries so a load
+    # is a clean reset, not an additive merge.
+    state["catalogs"] = []
+    catalog_notes: list[str] = []
+    for entry in (sess.catalog_paths or []):
+        path = entry.get("path")
+        if not path:
+            continue
+        if not Path(path).exists():
+            catalog_notes.append(f"missing {Path(path).name}")
+            continue
+        try:
+            cat = load_catalog(path)
+        except Exception as e:  # noqa: BLE001
+            catalog_notes.append(f"{Path(path).name}: {e}")
+            continue
+        state["catalogs"].append({
+            "name": Path(path).name,
+            "catalog": cat,
+            "enabled": bool(entry.get("enabled", True)),
+        })
+    _rebuild_merged_catalog()
+    _render_catalog_list()
+    if state["catalogs"]:
+        # Surface the first loaded catalog's path in the input so the
+        # user has something to edit / re-add. Pick the first enabled
+        # entry, falling back to the first if all are disabled.
+        first = next(
+            (e for e in state["catalogs"] if e["enabled"]),
+            state["catalogs"][0],
+        )
+        catalog_path_input.value = first["catalog"].source_path
 
     refresh_overlays()
     if state["image"] is None and not image_note:
         image_note = " Load an image to see the overlay."
+    catalog_note = (
+        " Catalog issues: " + "; ".join(catalog_notes) if catalog_notes else ""
+    )
     _set_status(
         f"Session loaded: {len(state['open_shutters'])} open shutters, "
-        f"{len(state['highlighted'])} highlighted.{image_note}",
-        "warn" if image_note else "ok", clear_after=14,
+        f"{len(state['highlighted'])} highlighted.{image_note}{catalog_note}",
+        "warn" if (image_note or catalog_note) else "ok", clear_after=14,
     )
 
 
@@ -3116,6 +3293,7 @@ fits_path_input.on_change("value", on_fits_path)
 jpg_path_input.on_change("value", on_jpg_path)
 sidecar_path_input.on_change("value", on_sidecar_path)
 catalog_path_input.on_change("value", on_catalog_path)
+catalog_add_btn.on_click(on_catalog_add)
 catalog_priority_input.on_change("value", lambda a, o, n: refresh_overlays())
 catalog_mag_input.on_change("value", lambda a, o, n: refresh_overlays())
 ra_input.on_change("value", on_pointing)
@@ -3148,8 +3326,11 @@ image_tab = TabPanel(title="Image", child=column(
     Div(text="<small><b>or</b> JPG + sidecar FITS:</small>"),
     row(sidecar_path_input, sidecar_browse_btn),
     row(jpg_path_input, jpg_browse_btn),
-    Div(text="<b>Catalog</b> <small>(CSV / ASCII / FITS with ID, RA, DEC)</small>"),
+    Div(text="<b>Catalogs</b> <small>(CSV / ASCII / FITS with ID, RA, DEC; "
+             "you can load multiple — each can be toggled on/off or removed)</small>"),
     row(catalog_path_input, catalog_browse_btn),
+    row(catalog_add_btn),
+    catalog_list_column,
     catalog_priority_input,
     catalog_mag_input,
     width=SIDEBAR_W - 20,

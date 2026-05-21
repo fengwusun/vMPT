@@ -65,6 +65,11 @@ class Session:
     image_path: Optional[str] = None
     wcs_sidecar_path: Optional[str] = None
     catalog_path: Optional[str] = None
+    # vMPT 1.1+: multi-catalog support. Each entry: {"path": str,
+    # "enabled": bool}. `catalog_path` (single) is preserved for
+    # backward compatibility with vMPT 1.0 bundles — set to the first
+    # entry's path when catalog_paths is non-empty.
+    catalog_paths: list = field(default_factory=list)
     tool_version: str = SESSION_TOOL_VERSION
     created: Optional[str] = None
     name: Optional[str] = None
@@ -338,6 +343,11 @@ def _build_workspace_payload(session: Session) -> dict:
         "image_path": session.image_path,
         "wcs_sidecar_path": session.wcs_sidecar_path,
         "catalog_path": session.catalog_path,
+        "catalog_paths": [
+            {"path": str(e.get("path")), "enabled": bool(e.get("enabled", True))}
+            for e in (session.catalog_paths or [])
+            if e.get("path")
+        ],
     }
 
 
@@ -361,6 +371,32 @@ def _parse_grating_filter(gf: Optional[str]) -> tuple[Optional[str], Optional[st
             a, b = gf.split(sep, 1)
             return a, b
     return None, None
+
+
+def _parse_catalog_paths(
+    raw: object,
+    legacy_single: Optional[str] = None,
+) -> list:
+    """Normalise the workspace's catalog_paths field into a clean list of
+    `{"path": str, "enabled": bool}` dicts.
+
+    Older bundles (vMPT ≤ 1.0) only stored a single `catalog_path`; if
+    the new field is absent or empty, synthesise a single-entry list
+    from that fallback so multi-catalog UIs still have one row to show.
+    """
+    out: list = []
+    if isinstance(raw, list):
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("path"):
+                out.append({
+                    "path": str(entry["path"]),
+                    "enabled": bool(entry.get("enabled", True)),
+                })
+            elif isinstance(entry, str) and entry:
+                out.append({"path": entry, "enabled": True})
+    if not out and legacy_single:
+        out.append({"path": str(legacy_single), "enabled": True})
+    return out
 
 
 def _import_mpt(data: dict, sidecar: dict) -> Session:
@@ -440,6 +476,10 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
     if grating is None or filt is None:
         raise ValueError("could not determine disperser/filter from session")
 
+    catalog_paths = _parse_catalog_paths(
+        sidecar.get("catalog_paths"), sidecar.get("catalog_path"),
+    )
+
     return Session(
         pointing_ra_deg=ra if ra is not None else 0.0,
         pointing_dec_deg=dec if dec is not None else 0.0,
@@ -452,6 +492,7 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
         image_path=sidecar.get("image_path"),
         wcs_sidecar_path=sidecar.get("wcs_sidecar_path"),
         catalog_path=sidecar.get("catalog_path"),
+        catalog_paths=catalog_paths,
         tool_version=str(sidecar.get("vmpt_version", SESSION_TOOL_VERSION)),
         created=sidecar.get("created") or data.get("created"),
         name=data.get("name"),
@@ -499,6 +540,10 @@ def _import_legacy(data: dict) -> Session:
         except (TypeError, ValueError) as e:
             raise ValueError(f"malformed highlighted[{i}]: {e}") from e
 
+    catalog_paths = _parse_catalog_paths(
+        data.get("catalog_paths"), data.get("catalog_path"),
+    )
+
     return Session(
         pointing_ra_deg=ra,
         pointing_dec_deg=dec,
@@ -511,6 +556,7 @@ def _import_legacy(data: dict) -> Session:
         image_path=data.get("image_path"),
         wcs_sidecar_path=data.get("wcs_sidecar_path"),
         catalog_path=data.get("catalog_path"),
+        catalog_paths=catalog_paths,
         tool_version=str(data.get("version", "1.0")),
         created=data.get("created"),
     )

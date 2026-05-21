@@ -187,6 +187,42 @@ def test_legacy_schema_still_loads(tmp_path):
     assert s.image_path == "/tmp/some.jpg"
 
 
+def test_catalog_paths_roundtrip(tmp_path):
+    """Multi-catalog list survives save→load, with the enabled flag
+    preserved per entry."""
+    s = _sample_session()
+    s.catalog_paths = [
+        {"path": "/tmp/cat_a.csv", "enabled": True},
+        {"path": "/tmp/cat_b.cat", "enabled": False},
+        {"path": "/tmp/cat_c.csv", "enabled": True},
+    ]
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    loaded = import_session_json(str(p))
+    paths = [(e["path"], e["enabled"]) for e in loaded.catalog_paths]
+    assert paths == [
+        ("/tmp/cat_a.csv", True),
+        ("/tmp/cat_b.cat", False),
+        ("/tmp/cat_c.csv", True),
+    ]
+
+
+def test_catalog_paths_legacy_single_path_synthesises_one_entry(tmp_path):
+    """An old bundle that only stored `catalog_path` (vMPT 1.0) must
+    yield a one-entry catalog_paths list on load — so the multi-catalog
+    UI has something to render."""
+    s = _sample_session()
+    # Force the legacy single-catalog shape.
+    s.catalog_paths = []
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    loaded = import_session_json(str(p))
+    assert loaded.catalog_path == s.catalog_path
+    assert len(loaded.catalog_paths) == 1
+    assert loaded.catalog_paths[0]["path"] == s.catalog_path
+    assert loaded.catalog_paths[0]["enabled"] is True
+
+
 def test_new_session_loads_via_parse_mpt_json(tmp_path):
     """A session.json written by the new exporter must be loadable through
     the MPT-side path (Load plan from JSON), since it is now valid MPT
