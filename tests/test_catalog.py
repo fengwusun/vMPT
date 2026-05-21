@@ -23,6 +23,42 @@ def test_load_csv(tmp_path):
     assert np.all(np.isnan(cat.z))
 
 
+def test_load_csv_priority_class_strings(tmp_path):
+    """Catalogs in the wild use letter-prefixed priority *classes*
+    (`P0` = highest, `P1` = next, …). The loader must extract the
+    numeric portion rather than throwing ValueError trying to coerce
+    `"P0"` to float."""
+    p = tmp_path / "classes.csv"
+    p.write_text(
+        "ID,RA,DEC,priority\n"
+        "obj1,53.0,-27.7,P0\n"
+        "obj2,53.1,-27.8,P1\n"
+        "obj3,53.2,-27.9,P2\n"
+    )
+    cat = load_catalog(str(p))
+    assert len(cat.ra_deg) == 3
+    assert np.allclose(cat.priority, [0, 1, 2])
+
+
+def test_load_csv_masked_mag_and_z_become_nan(tmp_path):
+    """When numeric columns have empty cells (astropy masks them on read),
+    the loader should yield NaN rather than 0 in the masked positions."""
+    p = tmp_path / "masked.csv"
+    p.write_text(
+        "ID,RA,DEC,mag,z\n"
+        "obj1,53.0,-27.7,23.5,6.07\n"
+        "obj2,53.1,-27.8,,\n"
+        "obj3,53.2,-27.9,21.0,5.5\n"
+    )
+    cat = load_catalog(str(p))
+    assert cat.mag[0] == 23.5
+    assert np.isnan(cat.mag[1])
+    assert cat.mag[2] == 21.0
+    assert cat.z[0] == 6.07
+    assert np.isnan(cat.z[1])
+    assert cat.z[2] == 5.5
+
+
 def test_load_ascii_empt_style(tmp_path):
     p = tmp_path / "observed_targets.cat"
     p.write_text(

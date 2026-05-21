@@ -3,11 +3,18 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 import numpy as np
 from astropy.io import ascii as ioascii
 from astropy.table import Table
+
+# Pattern that picks up the *numeric portion* of a value like "P0",
+# "P1", "class-3", "1.5e-2". Used by _as_float so common JWST priority-
+# class encodings (P0 = highest, P1 = …) flow through as numeric 0, 1,
+# etc. without forcing the user to hand-edit their catalog.
+_NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
 
 @dataclass
@@ -40,10 +47,63 @@ def _find_col(table: Table, candidates) -> str | None:
 
 
 def _as_float(table: Table, name: str | None) -> np.ndarray:
+    """Coerce a column to float, tolerantly.
+
+    Catalogs in the wild use a few non-numeric conventions for fields
+    that vMPT wants as numbers — the most common is the **priority
+    class** (`P0`, `P1`, …). Rather than throwing, we:
+
+      • try the fast path (`np.asarray(..., dtype=float)`);
+      • on failure fall back to row-by-row parsing — empty strings and
+        masked values become NaN, and the *numeric portion* of any
+        string is extracted (so `"P0"` → 0.0, `"class-3"` → 3.0,
+        `"high-mu"` → NaN).
+    """
     n = len(table)
     if name is None:
         return np.full(n, np.nan, dtype=float)
-    return np.asarray(table[name], dtype=float)
+    col = table[name]
+    # Numeric column with astropy masks → fill masked entries with NaN.
+    # (np.asarray on a MaskedArray drops the mask and exposes the
+    # underlying buffer, which usually has 0 in the masked slots — not
+    # what we want for empty `mag` / `z` cells.)
+    if np.issubdtype(getattr(col, "dtype", np.dtype("O")), np.floating):
+        try:
+            return np.ma.filled(np.ma.asarray(col), np.nan).astype(float)
+        except (ValueError, TypeError):
+            pass
+    # Numeric (int) column → straight cast is fine.
+    try:
+        return np.asarray(col, dtype=float)
+    except (ValueError, TypeError):
+        pass
+    # Non-numeric column → row-by-row parse, extracting trailing digits.
+    out = np.full(n, np.nan, dtype=float)
+    mask = getattr(col, "mask", None)
+    for i, v in enumerate(col):
+        if mask is not None and mask is not False:
+            try:
+                if mask[i]:
+                    continue
+            except (TypeError, IndexError):
+                pass
+        if v is None:
+            continue
+        s = str(v).strip()
+        if not s or s.lower() in ("--", "nan", "none", "null"):
+            continue
+        try:
+            out[i] = float(s)
+            continue
+        except ValueError:
+            pass
+        m = _NUM_RE.search(s)
+        if m is not None:
+            try:
+                out[i] = float(m.group(0))
+            except ValueError:
+                pass
+    return out
 
 
 def _as_str(table: Table, name: str | None) -> np.ndarray:
