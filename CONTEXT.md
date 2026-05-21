@@ -418,18 +418,37 @@ image manually.
 
 ## Wavelength dispersion model
 
-`app/wavelengths.py`. Linear-shift model per grating:
+`app/wavelengths.py`. Per-shutter lookup table for every (disperser,
+filter) combo, derived from spacetelescope/msaviz's numerical
+integration of the pipeline dispersion polynomials.
 
-```
-λ(V2) = λ_min + (V2 - MSA_V2_REF) × (λ_max - λ_min) / V2_DISP_EXTENT
-```
+The table lives at `data/dispersion_cutoffs.npz` and is regenerated
+by `scripts/precompute_dispersion_cutoffs.py`. For each combo it
+stores four (4, 171, 365) float32 arrays under keys
+`{DISPERSER}_{FILTER}_blue_edge`, `..._gap_lo`, `..._gap_hi`,
+`..._red_edge`. NaN = the shutter's spectrum doesn't reach that
+detector (e.g. PRISM Q3/Q4 shutters never span the NRS1/NRS2 gap;
+H-grating edge shutters can miss one detector entirely).
 
-with `V2_DISP_EXTENT = 180″` and per-grating `(λ_min, λ_max)` from
-JDox. Endpoints are **clamped** to the grating's intrinsic range —
-prevents the old "PRISM shows λ > 5.3 µm" bug.
+`cutoffs(v2, v3, disperser, filt, *, q, s, d)` does O(1) lookup
+when shutter indices are supplied; for the existing call sites that
+don't have indices yet, a linear V2-shift fallback returns the
+fiducial endpoints (used only by the old tests and a safety net for
+fresh checkouts that haven't run the precompute).
 
 `v2_overlap_distance(disperser, filter)` returns the V2 half-extent
 used by the spec-overlap calculation (35″ PRISM, 200″ M, 500″ H).
+
+### Regenerating the table
+
+```
+git clone https://github.com/spacetelescope/msaviz.git /tmp/msaviz
+PYTHONPATH=/tmp/msaviz python scripts/precompute_dispersion_cutoffs.py
+```
+
+Takes ~13 minutes (PRISM is the slow one — per-shutter ODE
+integration; gratings are batch-integrated per quadrant). vMPT does
+NOT depend on msaviz at runtime — only the precompute does.
 
 ---
 

@@ -14,13 +14,13 @@ from app.wavelengths import GRATING_RANGES, V2_DISP_EXTENT, cutoffs
 CASES = [
     ("PRISM", "CLEAR", 0.60, 5.30),
     ("G140M", "F070LP", 0.70, 1.27),
-    ("G140M", "F100LP", 0.97, 1.84),
-    ("G235M", "F170LP", 1.66, 3.07),
-    ("G395M", "F290LP", 2.87, 5.14),
-    ("G140H", "F070LP", 0.81, 1.27),
-    ("G140H", "F100LP", 0.97, 1.84),
-    ("G235H", "F170LP", 1.66, 3.07),
-    ("G395H", "F290LP", 2.87, 5.14),
+    ("G140M", "F100LP", 0.97, 1.89),
+    ("G235M", "F170LP", 1.66, 3.17),
+    ("G395M", "F290LP", 2.87, 5.27),
+    ("G140H", "F070LP", 0.70, 1.27),
+    ("G140H", "F100LP", 0.97, 1.89),
+    ("G235H", "F170LP", 1.66, 3.17),
+    ("G395H", "F290LP", 2.87, 5.27),
 ]
 
 
@@ -95,20 +95,21 @@ def test_grating_gap_still_shifts_linearly():
     assert plus["lam_gap_lo"] != pytest.approx(center["lam_gap_lo"])
 
 
-def test_prism_per_shutter_lookup_uses_table_when_available():
-    """When q,s,d are supplied AND the precomputed table is present,
-    the PRISM result should reflect per-shutter values rather than
-    the fixed fiducial. A central Q1 shutter should land near
-    msaviz's (0.6, 1.87, 3.93, 5.3); an edge shutter should differ
-    materially."""
-    from pathlib import Path
-    table_path = (
-        Path(__file__).resolve().parent.parent / "data" / "prism_cutoffs.npz"
-    )
-    if not table_path.exists():
-        pytest.skip("prism_cutoffs.npz not built — run scripts/precompute_prism_wavelengths.py")
+_TABLE_PATH = (
+    Path(__file__).resolve().parent.parent / "data" / "dispersion_cutoffs.npz"
+)
 
-    # msaviz's central Q1 reference (1-based shutter (q=1, d=311, s=86)).
+
+def _has_table() -> bool:
+    return _TABLE_PATH.exists()
+
+
+def test_prism_per_shutter_lookup_uses_table_when_available():
+    """A central PRISM Q1 shutter should land near msaviz's
+    (0.6, 1.87, 3.93, 5.3); these are not the fiducial constants the
+    fallback would return."""
+    if not _has_table():
+        pytest.skip("dispersion_cutoffs.npz not built — run scripts/precompute_dispersion_cutoffs.py")
     central = cutoffs(MSA_V2_REF, MSA_V3_REF, "PRISM", "CLEAR",
                       q=1, s=86, d=311)
     assert central["lam_gap_lo"] == pytest.approx(1.87, abs=0.08)
@@ -118,60 +119,90 @@ def test_prism_per_shutter_lookup_uses_table_when_available():
 
 
 def test_prism_per_shutter_lookup_gap_varies_across_msa():
-    """The whole point of the per-shutter table: gap_lo and gap_hi
-    SHOULD vary materially across the MSA for PRISM, in contrast to
-    the (q,s,d)-less fallback that holds them at the fiducial.
-
-    Geometry note: only Q1 and Q2 shutters produce PRISM spectra
-    that cross the NRS1/NRS2 boundary. Q3/Q4 shutters disperse
-    entirely onto their home detector. So we sweep Q1+Q2 here."""
-    from pathlib import Path
-    table_path = (
-        Path(__file__).resolve().parent.parent / "data" / "prism_cutoffs.npz"
-    )
-    if not table_path.exists():
-        pytest.skip("prism_cutoffs.npz not built")
-
+    """For PRISM the gap location SHOULD vary materially across the
+    MSA — that's the whole reason a single fiducial value was wrong.
+    Only Q1+Q2 shutters disperse across the gap; Q3/Q4 PRISM spectra
+    fall on a single detector."""
+    if not _has_table():
+        pytest.skip("dispersion_cutoffs.npz not built")
     gap_los = []
-    gap_his = []
-    # Q1 + Q2 shutters known to span the gap (varying s and d).
     for (q, s, d) in [
-        (1, 86, 311),  # central reference
-        (1, 13, 255),
-        (1, 82, 288),
-        (2, 1, 323),
-        (2, 58, 336),
+        (1, 86, 311), (1, 13, 255), (1, 82, 288),
+        (2, 1, 323), (2, 58, 336),
     ]:
         out = cutoffs(MSA_V2_REF, MSA_V3_REF, "PRISM", "CLEAR",
                      q=q, s=s, d=d)
-        assert out["lam_gap_lo"] is not None, f"(q={q}, s={s}, d={d}) has no gap"
+        assert out["lam_gap_lo"] is not None, (q, s, d)
         gap_los.append(out["lam_gap_lo"])
-        gap_his.append(out["lam_gap_hi"])
-
-    # Spread should be well above the previous "fixed fiducial" model
-    # (which gave the SAME gap_lo for every shutter).
     assert max(gap_los) - min(gap_los) > 0.5, (
         f"per-shutter PRISM gap_lo should vary by >0.5 μm, got {gap_los}"
     )
 
 
 def test_prism_q3_q4_shutters_have_no_gap():
-    """Q3/Q4 PRISM spectra fall entirely on a single detector — the
-    table records no gap for those shutters, so the lookup returns
-    lam_gap_lo / lam_gap_hi = None."""
-    from pathlib import Path
-    table_path = (
-        Path(__file__).resolve().parent.parent / "data" / "prism_cutoffs.npz"
-    )
-    if not table_path.exists():
-        pytest.skip("prism_cutoffs.npz not built")
-
-    # Picked from the populated region of each quadrant.
+    """Q3/Q4 PRISM spectra fall entirely on a single detector."""
+    if not _has_table():
+        pytest.skip("dispersion_cutoffs.npz not built")
     for (q, s, d) in [(3, 96, 97), (4, 86, 200)]:
         out = cutoffs(MSA_V2_REF, MSA_V3_REF, "PRISM", "CLEAR",
                      q=q, s=s, d=d)
-        # Spectrum exists but the gap doesn't fall on it.
         assert out["lam_blue"] is not None, (q, s, d)
         assert out["lam_red"] is not None, (q, s, d)
         assert out["lam_gap_lo"] is None
         assert out["lam_gap_hi"] is None
+
+
+# -- Grating tables ---------------------------------------------------
+
+GRATING_COMBOS = [
+    ("G140M", "F070LP"), ("G140M", "F100LP"),
+    ("G235M", "F170LP"), ("G395M", "F290LP"),
+    ("G140H", "F070LP"), ("G140H", "F100LP"),
+    ("G235H", "F170LP"), ("G395H", "F290LP"),
+]
+
+
+@pytest.mark.parametrize("disp,filt", GRATING_COMBOS)
+def test_grating_table_returns_in_range_endpoints(disp, filt):
+    """Each grating combo's per-shutter lookup should return values
+    inside the published sci_range when the shutter has any spectrum."""
+    if not _has_table():
+        pytest.skip("dispersion_cutoffs.npz not built")
+    lam_min, lam_max = GRATING_RANGES[disp][filt]
+    # Sweep a central shutter in each quadrant.
+    found_any = False
+    for q in (1, 2, 3, 4):
+        out = cutoffs(MSA_V2_REF, MSA_V3_REF, disp, filt,
+                     q=q, s=86, d=200)
+        if out["lam_blue"] is None and out["lam_red"] is None:
+            continue
+        found_any = True
+        if out["lam_blue"] is not None:
+            assert lam_min - 0.02 <= out["lam_blue"] <= lam_max + 0.02, (
+                f"{disp}/{filt} q={q} blue={out['lam_blue']}")
+        if out["lam_red"] is not None:
+            assert lam_min - 0.02 <= out["lam_red"] <= lam_max + 0.02
+    assert found_any, f"{disp}/{filt} returned None for all quadrants tested"
+
+
+@pytest.mark.parametrize("disp,filt", GRATING_COMBOS)
+def test_grating_gap_varies_across_msa(disp, filt):
+    """For every grating combo, the per-shutter gap_lo should vary
+    by at least ~50 nm across well-separated shutters — confirming
+    we're reading per-shutter data, not a single fiducial."""
+    if not _has_table():
+        pytest.skip("dispersion_cutoffs.npz not built")
+    gap_los = []
+    for q in (1, 2, 3, 4):
+        for (s, d) in [(86, 50), (86, 200), (86, 320), (40, 200), (140, 200)]:
+            out = cutoffs(MSA_V2_REF, MSA_V3_REF, disp, filt,
+                         q=q, s=s, d=d)
+            if out["lam_gap_lo"] is not None:
+                gap_los.append(out["lam_gap_lo"])
+    # H gratings tend to have many gap-spanning shutters; M gratings
+    # fewer. Require at least 3 gap-spanning samples and >50 nm spread.
+    if len(gap_los) < 3:
+        pytest.skip(f"{disp}/{filt}: too few gap-spanning shutters in sample")
+    assert max(gap_los) - min(gap_los) > 0.05, (
+        f"{disp}/{filt} gap_lo should vary > 0.05 μm, got {gap_los}"
+    )
