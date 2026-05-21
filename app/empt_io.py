@@ -134,14 +134,32 @@ def write_mpt_catalog(path: str, targets: list[dict]) -> None:
     """
     lines = [_MPT_CAT_HEADER]
     for t in targets:
-        no_cat = int(t["No_cat"])
+        no_cat = t["No_cat"]
+        # Catalogs in the wild use string IDs ("RJ0600-10274-P0", "JADES-1234").
+        # Preserve them verbatim; only coerce to int form if the value is
+        # already integer-shaped (a numpy int, a bare int, or a string of
+        # digits). The JDox MPT catalog spec lists ID as "useful as an
+        # integer" but does not strictly require it — APT accepts the
+        # tokens we hand it.
+        if isinstance(no_cat, (int, np.integer)):
+            id_str = str(int(no_cat))
+        else:
+            s = str(no_cat).strip()
+            try:
+                id_str = str(int(s))   # "123" → "123"
+            except (ValueError, TypeError):
+                id_str = s              # leave non-integer IDs verbatim
+        # Scrub anything that would break the tab-separated parse.
+        id_str = id_str.replace("\t", " ").replace("\n", " ")
+        primary = int(t.get("Primary", 1))
         weight = int(t.get("Pr", 1))
         ra = float(t["ra_deg"])
         dec = float(t["dec_deg"])
         label = str(t.get("label", "real")) or "real"
-        # Scrub anything that would break the tab-separated parse.
         label = label.replace("\t", " ").replace("\n", " ").strip() or "real"
-        lines.append(f"{no_cat}\t{ra:.10f}\t{dec:.10f}\t{weight}\t1\t{label}")
+        lines.append(
+            f"{id_str}\t{ra:.10f}\t{dec:.10f}\t{weight}\t{primary}\t{label}"
+        )
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
 

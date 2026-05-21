@@ -2150,7 +2150,7 @@ def on_export():
     cat = state["catalog"]
     targets_rows = []
     real_ids_seen: set[str] = set()
-    used_target_nos: set[int] = set()
+    used_target_nos: set = set()  # mixed str / int — keys preserved verbatim
 
     def _cat_lookup(tid: str) -> tuple[float, float, int, str] | None:
         """Look up a catalog row by id. Returns (ra, dec, weight, label).
@@ -2176,17 +2176,23 @@ def on_export():
 
     def _push_target_row(
         tid: str | None, ra_d: float, dec_d: float, pr: int, label: str,
-    ) -> int:
-        """Append a row and return the assigned No_cat."""
-        try:
-            target_no = int(tid) if tid is not None else None
-        except (ValueError, TypeError):
-            target_no = None
-        if target_no is None or target_no in used_target_nos:
-            # Generate a fresh sequential number that doesn't collide.
-            target_no = max(used_target_nos, default=0) + 1
-            while target_no in used_target_nos:
+    ) -> str:
+        """Append a target row. If `tid` is given (an original catalog ID),
+        it's preserved verbatim. If None, a fresh integer ID is generated
+        that doesn't collide with anything in the row set yet."""
+        if tid is None:
+            # Generate a fresh sequential integer; skip values already
+            # consumed by real catalog rows (which may themselves be
+            # integers).
+            int_taken = {n for n in used_target_nos
+                         if isinstance(n, int) or
+                         (isinstance(n, str) and n.isdigit())}
+            int_taken = {int(n) for n in int_taken}
+            target_no = max(int_taken, default=0) + 1
+            while target_no in int_taken:
                 target_no += 1
+        else:
+            target_no = tid
         used_target_nos.add(target_no)
         targets_rows.append({
             "No_cat": target_no,
@@ -2195,21 +2201,50 @@ def on_export():
             "dec_deg": dec_d,
             "label": label,
         })
-        return target_no
+        return str(target_no)
 
-    # Step 1: real catalog sources tied to user picks. For each open
-    # user-shutter that has a target_id OR sits inside a catalog source's
-    # footprint, register the source.
+    # Step 1: open shutters with a known catalog source. Register them
+    # with their ORIGINAL catalog ID so the output `.cat` preserves the
+    # user's naming convention (e.g. "RJ0600-10274-P0" stays as such).
     for (q, s, d), sh in state["open_shutters"].items():
         tid = sh.target_id or _shutter_source_id(q, s, d)
         if not tid or tid in real_ids_seen:
             continue
         info = _cat_lookup(str(tid))
         if info is None:
-            continue  # tid we don't know — leave to be re-faked from geometry
+            continue  # synthesise later from geometry
         ra_d, dec_d, pr, label_val = info
         real_ids_seen.add(str(tid))
         _push_target_row(str(tid), ra_d, dec_d, pr, label=label_val)
+
+    # Step 1b: append ALL OTHER sources from the loaded input catalog —
+    # whether or not they're inside any open shutter. The user wants the
+    # output `.cat` to be a strict superset of the input list (so
+    # collaborators can see what was on the original list, including
+    # rejected / unobserved targets). Each row keeps its original ID,
+    # weight, and label.
+    if cat is not None:
+        for i in range(len(cat.ra_deg)):
+            tid = str(cat.ids[i])
+            if tid in real_ids_seen:
+                continue
+            real_ids_seen.add(tid)
+            pr = int(cat.priority[i]) if np.isfinite(cat.priority[i]) else 1
+            label_val = ""
+            try:
+                if cat.label is not None and i < len(cat.label):
+                    label_val = str(cat.label[i]).strip()
+            except (AttributeError, IndexError, TypeError):
+                label_val = ""
+            if not label_val:
+                label_val = "real"
+            _push_target_row(
+                tid,
+                float(cat.ra_deg[i]),
+                float(cat.dec_deg[i]),
+                pr,
+                label=label_val,
+            )
 
     # Step 2: group open shutters into per-(q,d) consecutive-s runs (slitlets)
     # and fake an entry for any run that has no real source attached.
@@ -2252,12 +2287,11 @@ def on_export():
                 ra_d, dec_d = _v2v3_to_radec(v2, v3, fiducial, state["pa_v3"])
             else:
                 ra_d, dec_d = float("nan"), float("nan")
-            no_cat = _push_target_row(
+            fake_id = _push_target_row(
                 None, ra_d, dec_d, pr=5, label="vMPT_synth",
             )
             # Tag every shutter in the run with this fake id so later
             # exporters (MPT plan primaryIds) see consistent target IDs.
-            fake_id = str(no_cat)
             for s, _ in run:
                 cur = state["open_shutters"].get((q, s, d))
                 if cur is not None and (cur.target_id is None or cur.target_id == ""):

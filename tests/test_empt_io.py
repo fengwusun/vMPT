@@ -169,6 +169,27 @@ def test_write_mpt_catalog_header_and_data(tmp_path):
     assert lab2 == "vMPT_synth"
 
 
+def test_write_mpt_catalog_preserves_string_ids(tmp_path):
+    """If the input catalog used non-integer IDs (e.g. "RJ0600-10274-P0"),
+    the output MPT catalog should preserve those IDs verbatim — the
+    user's downstream tooling depends on the same identifiers carrying
+    through."""
+    from app.empt_io import write_mpt_catalog
+    out = tmp_path / "RJ0600-targets.cat"
+    write_mpt_catalog(str(out), [
+        {"No_cat": "RJ0600-10274-P0", "ra_deg": 90.039845, "dec_deg": -20.136384,
+         "label": "real"},
+        {"No_cat": "RJ0600-8846-P0",  "ra_deg": 90.038126, "dec_deg": -20.140741,
+         "label": "real"},
+        # A synthesized row with an int ID
+        {"No_cat": 9001, "ra_deg": 90.04, "dec_deg": -20.13, "label": "vMPT_synth"},
+    ])
+    lines = out.read_text().strip().splitlines()
+    assert lines[1].split("\t")[0] == "RJ0600-10274-P0"
+    assert lines[2].split("\t")[0] == "RJ0600-8846-P0"
+    assert lines[3].split("\t")[0] == "9001"
+
+
 def test_write_mpt_catalog_distinguishes_real_vs_synth(tmp_path):
     """The output catalog must let downstream tools tell which rows came
     from the user's input catalog and which were synthesized by vMPT
