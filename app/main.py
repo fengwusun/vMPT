@@ -1144,7 +1144,10 @@ def _open_shutters_cds_data(pa_v3: float, fid_pix: tuple[float, float],
         tgt.append(str(sh.target_id) if sh.target_id is not None else "")
         v2c = float(V2_MSA[q - 1, s - 1, d - 1])
         v3c = float(V3_MSA[q - 1, s - 1, d - 1])
-        cut = cutoffs(v2c, v3c, state["disperser"], state["filter"])
+        cut = cutoffs(
+            v2c, v3c, state["disperser"], state["filter"],
+            q=q, s=s, d=d,
+        )
         b = cut.get("lam_blue"); r = cut.get("lam_red")
         glo = cut.get("lam_gap_lo"); ghi = cut.get("lam_gap_hi")
         lam_b.append(b if b is not None else float("nan"))
