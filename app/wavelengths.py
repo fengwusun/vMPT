@@ -76,9 +76,34 @@ def v2_overlap_distance(disperser: str, filt: str) -> float:
     detector. See module-level comment for the eMPT reference."""
     return SPECTRUM_V2_HALFEXTENT.get(disperser.upper(), 180.0)
 
-# Gap parameters (relative to fiducial wavelength span).
+# Per-disperser NRS1/NRS2 detector-gap wavelengths (microns), at the
+# MSA fiducial (central) shutter. The gap is the projection of the
+# NRS1/NRS2 detector boundary back through the disperser into the
+# wavelength axis.
+#
+# PRISM/CLEAR — sourced from spacetelescope/msaviz (commit on main
+# circa 2026), which numerically integrates the pipeline PRISM
+# dispersion polynomial per MSA shutter. At the central Q1 shutter
+# (I=311, J=86) the gap edges are (1.87, 3.93) μm. PRISM dispersion
+# is highly non-linear so the per-shutter spread is large (gap_lo
+# 5-95 % ≈ [0.65, 3.59], gap_hi 5-95 % ≈ [3.03, 5.02] μm); we render
+# the fiducial values as an approximation and note the spread in
+# the UI tooltip rather than mis-shifting via the linear model.
+#
+# Gratings — approximate values. The previous code used a uniform
+# "gap at 50 % of span, 10 % wide" fudge; we keep the linear shift
+# model for gratings (dispersion IS roughly linear there) but at a
+# narrower width that better matches the on-detector pixel gap.
+# Verifying these against msaviz/calibration tables is a follow-up.
+DETECTOR_GAP_FIDUCIAL: dict[str, tuple[float, float]] = {
+    "PRISM": (1.87, 3.93),
+}
+
+# Fallback fractional gap parameters used when a disperser isn't in
+# DETECTOR_GAP_FIDUCIAL. Width tightened from the previous 10 % so
+# gratings show a more believably narrow detector gap.
 GAP_CENTER_REL: float = 0.50
-GAP_WIDTH_REL: float = 0.10
+GAP_WIDTH_REL: float = 0.04
 
 
 def cutoffs(v2_arcsec: float, v3_arcsec: float, disperser: str, filt: str) -> dict:
@@ -87,6 +112,12 @@ def cutoffs(v2_arcsec: float, v3_arcsec: float, disperser: str, filt: str) -> di
     intrinsic [lam_min, lam_max] range — we never report wavelengths
     beyond what the grating can usefully observe (so PRISM is capped at
     5.3 μm even for shutters far from V2_REF).
+
+    For PRISM the gap location is held at the fiducial msaviz value
+    rather than shifted linearly with V2: PRISM dispersion is too
+    non-linear for the linear model to capture, and the fiducial value
+    is a much better approximation than the linearly-shifted result.
+    For the gratings the linear shift model is retained.
     """
     disperser = disperser.upper()
     filt = filt.upper()
@@ -98,23 +129,32 @@ def cutoffs(v2_arcsec: float, v3_arcsec: float, disperser: str, filt: str) -> di
     dlam_dv2 = span / V2_DISP_EXTENT
 
     # Wavelength shift induced by shutter V2 offset from the fiducial.
+    # PRISM's non-linear dispersion makes this shift a poor model
+    # (msaviz shows the actual per-shutter shift is several × larger
+    # in the red than the blue); we use it only for the gratings.
     shift = (v2_arcsec - MSA_V2_REF) * dlam_dv2
+    if disperser == "PRISM":
+        lam_blue_raw = lam_min
+        lam_red_raw = lam_max
+    else:
+        lam_blue_raw = lam_min + shift
+        lam_red_raw = lam_max + shift
 
     # Clamp the shifted spectrum to the grating's intrinsic range — the
     # detector can't pick up wavelengths the grating doesn't usefully
-    # disperse. The gap stays at fixed wavelengths (NRS1/NRS2 detector
-    # gap is at a fixed pair of wavelengths for each disperser, derived
-    # from the optics — we treat them as constants relative to the
-    # spectrum's center and clip if the shifted gap leaves the range).
-    lam_blue_raw = lam_min + shift
-    lam_red_raw = lam_max + shift
+    # disperse.
     lam_blue = max(lam_min, min(lam_max, lam_blue_raw))
     lam_red = max(lam_min, min(lam_max, lam_red_raw))
 
-    gap_half = 0.5 * GAP_WIDTH_REL * span
-    lam_gap_center_raw = lam_min + GAP_CENTER_REL * span + shift
-    lam_gap_lo_raw = lam_gap_center_raw - gap_half
-    lam_gap_hi_raw = lam_gap_center_raw + gap_half
+    fixed_gap = DETECTOR_GAP_FIDUCIAL.get(disperser)
+    if fixed_gap is not None:
+        # Gap held at msaviz fiducial values; no V2 shift applied.
+        lam_gap_lo_raw, lam_gap_hi_raw = fixed_gap
+    else:
+        gap_half = 0.5 * GAP_WIDTH_REL * span
+        lam_gap_center_raw = lam_min + GAP_CENTER_REL * span + shift
+        lam_gap_lo_raw = lam_gap_center_raw - gap_half
+        lam_gap_hi_raw = lam_gap_center_raw + gap_half
 
     # The gap is physical — if the shifted gap falls outside the
     # observable range, there's effectively no detector gap on this

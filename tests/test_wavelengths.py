@@ -56,3 +56,40 @@ def test_shift_with_v2_offset_G395M():
 def test_unsupported_combo_raises():
     with pytest.raises(ValueError):
         cutoffs(MSA_V2_REF, MSA_V3_REF, "G395M", "F100LP")
+
+
+def test_prism_gap_matches_msaviz_fiducial():
+    """The NRS1/NRS2 detector-gap wavelengths for PRISM/CLEAR are taken
+    from spacetelescope/msaviz, which integrates the pipeline PRISM
+    dispersion polynomial per shutter. At the central Q1 shutter
+    msaviz reports gap edges at ≈ 1.87 / 3.93 μm. PRISM dispersion is
+    too non-linear for the linear shift model to capture, so we hold
+    these fixed across the MSA."""
+    out = cutoffs(MSA_V2_REF, MSA_V3_REF, "PRISM", "CLEAR")
+    assert out["lam_gap_lo"] == pytest.approx(1.87, abs=0.01)
+    assert out["lam_gap_hi"] == pytest.approx(3.93, abs=0.01)
+    # Gap width should be ≈ 2 μm — much wider than the previous
+    # incorrect "10 % of span" (0.47 μm) approximation.
+    assert (out["lam_gap_hi"] - out["lam_gap_lo"]) > 1.5
+
+
+def test_prism_gap_does_not_shift_with_v2():
+    """PRISM dispersion is non-linear; the gap location does not
+    follow the linear V2 shift the gratings get. A ±30″ V2 offset
+    must leave PRISM gap edges unchanged (within float noise)."""
+    center = cutoffs(MSA_V2_REF, MSA_V3_REF, "PRISM", "CLEAR")
+    plus = cutoffs(MSA_V2_REF + 30.0, MSA_V3_REF, "PRISM", "CLEAR")
+    minus = cutoffs(MSA_V2_REF - 30.0, MSA_V3_REF, "PRISM", "CLEAR")
+    for k in ("lam_gap_lo", "lam_gap_hi", "lam_blue", "lam_red"):
+        assert plus[k] == pytest.approx(center[k])
+        assert minus[k] == pytest.approx(center[k])
+
+
+def test_grating_gap_still_shifts_linearly():
+    """For the gratings we keep the linear shift model — their
+    dispersion IS roughly linear in V2."""
+    center = cutoffs(MSA_V2_REF, MSA_V3_REF, "G395M", "F290LP")
+    plus = cutoffs(MSA_V2_REF + 30.0, MSA_V3_REF, "G395M", "F290LP")
+    # The gap centre must move with V2 (within clamping).
+    assert plus["lam_gap_lo"] is not None and center["lam_gap_lo"] is not None
+    assert plus["lam_gap_lo"] != pytest.approx(center["lam_gap_lo"])

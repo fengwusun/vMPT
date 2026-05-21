@@ -113,15 +113,20 @@ def test_export_bundle_round_trips(tmp_path):
 
 def test_wavelengths_for_arbitrary_shutter():
     v2_msa, v3_msa = load_msa_grid()
-    # PRISM/CLEAR has the weakest filter cutoff (0.6 μm) so V2-shift is visible
-    # on both edges. Pick shutters from different quadrants (different V2).
+    # PRISM/CLEAR: the on-detector spectrum nearly always spans the
+    # full filter range (msaviz reports blue_edge 5-95 % ≈ [0.600,
+    # 0.606] μm and red_edge ≈ [5.29, 5.30] μm across all shutters),
+    # because PRISM dispersion compresses the red and expands the
+    # blue. So endpoints should be essentially identical across
+    # quadrants — what shifts per-shutter is the *gap* location
+    # within the spectrum.
     c_q2 = cutoffs(v2_msa[1, 85, 200], v3_msa[1, 85, 200], "PRISM", "CLEAR")
     c_q4 = cutoffs(v2_msa[3, 85, 200], v3_msa[3, 85, 200], "PRISM", "CLEAR")
-    # V2 shift should move at least one edge; check that lam_red differs.
-    assert abs(c_q2["lam_red"] - c_q4["lam_red"]) > 0.1, (
-        "PRISM lam_red should shift with V2 between quadrants"
-    )
-    # G395M/F290LP is filter-limited on blue (always 2.87) but lam_red shifts.
+    assert c_q2["lam_blue"] == c_q4["lam_blue"]
+    assert c_q2["lam_red"] == c_q4["lam_red"]
+    # G395M/F290LP is filter-limited on blue (always 2.87) but
+    # lam_red shifts — the gratings DO follow a roughly linear V2
+    # dispersion, so different-V2 shutters see different red edges.
     g_q2 = cutoffs(v2_msa[1, 85, 200], v3_msa[1, 85, 200], "G395M", "F290LP")
     g_q4 = cutoffs(v2_msa[3, 85, 200], v3_msa[3, 85, 200], "G395M", "F290LP")
     assert g_q2["lam_blue"] == g_q4["lam_blue"] == 2.87
