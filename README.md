@@ -162,7 +162,7 @@ What each color means on the figure:
 | **Red-filled (#ff8888)** | User-opened shutter |
 | **Cyan edge** | Highlighted shutter (double-click marker) |
 | **Orange fill** (α=0.10, stackable) | Spectral-conflict warning — operable shutters whose spectra would overlap on the detector with an open or stuck-open shutter's. Darker orange = multiple opens contribute. ±1 row from each dispersion source; cross-quadrant via NRS1 (Q1↔Q3) and NRS2 (Q2↔Q4) detector pairing. |
-| **Yellow circles** | Catalog targets (toggle "Show catalog targets" in Pick → Layers) |
+| **Coloured circles** | Catalog targets — yellow by default, cycling through magenta / pale green / coral / lavender / sky-blue / white / salmon when multiple catalogs are loaded (toggle "Show catalog targets" in Pick → Layers; the colour matches the chip beside each catalog in the **Image** tab's catalog list) |
 
 Failed-closed shutters are not drawn at all — they don't exist for
 the user's purposes.
@@ -190,11 +190,47 @@ on the longest edge and rescales the WCS accordingly.
 
 ### Catalog (optional)
 
-CSV, whitespace-ASCII, or FITS table. Required columns
-(case-insensitive): **ID, RA, DEC**. Optional and used if present:
-`priority`/`Pr`, `mag`/`mag_F444W`/`F444W_mag`, `z`/`zspec`/`zphot`,
-`label`/`name`. Yellow circles appear on the image; the **Pick** tab
-has compact text inputs to filter by priority class or magnitude.
+CSV, whitespace-ASCII, or FITS table. **Required**: an RA column and
+a Dec column. **Optional but used if present**: `priority`/`Pr`,
+`mag`/`mag_F444W`/`F444W_mag`, `z`/`zspec`/`zphot`, `label`/`name`.
+The **Pick** tab has compact text inputs to filter by priority class
+or magnitude.
+
+#### Column-name matching is loose
+
+vMPT normalises column names before comparing — lowercase, strip
+`[…]` / `(…)` unit annotations, collapse non-alphanumerics, peel off
+trailing unit/epoch tokens like `deg`, `degrees`, `rad`, `arcsec`,
+`J2000`. So all of these spellings are recognized for RA:
+
+`RA`, `ra`, `RA[deg]`, `RA (deg)`, `ra_deg`, `RAJ2000`,
+`Right Ascension`, `ALPHA_J2000`
+
+…and the equivalents for Dec (`DEC`, `Dec`, `DEC[deg]`, `DEJ2000`,
+`Declination`, `DELTA_J2000`, …). ID columns accept `ID`/`id`,
+`source_id`, `no`/`No_cat`, `objid`/`objectid`, `srcid`, plus the
+permissive fallbacks `name`/`label`/`tag`/`#` — but those last four
+are only accepted when their values are numeric. If no usable ID
+column is found, vMPT **synthesises sequential IDs 1..N** so the
+catalog still loads.
+
+#### IDs ≥ 10⁷ are mod-clamped
+
+APT MPT and eMPT both expect compact integer source numbers. JADES-
+style 8–9-digit IDs are taken `mod 10_000_000` on load (e.g.
+`12345678 → 2345678`). Collisions after the mod are vanishingly rare
+in real catalogs.
+
+#### Multi-catalog
+
+Click **Add** in the Image tab to layer multiple catalogs at once.
+Each loaded catalog gets a coloured chip in the catalog list — its
+markers on the canvas use the same colour, so it's clear which
+catalog a target came from. Per-row checkbox toggles visibility;
+**×** removes the catalog. Catalogs persist across sessions
+(workspace JSON records each path + enabled flag).
+
+#### Auto-tagging
 
 When you open a shutter that contains a catalog source, the slitlet
 is auto-tagged with that source's ID. Matching follows APT's
@@ -203,9 +239,10 @@ Source Centering rule — a source matches the shutter whose **full
 pitch cell** (≈0.27″×0.53″) contains its centre, so sources sitting
 behind the MSA bars still get matched (to whichever neighbouring
 shutter is nearest). The status bar names the matched source.
-Slitlets with no real source get a synthesized entry at the slitlet's
-centre at export time, tagged in the catalog's `Label` column as
-`vMPT_synth`.
+Matched markers flip to **green** so picked vs. unpicked is obvious
+at a glance. Slitlets with no real source get a synthesized entry at
+the slitlet's centre at export time, tagged in the catalog's
+`Label` column as `vMPT_synth`.
 
 A small example catalog lives at `tests/fixtures/tiny_catalog.csv`.
 

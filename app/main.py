@@ -157,6 +157,23 @@ FIG_H_HINT = 800     # initial canvas height hint
 SIDEBAR_W = 340      # left tab panel (Image / Aim / Pick / MPT)
 HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 
+# Color palette for catalog markers when multiple catalogs are loaded.
+# Cycled by load order (entry 0 → palette[0], entry 1 → palette[1], …).
+# Picked to (a) read clearly on a dark astronomical image, (b) avoid
+# the colors already in use by other overlay layers — red (open
+# shutters), green (matched targets), cyan (highlighted), gold
+# (fixed slits), orange (spec-overlap), lime (pointing handle).
+CATALOG_COLOR_PALETTE = (
+    "#ffd200",   # 1 — bright yellow (default for single-catalog use)
+    "#ff66cc",   # 2 — magenta
+    "#9aff8b",   # 3 — pale spring-green (well away from match green)
+    "#ff9b3d",   # 4 — coral-orange
+    "#b39bff",   # 5 — lavender
+    "#7ad9ff",   # 6 — pale sky-blue (lighter than highlighted cyan)
+    "#ffffff",   # 7 — white
+    "#ff5e5e",   # 8 — salmon (pinker than open-shutter red)
+)
+
 
 # ---------------------------------------------------------------------------
 # Bokeh widgets / glyphs
@@ -1336,14 +1353,22 @@ def refresh_overlays() -> None:
             mask &= np.where(np.isnan(cat.mag), False, cat.mag <= mag_cutoff)
         ids = [str(i) for i in np.asarray(cat.ids)[mask]]
         # Highlight catalog entries that already correspond to an open
-        # shutter's target_id: green ring, thicker line.
+        # shutter's target_id: green ring, thicker line. Unmatched
+        # entries take their per-catalog colour (cycling palette so
+        # users can tell which catalog a marker belongs to when
+        # several are loaded at once).
         matched_target_ids = {
             str(sh.target_id) for sh in state["open_shutters"].values()
             if sh.target_id is not None
         }
+        per_source_colors = state.get("catalog_colors")
+        if per_source_colors is not None and len(per_source_colors) == len(cat.ra_deg):
+            unmatched_colors = np.asarray(per_source_colors)[mask].tolist()
+        else:
+            unmatched_colors = ["#ffd200"] * len(ids)
         line_colors = [
-            "#2e9b3f" if tid in matched_target_ids else "yellow"
-            for tid in ids
+            "#2e9b3f" if tid in matched_target_ids else fallback
+            for tid, fallback in zip(ids, unmatched_colors)
         ]
         line_widths = [
             2.5 if tid in matched_target_ids else 1.5
@@ -1586,44 +1611,79 @@ def _rebuild_merged_catalog() -> None:
     `state['catalog']` cache that the rest of the app (overlay, source
     matching, export) reads. Disabled / removed catalogs drop out
     automatically. With one or zero enabled, the merge is a no-op
-    pass-through to avoid unnecessary array allocations."""
-    enabled = [e["catalog"] for e in state["catalogs"] if e["enabled"]]
+    pass-through to avoid unnecessary array allocations.
+
+    Also builds `state['catalog_colors']`, a parallel string array
+    (one entry per merged source) carrying the *per-catalog* marker
+    colour. The overlay uses this to give each catalog its own unpicked
+    colour while still flipping matched sources to green."""
+    enabled = [e for e in state["catalogs"] if e["enabled"]]
     if not enabled:
         state["catalog"] = None
+        state["catalog_colors"] = None
         return
     if len(enabled) == 1:
-        state["catalog"] = enabled[0]
+        cat = enabled[0]["catalog"]
+        state["catalog"] = cat
+        state["catalog_colors"] = np.full(
+            len(cat.ra_deg), enabled[0]["color"], dtype=object,
+        )
         return
-    ids = np.concatenate([np.asarray(c.ids, dtype=object) for c in enabled])
-    ra = np.concatenate([c.ra_deg for c in enabled])
-    dec = np.concatenate([c.dec_deg for c in enabled])
-    pri = np.concatenate([c.priority for c in enabled])
-    mag = np.concatenate([c.mag for c in enabled])
-    z = np.concatenate([c.z for c in enabled])
+    cats = [e["catalog"] for e in enabled]
+    ids = np.concatenate([np.asarray(c.ids, dtype=object) for c in cats])
+    ra = np.concatenate([c.ra_deg for c in cats])
+    dec = np.concatenate([c.dec_deg for c in cats])
+    pri = np.concatenate([c.priority for c in cats])
+    mag = np.concatenate([c.mag for c in cats])
+    z = np.concatenate([c.z for c in cats])
     label = np.concatenate([
         np.asarray(c.label, dtype=object) if c.label is not None
         else np.array([""] * len(c.ra_deg), dtype=object)
-        for c in enabled
+        for c in cats
+    ])
+    colors = np.concatenate([
+        np.full(len(e["catalog"].ra_deg), e["color"], dtype=object)
+        for e in enabled
     ])
     state["catalog"] = Catalog(
         ids=ids, ra_deg=ra, dec_deg=dec, priority=pri,
         mag=mag, z=z, label=label,
-        source_path=" + ".join(c.source_path for c in enabled),
+        source_path=" + ".join(c.source_path for c in cats),
     )
+    state["catalog_colors"] = colors
+
+
+def _assign_catalog_color(index: int) -> str:
+    """Pick a palette entry for the catalog at the given list index.
+    Cycles when more catalogs are loaded than palette entries."""
+    return CATALOG_COLOR_PALETTE[index % len(CATALOG_COLOR_PALETTE)]
 
 
 def _render_catalog_list() -> None:
     """Rebuild the catalog_list_column from state['catalogs']. One row
-    per loaded catalog: a single-item CheckboxGroup (on/off) and a
-    delete-× button."""
+    per loaded catalog: a colour-chip showing the catalog's marker
+    colour, a single-item CheckboxGroup (on/off), and a delete-×
+    button."""
     rows = []
     for idx, entry in enumerate(state["catalogs"]):
         name = entry["name"]
         n = len(entry["catalog"].ra_deg)
+        color = entry.get("color", "#ffd200")
+        # Coloured chip — small Div with a solid background that matches
+        # the marker colour drawn on the canvas. Gives the user a
+        # visual key linking each list row to its on-image markers.
+        chip = Div(
+            text=(
+                f'<div style="width:14px; height:14px; border-radius:50%; '
+                f'background:{color}; border:1px solid #333; '
+                f'display:inline-block; vertical-align:middle;"></div>'
+            ),
+            width=22, height=24,
+        )
         cb = CheckboxGroup(
             labels=[f"{name} ({n})"],
             active=[0] if entry["enabled"] else [],
-            width=SIDEBAR_W - 70,
+            width=SIDEBAR_W - 100,
         )
         del_btn = Button(
             label="×", button_type="warning",
@@ -1652,7 +1712,7 @@ def _render_catalog_list() -> None:
 
         cb.on_change("active", _make_toggle(idx))
         del_btn.on_click(_make_delete(idx, name))
-        rows.append(row(cb, del_btn))
+        rows.append(row(chip, cb, del_btn))
     catalog_list_column.children = rows
 
 
@@ -1678,6 +1738,7 @@ def _load_catalog_from_path(path: str) -> None:
             "name": name,
             "catalog": cat,
             "enabled": True,
+            "color": _assign_catalog_color(len(state["catalogs"])),
         })
         _rebuild_merged_catalog()
         _rebuild_shutter_catalog_index()
@@ -2687,6 +2748,7 @@ def on_session_load():
             "name": Path(path).name,
             "catalog": cat,
             "enabled": bool(entry.get("enabled", True)),
+            "color": _assign_catalog_color(len(state["catalogs"])),
         })
     _rebuild_merged_catalog()
     _render_catalog_list()

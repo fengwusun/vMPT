@@ -132,7 +132,9 @@ even if the user hasn't opened them.
 | Key | Meaning |
 |---|---|
 | `image` | `LoadedImage` or `None`. Carries `data`, `wcs`, `shape`, `source_path`, `mode`, and (JPG-only) `wcs_sidecar_path`. |
-| `catalog` | `Catalog` or `None`. RA/Dec/IDs/priority/mag/z arrays + `source_path`. |
+| `catalog` | `Catalog` or `None`. Merged-active cache: union of every enabled entry in `catalogs`. Re-derived from scratch on add/remove/toggle so existing readers don't need to know there are multiple. |
+| `catalogs` | List of `{name, catalog, enabled, color}` entries — the multi-catalog source of truth. Catalogs render on the canvas at their assigned palette colour; the per-entry checkbox toggles visibility, the × button removes the entry. |
+| `catalog_colors` | `np.ndarray[object]` of marker colours parallel to `catalog.ra_deg`. Populated by `_rebuild_merged_catalog` so the overlay can emit per-source `line_color` strings without looking up `catalogs` for every row. |
 | `ra_deg`, `dec_deg` | Pointing center. |
 | `pa_v3` | V3 PA in degrees (mod 360). APA = `pa_v3 + V3_IDL_Y_ANGLE`. |
 | `disperser`, `filter` | e.g. `"PRISM"`, `"CLEAR"`. |
@@ -166,7 +168,13 @@ change. Order matters — later layers read masks computed earlier:
 7. **Highlighted** — cyan-edge overlay.
 8. **Fixed slits** — gold polygons.
 9. **Pointing handle** — lime cross.
-10. **Catalog targets** — yellow circles (if layer toggled on).
+10. **Catalog targets** — coloured circles (if layer toggled on).
+    Unpicked sources take the loaded catalog's palette colour
+    (`CATALOG_COLOR_PALETTE` in `main.py` — yellow / magenta / pale
+    green / coral / lavender / sky-blue / white / salmon, cycled by
+    load order). Picked sources (target_id matches an open shutter)
+    flip to green (`#2e9b3f`) with a thicker line so matched vs.
+    unmatched is obvious at a glance.
 
 ### Spec-overlap calculation (the subtle one)
 
@@ -214,6 +222,56 @@ If the slitlet has no caller-supplied `target_id`, `_add_slitlet`
 looks up `state["shutter_to_catids"]` for each opened shutter and
 adopts the first catalog source ID it finds. All shutters in the
 slitlet share that ID. The status bar surfaces the auto-match.
+
+---
+
+## Catalog loader (`app/catalog.py`)
+
+The loader is intentionally permissive — catalogs come in from every
+corner of the community and we'd rather tolerate weird header
+spellings than force users to hand-edit.
+
+### Loose column matching
+
+`_find_col` normalises both the table's column names AND each
+candidate before comparing, via `_norm()`:
+
+1. Lowercase.
+2. Strip bracketed / parenthesised unit annotations: `[deg]`,
+   `(deg)`, `[arcsec]`.
+3. Collapse remaining non-alphanumerics: `RA_deg` → `radeg`,
+   `R.A.` → `ra`.
+4. Peel off trailing unit / epoch tokens (`deg`, `degrees`, `rad`,
+   `radian`, `arcsec`, `arcseconds`, `j2000`, `icrs`, `fk5`) in a
+   loop, so `radeg` → `ra`, `decJ2000` → `dec`.
+
+This means `RA`, `ra`, `RA[deg]`, `RA(deg)`, `RA_deg`, `RAJ2000`,
+`Right Ascension`, `ALPHA_J2000`, `R.A.[deg]` all map to the same
+key. The full candidate lists are `_RA_KEYS`, `_DEC_KEYS`,
+`_ID_KEYS`, `_PRI_KEYS`, `_MAG_KEYS`, `_Z_KEYS`, `_LABEL_KEYS`.
+
+### ID resolution + mod 10⁷
+
+`_find_id_col` tries `_ID_KEYS` strictly, then falls back to
+`_ID_FALLBACK_KEYS` (`name`, `label`, `tag`, `target`, `#`) — but the
+fallback path is only accepted when the column's values coerce to
+`int`, so a `name` column full of `"NGC-123"` does NOT silently
+become the ID column.
+
+If no usable ID column is found, vMPT **synthesises sequential IDs
+1..N** so the catalog still loads (the user can refine later).
+
+Numeric IDs are passed through `_coerce_int_ids`, which takes any
+value `|id| >= ID_MOD = 10_000_000` mod ID_MOD. This keeps the
+integer space compact for APT MPT and eMPT (which both expect
+short numeric source numbers); JADES-style 8–9-digit IDs collapse
+to 7 digits cleanly. Collision risk after the mod is treated as
+acceptable.
+
+String IDs (`"RJ0600-12345678-P0"`) are kept verbatim through the
+in-memory model; the integer extraction happens in `main.py`'s
+`_to_int_id` at export time, which picks the largest digit run from
+the token.
 
 ---
 

@@ -16,6 +16,14 @@ from astropy.table import Table
 # etc. without forcing the user to hand-edit their catalog.
 _NUM_RE = re.compile(r"-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?")
 
+# Catalog IDs above this threshold are taken mod ID_MOD before being
+# stored. JADES-style IDs can run to 8–9 digits, but APT MPT and the
+# eMPT pipeline both expect compact integer source numbers — anything
+# beyond ~10⁷ tends to be silently truncated or rejected downstream.
+# Collisions after the mod are vanishingly rare in real catalogs;
+# we accept that trade-off in exchange for a clean integer space.
+ID_MOD = 10_000_000
+
 
 @dataclass
 class Catalog:
@@ -29,21 +37,127 @@ class Catalog:
     source_path: str
 
 
-_ID_KEYS = ("id", "no", "no_cat", "objid", "objectid", "source_id")
-_RA_KEYS = ("ra", "ra_deg", "ra[deg]", "raj2000", "alpha_j2000")
-_DEC_KEYS = ("dec", "dec_deg", "dec[deg]", "decj2000", "delta_j2000")
-_PRI_KEYS = ("priority", "pr", "pri", "prio")
-_MAG_KEYS = ("mag", "magnitude", "f444w_mag", "mag_f444w", "f356w_mag", "mag_f356w", "f200w_mag", "mag_f200w")
-_Z_KEYS = ("z", "zspec", "zphot", "z_spec", "z_phot", "redshift", "z_best", "z_use")
+# Lookup tables for the loose column-matcher (`_find_col`). Each
+# candidate is normalised with `_norm` (lowercase + strip bracketed
+# units + collapse to alphanumeric + strip trailing unit tokens). The
+# normalisation makes `RA`, `ra`, `RA[deg]`, `RA(deg)`, `RA_deg`,
+# `ra_J2000`, `ALPHA_J2000`, `R.A.` all map to the same key.
+_ID_KEYS = (
+    "id", "no", "nocat", "objid", "objectid", "sourceid", "source",
+    "src", "srcid", "targetid", "targid", "ident",
+)
+# Permissive ID fallbacks: accepted only when the column's values are
+# numeric (else we'd silently sort sources by their human-readable name).
+_ID_FALLBACK_KEYS = ("name", "label", "tag", "target", "targetname", "#")
+_RA_KEYS = (
+    "ra", "rightascension", "raj2000", "alpha", "alphaj2000",
+    "rad", "radeg",
+)
+_DEC_KEYS = (
+    "dec", "declination", "decj2000", "delta", "deltaj2000",
+    "decd", "decdeg",
+    # Vizier-style "DEJ2000" normalises to "de" once "J2000" is
+    # stripped as a unit/epoch token. Adding "de" keeps that catalog
+    # convention working.
+    "de",
+)
+_PRI_KEYS = ("priority", "pr", "pri", "prio", "priorityclass", "weight")
+_MAG_KEYS = (
+    "mag", "magnitude", "f444wmag", "magf444w", "f356wmag", "magf356w",
+    "f200wmag", "magf200w",
+)
+_Z_KEYS = ("z", "zspec", "zphot", "redshift", "zbest", "zuse")
 _LABEL_KEYS = ("label", "name", "tag")
+
+# Trailing tokens that look like *units* on an otherwise-clean column
+# name — stripped after lowercasing + alphanumeric collapse so
+# `RA[deg]`, `RA_deg`, `ra (deg)`, `RAJ2000` all collapse to `ra`.
+_UNIT_SUFFIX_TOKENS = (
+    "degrees", "degree", "deg",
+    "radians", "radian", "rad",
+    "arcseconds", "arcsec", "asec",
+    "j2000", "icrs", "fk5",
+)
+
+
+def _norm(name: str) -> str:
+    """Normalise a column name for loose matching."""
+    if name is None:
+        return ""
+    s = str(name).lower()
+    # Strip bracketed / parenthesised unit suffixes ("RA[deg]" → "RA").
+    s = re.sub(r"\[[^\]]*\]", "", s)
+    s = re.sub(r"\([^)]*\)", "", s)
+    # Collapse remaining non-alphanumerics ("ra_deg" → "radeg", "R.A." → "ra").
+    s = re.sub(r"[^a-z0-9]+", "", s)
+    # Strip trailing unit tokens ("radeg" → "ra"). Loop so chained
+    # suffixes (e.g. "decjsiomdeg") peel off one by one.
+    changed = True
+    while changed:
+        changed = False
+        for tok in _UNIT_SUFFIX_TOKENS:
+            if len(s) > len(tok) and s.endswith(tok):
+                s = s[: -len(tok)]
+                changed = True
+                break
+    return s
 
 
 def _find_col(table: Table, candidates) -> str | None:
-    lc_map = {c.lower(): c for c in table.colnames}
+    """Return the original column name matching any normalised candidate."""
+    norm_map: dict[str, str] = {}
+    for c in table.colnames:
+        norm_map.setdefault(_norm(c), c)
     for cand in candidates:
-        if cand in lc_map:
-            return lc_map[cand]
+        n = _norm(cand)
+        if n and n in norm_map:
+            return norm_map[n]
     return None
+
+
+def _find_id_col(table: Table) -> tuple[str | None, bool]:
+    """Locate the catalog's ID column.
+
+    Returns `(name, is_numeric_fallback)`. The fallback flag is True
+    when we accepted a permissive candidate (`name`, `label`, …)
+    *because* its values coerced to integers — used downstream to
+    decide whether to preserve the original token alongside the int ID.
+    """
+    name = _find_col(table, _ID_KEYS)
+    if name is not None:
+        return name, False
+    # Permissive: accept name/label/tag only if values look like integers.
+    for cand in _ID_FALLBACK_KEYS:
+        col_name = _find_col(table, (cand,))
+        if col_name is None:
+            continue
+        col = table[col_name]
+        try:
+            arr = np.asarray(col, dtype=np.int64)
+        except (ValueError, TypeError):
+            continue
+        # Sanity: empty / all-zero columns are unlikely to be IDs.
+        if arr.size > 0:
+            return col_name, True
+    return None, False
+
+
+def _coerce_int_ids(raw, nrows: int) -> np.ndarray:
+    """Return an int64 ID array of length `nrows`, with mod ID_MOD
+    applied to any source ID at or above 10⁷.
+
+    If `raw` can't be coerced to int (string IDs like "RJ0600-x-P0"),
+    we return the raw values as an object array — the integer
+    extraction happens later in the exporter's `_to_int_id`."""
+    try:
+        ids = np.asarray(raw, dtype=np.int64)
+    except (ValueError, TypeError):
+        return np.asarray([str(v) for v in raw], dtype=object)
+    big = np.abs(ids) >= ID_MOD
+    if big.any():
+        ids = ids.copy()
+        ids[big] = np.mod(ids[big], ID_MOD)
+    return ids
 
 
 def _as_float(table: Table, name: str | None) -> np.ndarray:
@@ -122,24 +236,32 @@ def load_catalog(path: str) -> Catalog:
     else:
         table = ioascii.read(path)
 
-    id_col = _find_col(table, _ID_KEYS)
     ra_col = _find_col(table, _RA_KEYS)
     dec_col = _find_col(table, _DEC_KEYS)
     if ra_col is None or dec_col is None:
-        raise ValueError(f"Catalog at {path} missing RA/Dec columns. Have: {table.colnames}")
+        raise ValueError(
+            f"Catalog at {path} missing RA/Dec columns. Have: {table.colnames}"
+        )
+
+    id_col, id_from_fallback = _find_id_col(table)
     if id_col is None:
-        ids = np.arange(1, len(table) + 1)
+        # Catalog has no ID-like column — fake sequential IDs 1..N so
+        # downstream code (slitlet auto-tag, MPT export) still works.
+        ids = np.arange(1, len(table) + 1, dtype=np.int64)
     else:
-        raw = table[id_col]
-        try:
-            ids = np.asarray(raw, dtype=np.int64)
-        except (ValueError, TypeError):
-            ids = np.asarray([str(v) for v in raw], dtype=object)
+        ids = _coerce_int_ids(table[id_col], len(table))
 
     pri_col = _find_col(table, _PRI_KEYS)
     mag_col = _find_col(table, _MAG_KEYS)
     z_col = _find_col(table, _Z_KEYS)
-    label_col = _find_col(table, _LABEL_KEYS)
+    # If `name`/`label` was used as the ID fallback, don't ALSO claim it
+    # as the label column — that would just duplicate the ID.
+    label_candidates = _LABEL_KEYS
+    if id_from_fallback and id_col is not None:
+        label_candidates = tuple(
+            k for k in _LABEL_KEYS if _norm(k) != _norm(id_col)
+        )
+    label_col = _find_col(table, label_candidates)
 
     return Catalog(
         ids=ids,
