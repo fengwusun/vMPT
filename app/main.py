@@ -626,11 +626,12 @@ src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
 src_targets = ColumnDataSource(data=dict(
     x=[], y=[], id=[], ra=[], dec=[], pr=[],
-    # Per-target rendering: matched sources (their id is the target_id of
-    # at least one open shutter) flip to green with a thicker line so the
-    # user can see at a glance which catalogue entries they've already
-    # placed in slitlets.
-    line_color=[], line_width=[],
+    # Per-target rendering. `line_color`: matched sources (id == an
+    # open-shutter's target_id) flip to green; unmatched take their
+    # per-catalog palette colour. `line_alpha`: decays with the
+    # catalog's z-depth so earlier-loaded catalogs read more strongly
+    # than later-loaded reference catalogs that sit beneath them.
+    line_color=[], line_width=[], line_alpha=[],
 ))
 src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 
@@ -729,8 +730,9 @@ fixed_slits_glyph = fig.multi_polygons(
 target_glyph = fig.scatter(
     x="x", y="y", source=src_targets,
     size=10, marker="circle",
-    line_color="line_color",   # field-driven: yellow normally, green when matched
+    line_color="line_color",   # field-driven: per-catalog colour, green when matched
     line_width="line_width",
+    line_alpha="line_alpha",   # field-driven: decays with catalog z-depth
     fill_alpha=0.0,
 )
 pointing_handle_glyph = fig.scatter(
@@ -1369,6 +1371,11 @@ def refresh_overlays() -> None:
             unmatched_colors = np.asarray(per_source_colors)[mask].tolist()
         else:
             unmatched_colors = ["#ffd200"] * len(ids)
+        per_source_alphas = state.get("catalog_alphas")
+        if per_source_alphas is not None and len(per_source_alphas) == len(cat.ra_deg):
+            base_alphas = np.asarray(per_source_alphas)[mask].tolist()
+        else:
+            base_alphas = [1.0] * len(ids)
         line_colors = [
             "#2e9b3f" if tid in matched_target_ids else fallback
             for tid, fallback in zip(ids, unmatched_colors)
@@ -1376,6 +1383,12 @@ def refresh_overlays() -> None:
         line_widths = [
             2.5 if tid in matched_target_ids else 1.5
             for tid in ids
+        ]
+        # Matched sources stay fully opaque so a "picked" marker is
+        # never visually demoted by its catalog's z-depth.
+        line_alphas = [
+            1.0 if tid in matched_target_ids else a
+            for tid, a in zip(ids, base_alphas)
         ]
         src_targets.data = dict(
             x=x[mask].tolist(),
@@ -1386,11 +1399,12 @@ def refresh_overlays() -> None:
             pr=cat.priority[mask].tolist(),
             line_color=line_colors,
             line_width=line_widths,
+            line_alpha=line_alphas,
         )
     else:
         src_targets.data = dict(
             x=[], y=[], id=[], ra=[], dec=[], pr=[],
-            line_color=[], line_width=[],
+            line_color=[], line_width=[], line_alpha=[],
         )
 
     # Update stats panel and status with the current configuration.
@@ -1609,30 +1623,65 @@ def _load_jpg_pair_from_paths(
         _hide_loading()
 
 
+def _catalog_alpha_for_depth(depth: int) -> float:
+    """Per-catalog marker alpha based on z-order depth (0 = top).
+
+    Earlier-loaded catalogs sit at the top with full opacity; each
+    additional layer below fades slightly so a dense reference
+    catalog underneath a curated target list doesn't drown it out.
+    The floor of 0.35 keeps even deeply-buried catalogs visible
+    enough to be useful."""
+    return max(0.35, 1.0 - 0.20 * depth)
+
+
 def _rebuild_merged_catalog() -> None:
     """Combine all ENABLED entries in state['catalogs'] into the single
     `state['catalog']` cache that the rest of the app (overlay, source
     matching, export) reads. Disabled / removed catalogs drop out
-    automatically. With one or zero enabled, the merge is a no-op
-    pass-through to avoid unnecessary array allocations.
+    automatically.
 
-    Also builds `state['catalog_colors']`, a parallel string array
-    (one entry per merged source) carrying the *per-catalog* marker
-    colour. The overlay uses this to give each catalog its own unpicked
-    colour while still flipping matched sources to green."""
+    Z-order: Bokeh's scatter renders later indices ON TOP, so we put
+    the earliest-loaded catalog LAST in the merged arrays. The order
+    of `state['catalogs']` is the visual stack (index 0 = top, index
+    n−1 = bottom). Reordering the list via the ▲/▼ buttons in
+    `_render_catalog_list` changes the on-screen z-order.
+
+    Also builds `state['catalog_colors']` (per-source marker colour)
+    and `state['catalog_alphas']` (per-source line_alpha, decayed by
+    z-depth). Both are parallel arrays the overlay uses without
+    needing to walk `state['catalogs']` for every row."""
     enabled = [e for e in state["catalogs"] if e["enabled"]]
     if not enabled:
         state["catalog"] = None
         state["catalog_colors"] = None
+        state["catalog_alphas"] = None
         return
+
+    # Depth is the catalog's index in state['catalogs'] (NOT the
+    # enabled-only list) — so the alpha stays stable when the user
+    # toggles a layer off and on without reordering.
+    depth_of_entry = {
+        id(entry): idx for idx, entry in enumerate(state["catalogs"])
+    }
+
+    # Single-catalog fast path: don't re-allocate the merged arrays,
+    # just hand the original Catalog through (preserves the int dtype
+    # of `ids`, which downstream callers depend on for lookups).
     if len(enabled) == 1:
-        cat = enabled[0]["catalog"]
+        only = enabled[0]
+        cat = only["catalog"]
+        a = _catalog_alpha_for_depth(depth_of_entry[id(only)])
         state["catalog"] = cat
-        state["catalog_colors"] = np.full(
-            len(cat.ra_deg), enabled[0]["color"], dtype=object,
-        )
+        state["catalog_colors"] = np.full(len(cat.ra_deg), only["color"], dtype=object)
+        state["catalog_alphas"] = np.full(len(cat.ra_deg), a, dtype=float)
         return
-    cats = [e["catalog"] for e in enabled]
+
+    # Walk catalogs in REVERSE state-list order so the merged data
+    # arrays have last-loaded sources first (drawn at the back) and
+    # first-loaded sources last (drawn on top).
+    ordered_for_draw = list(reversed(enabled))
+
+    cats = [e["catalog"] for e in ordered_for_draw]
     ids = np.concatenate([np.asarray(c.ids, dtype=object) for c in cats])
     ra = np.concatenate([c.ra_deg for c in cats])
     dec = np.concatenate([c.dec_deg for c in cats])
@@ -1646,7 +1695,15 @@ def _rebuild_merged_catalog() -> None:
     ])
     colors = np.concatenate([
         np.full(len(e["catalog"].ra_deg), e["color"], dtype=object)
-        for e in enabled
+        for e in ordered_for_draw
+    ])
+    alphas = np.concatenate([
+        np.full(
+            len(e["catalog"].ra_deg),
+            _catalog_alpha_for_depth(depth_of_entry[id(e)]),
+            dtype=float,
+        )
+        for e in ordered_for_draw
     ])
     state["catalog"] = Catalog(
         ids=ids, ra_deg=ra, dec_deg=dec, priority=pri,
@@ -1654,6 +1711,7 @@ def _rebuild_merged_catalog() -> None:
         source_path=" + ".join(c.source_path for c in cats),
     )
     state["catalog_colors"] = colors
+    state["catalog_alphas"] = alphas
 
 
 def _assign_catalog_color(index: int) -> str:
@@ -1663,11 +1721,19 @@ def _assign_catalog_color(index: int) -> str:
 
 
 def _render_catalog_list() -> None:
-    """Rebuild the catalog_list_column from state['catalogs']. One row
-    per loaded catalog: a colour-chip showing the catalog's marker
-    colour, a single-item CheckboxGroup (on/off), and a delete-×
-    button."""
+    """Rebuild the catalog_list_column from state['catalogs'].
+
+    Each row carries: a colour chip (marker colour key), the
+    catalog's name + source-count, an enable/disable checkbox, ▲/▼
+    buttons for reorder, and × to delete.
+
+    The list order IS the visual z-order — index 0 sits on top of the
+    canvas, the last index is on the bottom (and slightly fainter).
+    Click ▲ to move a catalog up the stack (closer to the top) or ▼
+    to push it down. The first row's ▲ and the last row's ▼ are
+    disabled."""
     rows = []
+    n_entries = len(state["catalogs"])
     for idx, entry in enumerate(state["catalogs"]):
         name = entry["name"]
         n = len(entry["catalog"].ra_deg)
@@ -1686,7 +1752,15 @@ def _render_catalog_list() -> None:
         cb = CheckboxGroup(
             labels=[f"{name} ({n})"],
             active=[0] if entry["enabled"] else [],
-            width=SIDEBAR_W - 100,
+            width=SIDEBAR_W - 170,
+        )
+        up_btn = Button(
+            label="▲", button_type="default",
+            width=28, height=28, disabled=(idx == 0),
+        )
+        down_btn = Button(
+            label="▼", button_type="default",
+            width=28, height=28, disabled=(idx == n_entries - 1),
         )
         del_btn = Button(
             label="×", button_type="warning",
@@ -1713,9 +1787,25 @@ def _render_catalog_list() -> None:
                     _set_status(f"Removed catalog: {label_name}", "ok")
             return _cb
 
+        def _make_move(i, direction):
+            """direction: -1 = up (toward index 0, top of stack);
+            +1 = down (toward end, bottom of stack)."""
+            def _cb():
+                j = i + direction
+                cats = state["catalogs"]
+                if 0 <= i < len(cats) and 0 <= j < len(cats):
+                    cats[i], cats[j] = cats[j], cats[i]
+                    _rebuild_merged_catalog()
+                    _rebuild_shutter_catalog_index()
+                    _render_catalog_list()
+                    refresh_overlays()
+            return _cb
+
         cb.on_change("active", _make_toggle(idx))
+        up_btn.on_click(_make_move(idx, -1))
+        down_btn.on_click(_make_move(idx, +1))
         del_btn.on_click(_make_delete(idx, name))
-        rows.append(row(chip, cb, del_btn))
+        rows.append(row(chip, cb, up_btn, down_btn, del_btn))
     catalog_list_column.children = rows
 
 
