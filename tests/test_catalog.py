@@ -147,6 +147,34 @@ def test_load_csv_ids_above_1e7_are_mod_clamped(tmp_path):
     assert list(cat.ids) == [2345678, 7654321, 100, 0]
 
 
+def test_load_csv_weight_column_detected(tmp_path):
+    """A `weight` column is now a first-class field on `Catalog`, the
+    sibling of `priority`. Loader picks it up via several aliases."""
+    for header_w in ("weight", "w", "Wt"):
+        p = tmp_path / f"w_{header_w}.csv"
+        p.write_text(
+            f"ID,RA,DEC,priority,{header_w}\n"
+            f"1,53.0,-27.7,1,5\n"
+            f"2,53.1,-27.8,2,3\n"
+            f"3,53.2,-27.9,3,\n"
+        )
+        cat = load_catalog(str(p))
+        assert np.allclose(cat.weight[:2], [5, 3]), header_w
+        # Empty cell → NaN
+        assert np.isnan(cat.weight[2]), header_w
+
+
+def test_load_csv_weight_not_claimed_by_priority(tmp_path):
+    """A catalog with only a `weight` column (no `priority`) must NOT
+    silently treat the weights as priorities. Both fields end up with
+    the right arrays — priorities NaN, weights populated."""
+    p = tmp_path / "weight_only.csv"
+    p.write_text("ID,RA,DEC,weight\n1,53.0,-27.7,5\n2,53.1,-27.8,3\n")
+    cat = load_catalog(str(p))
+    assert np.all(np.isnan(cat.priority))
+    assert np.allclose(cat.weight, [5, 3])
+
+
 def test_view_bbox():
     cat = Catalog(
         ids=np.array([1, 2, 3, 4]),

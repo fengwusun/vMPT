@@ -25,19 +25,29 @@ from astropy.wcs.utils import skycoord_to_pixel
 from bokeh.events import DoubleTap, RangesUpdate, Tap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
+from bokeh.events import DocumentReady
 from bokeh.models import (
     Button,
     CheckboxGroup,
     ColumnDataSource,
+    CustomJS,
     CustomJSTickFormatter,
+    DataTable,
     Div,
     HoverTool,
+    HTMLTemplateFormatter,
+    MultiChoice,
+    NumberEditor,
+    NumberFormatter,
     Range1d,
     Select,
     Slider,
+    StringEditor,
+    TableColumn,
     TabPanel,
     Tabs,
     TextInput,
+    Toggle,
     WheelZoomTool,
 )
 from bokeh.plotting import figure
@@ -154,7 +164,7 @@ def _push_history() -> None:
 # ---------------------------------------------------------------------------
 FIG_W_HINT = 900     # initial canvas width hint (Bokeh stretches it)
 FIG_H_HINT = 800     # initial canvas height hint
-SIDEBAR_W = 340      # left tab panel (Image / Aim / Pick / MPT)
+SIDEBAR_W = 340      # left tab panel (Input / Pointing / Setting / MPT)
 HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 
 # Color palette for catalog markers when multiple catalogs are loaded.
@@ -180,20 +190,29 @@ CATALOG_COLOR_PALETTE = (
 # ---------------------------------------------------------------------------
 
 status = Div(
-    text="Enter a file path below (or use the upload widgets for small files).",
-    # Stretch to the sidebar's width (340 px) so the status box can't
-    # overflow horizontally — previously the fixed width=420 was wider
-    # than the sidebar and the wrapped status text would render on top
-    # of the MPT-tab content below it.
-    sizing_mode="stretch_width",
+    text='<div style="color:#888">Ready.</div>',
+    # The status bar lives OUTSIDE the scrollable sidebar column —
+    # position:fixed pins it to the bottom-left of the viewport so a
+    # long message never bleeds into / renders on top of whatever
+    # tab content the user has scrolled to. The sidebar gets
+    # padding-bottom = status height so its bottom-most widget is
+    # never covered. Width matches SIDEBAR_W exactly so the bar
+    # spans only under the sidebar.
+    width=SIDEBAR_W,
+    height=42,
     styles={
+        "position": "fixed",
+        "bottom": "0",
+        "left": "0",
+        "width": f"{SIDEBAR_W}px",
+        "z-index": "100",
         "padding": "4px 8px",
         "font-size": "11.5px",
         "line-height": "1.35",
         "border-top": "1px solid #e0e6f0",
+        "background": "#f7f9fc",
         "box-sizing": "border-box",
-        "overflow-wrap": "anywhere",
-        "word-break": "break-word",
+        "overflow": "hidden",
     },
 )
 
@@ -203,6 +222,8 @@ jpg_path_input = TextInput(title="JPG path (local)", value="", placeholder="/pat
 sidecar_path_input = TextInput(title="Sidecar FITS path (WCS for JPG)", value="", placeholder="/path/to/wcs.fits")
 catalog_path_input = TextInput(title="Catalog path (local)", value="", placeholder="/path/to/catalog.csv")
 catalog_add_btn = Button(label="Add", button_type="primary", width=70)
+catalog_edit_btn = Button(label="Edit catalog…", button_type="default",
+                          width=SIDEBAR_W - 20)
 # Dynamic list of loaded catalogs — populated by `_render_catalog_list()`
 # whenever state["catalogs"] changes. Each row in this column is a
 # row(CheckboxGroup, Button) pair: checkbox toggles the catalog
@@ -235,18 +256,22 @@ catalog_mag_input = TextInput(
     title="Show mag ≤ (blank = all)", value="", placeholder="e.g. 28",
 )
 
-ra_input = TextInput(title="Pointing RA (deg)", value="")
-dec_input = TextInput(title="Pointing Dec (deg)", value="")
+# Half-width so RA + Dec sit side-by-side in the Pointing tab.
+_HALF_W = (SIDEBAR_W - 30) // 2
+ra_input = TextInput(title="Pointing RA (deg)", value="", width=_HALF_W)
+dec_input = TextInput(title="Pointing Dec (deg)", value="", width=_HALF_W)
 
 # V3 PA = position angle of the JWST V3 axis on sky. This is what drives the
 # V2/V3 -> RA/Dec math. APT/MPT's "NIRSpec PA" is the *aperture* PA (APA),
 # which differs by the V3IdlYAngle of NRS_FULL_MSA (~138.57 deg). We show
 # both, synchronized.
 v3pa_slider = Slider(title="V3 PA (deg)", start=0.0, end=360.0, step=0.1, value=0.0)
-v3pa_input = TextInput(title="V3 PA (deg, exact)", value="0.0")
+# V3 PA exact + APA share a row in the Pointing tab.
+v3pa_input = TextInput(title="V3 PA (deg, exact)", value="0.0", width=_HALF_W)
 apa_input = TextInput(
-    title=f"NIRSpec APA (deg) — V3PA + {V3_IDL_Y_ANGLE:.3f}°",
+    title=f"NIRSpec APA — V3PA + {V3_IDL_Y_ANGLE:.2f}°",
     value=f"{V3_IDL_Y_ANGLE % 360.0:.2f}",
+    width=_HALF_W,
 )
 pa_help_div = Div(text=(
     "<small><b>V3 PA</b>: JWST V3 axis PA on sky (drives the overlay). "
@@ -254,15 +279,452 @@ pa_help_div = Div(text=(
     "(mod 360). APT/MPT calls this NIRSpec's 'Aperture PA'. "
     "<a href='https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/"
     "jwst-position-angles-ranges-and-offsets' target='_blank'>JDox reference</a>.</small>"
-), width=320)
+), width=SIDEBAR_W - 20)
 
-# Visibility window query (jwst_gtvt)
+# Visibility window query (jwst_gtvt) — date input + button on one row.
 visibility_date_input = TextInput(
     title="Visibility date (YYYY-MM-DD)", value="",
-    placeholder="leave blank for today",
+    placeholder="blank = today", width=_HALF_W,
 )
-visibility_btn = Button(label="Compute allowed V3 PA (jwst_gtvt)", button_type="primary")
-visibility_div = Div(text="<small>Allowed V3 PA windows appear here.</small>", width=320)
+visibility_btn = Button(label="Compute allowed V3 PA", button_type="primary",
+                       width=_HALF_W, height=42)
+visibility_div = Div(text="<small>Allowed V3 PA windows appear here.</small>",
+                     width=SIDEBAR_W - 20)
+
+# ── Pointing-optimizer widgets ───────────────────────────────────────────
+# Derived from hMPT (Eisenstein, McCarty, Wu; CfA/Harvard) — see
+# `app/optimizer.py` for the algorithm. UI exposes a small set of
+# essentials inline + an "Advanced" foldout for grid resolution, the
+# objective choice, and the PSF σ. After the user clicks Run, a column
+# of result rows appears — clicking any row applies that pointing
+# (RA, Dec, V3 PA) but does not auto-place picks (per user pref).
+
+opt_dra_input = TextInput(title="ΔRA (arcsec)", value="30", width=_HALF_W)
+opt_ddec_input = TextInput(title="ΔDec (arcsec)", value="30", width=_HALF_W)
+opt_dpa_input = TextInput(title="ΔPA (deg)", value="30", width=_HALF_W)
+opt_n_top_input = TextInput(title="Refine top N", value="10", width=_HALF_W)
+opt_method_select = Select(
+    title="Method",
+    # (value, label) tuples — keep the internal value short (Python
+    # code checks for "Democracy" / "Meritocracy" / "Hierarchy")
+    # while the user sees a one-line clarifier.
+    options=[
+        ("Democracy",   "Democracy — most targets"),
+        ("Meritocracy", "Meritocracy — highest sum of weights"),
+        ("Hierarchy",   "Hierarchy — most top-priority targets (eMPT-style)"),
+    ],
+    value="Democracy",
+    width=SIDEBAR_W - 20,
+)
+opt_method_help_div = Div(
+    text=(
+        "<small style='color:#5a6b85; line-height:1.4'>"
+        "<b>Democracy</b>: maximises raw count, ignores priority/weight.<br>"
+        "<b>Meritocracy</b>: maximises Σ weight of placed sources "
+        "(requires <code>weight</code> column).<br>"
+        "<b>Hierarchy</b>: strict tier order — best for top priority "
+        "first, ties broken by next tier "
+        "(requires <code>priority</code> column).</small>"
+    ),
+    width=SIDEBAR_W - 20,
+)
+opt_centration_select = Select(
+    title="Source centering",
+    options=["UNCONSTRAINED", "ENTIRE_OPEN", "MIDPOINT",
+             "CONSTRAINED", "TIGHTLY_CONSTRAINED"],
+    value="UNCONSTRAINED",
+    width=SIDEBAR_W - 20,
+)
+opt_priority_input = TextInput(
+    title="Priority cutoff ≤ (blank = all)", value="", placeholder="e.g. 1",
+    width=SIDEBAR_W - 20,
+)
+
+# Advanced settings — surfaced via a pop-up modal so they don't bloat
+# the Pointing tab. The widgets retain their values regardless of the
+# modal's visibility; the optimizer reads them when Run is clicked.
+opt_advanced_btn = Button(label="Advanced settings…",
+                          button_type="default", width=SIDEBAR_W - 20)
+
+_ADV_INPUT_W = 240
+opt_grid_n_ra_input = TextInput(title="Grid n_RA", value="20", width=_ADV_INPUT_W)
+opt_grid_n_dec_input = TextInput(title="Grid n_Dec", value="20", width=_ADV_INPUT_W)
+opt_grid_n_pa_input = TextInput(title="Grid n_PA", value="20", width=_ADV_INPUT_W)
+opt_de_maxiter_input = TextInput(title="DE max iter", value="200", width=_ADV_INPUT_W)
+opt_objective_select = Select(
+    title="Objective",
+    options=["number", "flux"],
+    value="number",
+    width=_ADV_INPUT_W,
+)
+opt_sigma_input = TextInput(
+    title="Source σ (arcsec)", value="0.06", width=_ADV_INPUT_W,
+)
+opt_theta_input = TextInput(
+    title="APT θ (DVA, deg) — 90 = none", value="90", width=_ADV_INPUT_W,
+)
+opt_advanced_modal_close_btn = Button(label="Done", button_type="primary",
+                                      width=80)
+
+opt_advanced_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
+)
+opt_advanced_modal_card = column(
+    Div(text="<h3 style='margin:0 0 6px 0; color:#1a3b66'>"
+             "Advanced optimizer settings</h3>"
+             "<div style='font-size:12px; color:#5a6b85'>"
+             "Tune only if the defaults don't fit. Values stick after Done.</div>",
+        width=520),
+    row(opt_grid_n_ra_input, opt_grid_n_dec_input, spacing=12),
+    row(opt_grid_n_pa_input, opt_de_maxiter_input, spacing=12),
+    opt_objective_select,
+    opt_sigma_input,
+    opt_theta_input,
+    opt_advanced_modal_close_btn,
+    spacing=10,
+    width=540,
+    visible=False,
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 18px",
+        "z-index": "1000",
+        "max-height": "85vh",
+        "overflow-y": "auto",
+    },
+)
+
+# ── Catalog editor modal ────────────────────────────────────────────────
+# Sortable, editable spreadsheet view of one loaded catalog.
+# `_cat_edit_source` is the working copy; on Apply we write it back to
+# the underlying Catalog dataclass in state["catalogs"]. Edits are
+# captured on `source.on_change("data")` into an undo / redo stack so
+# the user can revert mistakes.
+cat_edit_select = Select(
+    title="Catalog to edit", options=[], value="",
+    width=420,
+)
+# `_idx` carries the per-row row index, used by the trash-icon column's
+# HTMLTemplateFormatter so its onclick handler knows which row to
+# delete. Maintained on every populate / delete / undo.
+_cat_edit_source = ColumnDataSource(data=dict(
+    id=[], ra=[], dec=[], priority=[], mag=[], z=[], label=[], _idx=[],
+))
+# Tiny sink the JS-side delete handler writes into when the user
+# clicks a 🗑️ icon. Python's `_on_cat_edit_delete_signal` listens for
+# changes and removes the matching row from the working copy.
+_cat_edit_delete_signal = ColumnDataSource(data=dict(idx=[-1], stamp=[0]))
+
+_NUM_FMT = NumberFormatter(format="0.[000000]")
+# Trash icon column — Underscore.js template renders a clickable span
+# whose onclick fires the JS function installed by the DocumentReady
+# CustomJS below. Single-click → row removed.
+_TRASH_TEMPLATE = (
+    "<span style='cursor:pointer; font-size:16px; user-select:none' "
+    "      title='Delete this row' "
+    "      onclick='window.__vmpt_delete_row(<%= _idx %>)'>"
+    "🗑️</span>"
+)
+cat_edit_table = DataTable(
+    source=_cat_edit_source,
+    columns=[
+        # Every editable column uses StringEditor. NumberEditor's built-in
+        # validator rejects blank input, which means optional columns
+        # like Priority / Mag / z that legitimately have no value would
+        # trap the user inside the editor. StringEditor accepts anything
+        # (including ""); we coerce strings → floats on Apply. Numeric
+        # columns are stored as pre-formatted strings in source.data
+        # (NaN → ""), so the rendered cell already looks right.
+        TableColumn(field="id",       title="ID",       editor=StringEditor(), width=110),
+        TableColumn(field="ra",       title="RA (deg)", editor=StringEditor(), width=110),
+        TableColumn(field="dec",      title="Dec (deg)",editor=StringEditor(), width=110),
+        TableColumn(field="priority", title="Priority", editor=StringEditor(), width=80),
+        TableColumn(field="mag",      title="Mag",      editor=StringEditor(), width=80),
+        TableColumn(field="z",        title="z",        editor=StringEditor(), width=80),
+        TableColumn(field="label",    title="Label",    editor=StringEditor(), width=150),
+        TableColumn(field="_idx",     title="🗑", width=34,
+                    formatter=HTMLTemplateFormatter(template=_TRASH_TEMPLATE),
+                    sortable=False),
+    ],
+    editable=True,
+    # auto_edit=True maps to SlickGrid's `autoEdit` option, which
+    # opens the editor as soon as a cell receives focus. Single-click
+    # → click promotes the cell to focus → editor opens. Needs
+    # `selectable=True` because SlickGrid's cell-focus model is gated
+    # on the same machinery as row selection; setting selectable=False
+    # silently disables cell editing too.
+    auto_edit=True,
+    sortable=True,
+    selectable=True,
+    reorderable=False,
+    width=820, height=380,
+    index_position=None,
+)
+# Column-visibility picker. Pre-populated when a catalog is opened
+# with every column the loader saw (the 7 canonical columns plus any
+# extras). The user ticks which to show in the table.
+cat_edit_columns_choice = MultiChoice(
+    title="Show columns",
+    value=[], options=[],
+    width=600,
+)
+cat_edit_new_col_input = TextInput(
+    title="Add a custom column (e.g. reference, notes)",
+    placeholder="column name", width=300,
+)
+cat_edit_new_col_btn = Button(label="Add column", button_type="default",
+                              width=120)
+cat_edit_compute_w_btn = Button(
+    label="Compute w from p", button_type="default", width=170,
+)
+cat_edit_compute_p_btn = Button(
+    label="Compute p from w", button_type="default", width=170,
+)
+cat_edit_compute_div = Div(
+    text="<small style='color:#5a6b85'>"
+         "<b>w ↔ p:</b> the optimizer's Meritocracy uses Weight; "
+         "Hierarchy uses Priority. Use these to derive one from the "
+         "other.</small>", width=460,
+)
+# Inject CSS so SlickGrid cells are text-selectable (so the user can
+# drag to highlight + Ctrl-C copy / Ctrl-V paste cell content while
+# the editor input is active). Bokeh Div renders `<style>` content as
+# real stylesheet rules when inserted into the DOM.
+_cat_edit_css = Div(text="""
+<style>
+  .bk-data-table .slick-cell {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+    cursor: text;
+  }
+  .bk-data-table .slick-cell input {
+    user-select: text !important;
+    -webkit-user-select: text !important;
+  }
+</style>
+""", width=0, height=0)
+cat_edit_undo_btn = Button(label="↶ Undo", button_type="default", width=100)
+cat_edit_redo_btn = Button(label="↷ Redo", button_type="default", width=100)
+cat_edit_history_div = Div(
+    text="<small style='color:#5a6b85'>0 edits</small>", width=160,
+)
+cat_edit_csv_path_input = TextInput(
+    title="Save CSV to", placeholder="/path/to/edited.csv",
+    width=380,
+)
+cat_edit_csv_browse_btn = Button(label="Browse…", button_type="default",
+                                 width=80)
+cat_edit_csv_save_btn = Button(label="Save as CSV",
+                               button_type="default", width=120)
+cat_edit_apply_btn = Button(label="Apply changes & close",
+                            button_type="primary", width=200)
+cat_edit_close_btn = Button(label="Cancel", button_type="default", width=80)
+
+cat_edit_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
+)
+cat_edit_modal_card = column(
+    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
+             "Edit catalog</h3>"
+             "<div style='font-size:12px; color:#5a6b85'>"
+             "Click a column header to sort. Double-click a cell to edit. "
+             "Click 🗑️ in a row to delete it. <b>↶ Undo / ↷ Redo</b> "
+             "revert / replay your edits. "
+             "<b>Apply changes</b> commits to the live catalog so the "
+             "eMPT bundle export reflects them; <b>Save as CSV</b> writes "
+             "a standalone copy.</div>",
+        width=820),
+    cat_edit_select,
+    cat_edit_columns_choice,
+    row(cat_edit_new_col_input, cat_edit_new_col_btn, spacing=10),
+    cat_edit_compute_div,
+    row(cat_edit_compute_w_btn, cat_edit_compute_p_btn, spacing=10),
+    row(cat_edit_undo_btn, cat_edit_redo_btn, cat_edit_history_div,
+        spacing=10),
+    _cat_edit_css,
+    cat_edit_table,
+    Div(text="<b>Save as CSV</b>", width=820),
+    row(cat_edit_csv_path_input, cat_edit_csv_browse_btn,
+        cat_edit_csv_save_btn, spacing=10),
+    row(cat_edit_apply_btn, cat_edit_close_btn, spacing=10),
+    spacing=10,
+    width=860,
+    visible=False,
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 20px",
+        "z-index": "1000",
+        "max-height": "92vh",
+        "overflow-y": "auto",
+    },
+)
+
+opt_run_btn = Button(label="Run optimization",
+                    button_type="primary", width=SIDEBAR_W - 20)
+opt_status_div = Div(
+    text="<small><i>Load a catalog with priorities, then click Run.</i></small>",
+    width=SIDEBAR_W - 20,
+)
+# Results live in a column that's rebuilt after every run. Each row
+# is a Button labelled with the rank + score + delta-pointing.
+# (Kept for callers that prefer an inline list; the primary surface
+# is now the modal dialog below.)
+opt_results_column = column(width=SIDEBAR_W - 20)
+
+# ── Optimizer pop-up dialog ──────────────────────────────────────────────
+# Two-phase modal: progress (live progress while grid + DE run) and
+# results (top-N candidates with Apply buttons). Realised as a
+# position-fixed Bokeh column overlaying the page; a sibling Div
+# renders the semi-transparent backdrop.
+
+opt_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.45)",
+        "z-index": "999",
+    },
+)
+
+# Dialog header.
+opt_modal_title = Div(
+    text="<h3 style='margin:0 0 6px 0; color:#1a3b66'>"
+         "MSA pointing optimization</h3>",
+    width=560,
+)
+
+# Progress section (shown while running).
+# Spinner Div — text is set ONCE at construction and never updated,
+# so the CSS animation keeps spinning continuously. (Bokeh's Div.text
+# update replaces innerHTML, which would restart any child animation.)
+opt_modal_progress_spinner = Div(
+    text=(
+        "<style>"
+        "@keyframes vmpt-spin { from { transform: rotate(0deg); }"
+        "                       to   { transform: rotate(360deg); } }"
+        "@keyframes vmpt-stripe { 0%   { background-position: 0 0; }"
+        "                         100% { background-position: 32px 0; } }"
+        "@keyframes vmpt-pulse { 0%, 100% { box-shadow: 0 0 8px rgba(50,115,220,0.35); }"
+        "                        50%      { box-shadow: 0 0 18px rgba(50,115,220,0.7); } }"
+        "</style>"
+        "<div style='display:inline-block; width:18px; height:18px;"
+        " border:3px solid #c9d4e8; border-top-color:#3273dc;"
+        " border-radius:50%;"
+        " animation: vmpt-spin 0.85s linear infinite;"
+        " vertical-align:middle;'></div>"
+    ),
+    width=26, height=26,
+)
+opt_modal_progress_text = Div(
+    text="<i>Starting…</i>", width=520,
+    styles={"font-size": "13px", "padding": "4px 0", "line-height": "24px"},
+)
+# Static bar HTML — set ONCE. The inner fill uses `width: var(--vmpt-pct)`,
+# so updating the wrapper's `styles` dict (which Bokeh applies without
+# replacing innerHTML) is enough to change the fill width. This keeps
+# the stripe animation running continuously without restarts.
+_BAR_HTML = (
+    "<div style='background:linear-gradient(180deg, #dde3ec 0%, #eaeff7 100%);"
+    " border-radius:8px; height:16px; overflow:hidden;"
+    " box-shadow:inset 0 1px 3px rgba(0,0,0,0.07);'>"
+    "<div style='"
+    " width: var(--vmpt-pct, 0%);"
+    " height: 100%;"
+    " background-color: #3273dc;"
+    " background-image: linear-gradient(135deg,"
+    "   rgba(255,255,255,0.30) 25%, transparent 25%,"
+    "   transparent 50%, rgba(255,255,255,0.30) 50%,"
+    "   rgba(255,255,255,0.30) 75%, transparent 75%);"
+    " background-size: 32px 32px;"
+    " animation: vmpt-stripe 0.8s linear infinite,"
+    "            vmpt-pulse  2.2s ease-in-out infinite;"
+    " transition: width 0.3s ease-out;"
+    " border-radius: 8px;"
+    "'></div></div>"
+)
+opt_modal_progress_bar = Div(
+    text=_BAR_HTML,
+    width=560,
+    styles={"--vmpt-pct": "0%"},
+)
+opt_modal_progress_box = column(
+    row(opt_modal_progress_spinner, opt_modal_progress_text, spacing=8),
+    opt_modal_progress_bar,
+    spacing=4,
+    width=560,
+)
+
+# Results section (shown when done). Built as `column(header, row1,
+# row2, …)` where each result row is itself `row(cells_div, apply_btn)`
+# so the Apply button lines up natively with its cells — the previous
+# parallel "HTML table + buttons column" pattern drifted out of
+# alignment because Bokeh column spacing accumulated between buttons.
+opt_modal_results_summary = Div(text="", width=560)
+opt_modal_results_rows = column(spacing=0, width=560)
+opt_modal_results_box = column(
+    opt_modal_results_summary,
+    opt_modal_results_rows,
+    spacing=4,
+    width=560,
+    visible=False,
+)
+
+opt_modal_close_btn = Button(label="Close", button_type="default", width=80)
+
+opt_modal_card = column(
+    opt_modal_title,
+    opt_modal_progress_box,
+    opt_modal_results_box,
+    opt_modal_close_btn,
+    visible=False,
+    spacing=10,
+    width=600,
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 18px",
+        "z-index": "1000",
+        "min-width": "560px",
+        "max-width": "92vw",
+        # `max-height` + overflow-y keeps the card from running off
+        # the bottom of the viewport when there are many result rows.
+        "max-height": "85vh",
+        "overflow-y": "auto",
+    },
+)
+
+# In-flight optimizer state — only one run at a time. Reset on each
+# new run via `on_optimize`.
+_opt_run: dict = {}
 
 # Full-page loading overlay — a centered translucent backdrop with an
 # animated spinner. The widget itself is a zero-size Bokeh Div, but its
@@ -285,19 +747,25 @@ help_toggle_btn = Button(label="Hide help", button_type="default", width=110)
 # without being annoying. See `_TIPS` for content; rotation is wired by
 # `_advance_tip` registered as a periodic callback further down.
 _TIPS = [
-    ("🎯", "Pick mode", "Click anywhere on the image — vMPT snaps to the nearest operable shutter and opens an <b>N-shutter slitlet</b> (set N=1/2/3/5 in the <b>Pick</b> tab)."),
+    ("🎯", "Pick mode", "Click anywhere on the image — vMPT snaps to the nearest operable shutter and opens an <b>N-shutter slitlet</b> (set N=1/2/3/5 in the <b>Setting</b> tab)."),
     ("✋", "Move the pointing", "<b>Shift + click</b> anywhere on the image to recentre the pointing on that spot. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks the current pointing."),
     ("🔁", "Toggle a slitlet", "Click an already-open shutter to close it. Its slitlet siblings come down with it."),
     ("🎨", "Cyan flag", "Double-click a shutter to toggle a <span style='color:#0aa;font-weight:600'>cyan highlight</span> — a visual flag for your own review. It's not exported."),
-    ("🔭", "Pick a roll", "In the <b>Aim</b> tab, enter a visibility date and click <b>Compute allowed V3 PA</b>. jwst_gtvt reports the valid window for the date."),
+    ("🔭", "Pick a roll", "In the <b>Pointing</b> tab, enter a visibility date and click <b>Compute allowed V3 PA</b>. jwst_gtvt reports the valid window for the date."),
     ("🌈", "Wavelength check", "Hover any open shutter to see its λ<sub>blue</sub> / λ<sub>red</sub> and the NRS1 / NRS2 detector-gap range for the current disperser."),
     ("⚠️", "Orange = collision", "Orange-tinted shutters share a dispersed-y row with an open or stuck-open shutter — opening them would put two spectra on the same detector pixels."),
     ("🪞", "Cross-quadrant", "Spec-overlap correctly pairs Q1↔Q3 (NRS1) and Q2↔Q4 (NRS2). A pick in Q1 will never light up Q2 or Q4."),
     ("💎", "Catalog match", "Open a shutter with a catalog source inside it — vMPT auto-tags the slitlet with that source's ID. Status bar names the match."),
     ("📤", "Export bundle", "<b>MPT</b> tab → <b>Export eMPT bundle</b> writes a folder with <code>MPT_plan.json</code>, an APT-importable <code>.cat</code> target list, and the eMPT pipeline's three files."),
-    ("⏪", "Undo", "<b>Pick</b> tab → <b>Undo last</b> reverts the most recent slitlet open/close action. History is 50 deep."),
-    ("📐", "Slitlet sizes", "N=2 means clicked-shutter + one row of lower-y on the detector. N=3/5 are centred on the click. Switch any time in <b>Pick</b>."),
+    ("⏪", "Undo picks", "<b>Setting</b> tab → <b>Undo last</b> reverts the most recent slitlet open/close action. History is 50 deep."),
+    ("📐", "Slitlet sizes", "N=2 means clicked-shutter + one row of lower-y on the detector. N=3/5 are centred on the click. Switch any time in <b>Setting</b>."),
     ("🛰️", "Two ways to load APT", "<b>MPT</b> tab → either point at a local <code>.aptx</code>, or just type a JWST program ID (e.g. <code>1208</code>) and vMPT pulls it from STScI."),
+    ("🚀", "Pre-load via run.sh", "Start the app with files ready: <code>./run.sh --fits img.fits --catalog tgts.csv</code>. Use <code>--jpg + --wcs</code> for JPG/sidecar. <code>--port 5010</code> picks a different port."),
+    ("🧮", "Optimize MSA pointing", "<b>Pointing</b> tab → bottom panel. Set ΔRA/ΔDec/ΔPA (zero on any axis = freeze it) and click Run. Get the top 10 (RA, Dec, V3 PA) ranked by sources placed."),
+    ("📝", "Edit catalog inline", "<b>Input</b> tab → <b>Edit catalog…</b>. Double-click any cell to edit. Click 🗑️ on a row to delete it. ↶ Undo / ↷ Redo revert mistakes. Save as CSV or commit back to the live catalog."),
+    ("🎴", "Layer multiple catalogs", "Click <b>Add</b> in the Input tab to layer several catalogs. Each gets its own colour. ▲ / ▼ reorder the stack; ✕ removes one; checkbox toggles visibility."),
+    ("🖼️", "Pixel-perfect canvas", "Image pixels are always rendered 1:1 — resizing the window letterboxes around the canvas instead of stretching the image. Aspect lock is set automatically when you load."),
+    ("🆔", "Big IDs auto-shrink", "Catalog IDs ≥ 10⁷ are taken mod 10⁷ on load — APT MPT wants compact integers. The original string token survives in the Label column for traceability."),
 ]
 
 tip_div = Div(
@@ -399,10 +867,10 @@ help_div = Div(
 </ul>
 <b>4. Hand-pick shutters</b>
 <ul>
-  <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Pick</b>.</li>
+  <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Setting</b>.</li>
   <li><b>Click</b> → opens N-shutter slitlet at the nearest operable shutter. Click an open shutter to close the slitlet.</li>
   <li><b>Double-click</b> → toggles <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
-  <li>Layers (Pick tab → <b>Layers</b>):
+  <li>Layers (Setting tab → <b>Layers</b>):
     <ul>
       <li><span style='background:silver;padding:0 4px'>silver</span> = operable</li>
       <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
@@ -428,7 +896,7 @@ help_div = Div(
 <b>Interactions</b>
 <ul>
   <li><b>Wheel</b>: zoom · <b>Drag</b>: pan · <b>Box zoom</b>: toolbar → drag</li>
-  <li><b>Reset</b>: toolbar · <b>Undo</b>: Pick → <b>Undo last</b></li>
+  <li><b>Reset</b>: toolbar · <b>Undo</b>: Setting → <b>Undo last</b></li>
 </ul>
 </div>
 <p style='margin:4px 0'>Full reference in <code>README.md</code> · file roles in <code>CONTEXT.md</code>.</p>
@@ -604,7 +1072,7 @@ stats_div = Div(
             "box-shadow": "0 1px 2px rgba(0,0,0,0.04)",
         },
     ),
-    text="<i>Loading vMPT… pick an example from the Image tab to begin.</i>",
+    text="<i>Loading vMPT… pick an example from the Input tab to begin.</i>",
 )
 
 # Glyph data sources
@@ -651,17 +1119,23 @@ src_pointing_handle = ColumnDataSource(data=dict(x=[], y=[]))
 # in the file because help_panel references HELPPANEL_W during its
 # construction before this point.)
 fig = figure(
-    width=FIG_W_HINT, height=FIG_H_HINT,
-    sizing_mode="stretch_both",
+    # Canvas SIZE in pixels is fixed via frame_width / frame_height —
+    # these are the dimensions of the actual data-drawing area. The
+    # outer figure (axes + toolbar around the frame) grows by ~70 px
+    # in each direction. We update frame_width / frame_height every
+    # image load (in `refresh_image_glyph`) to maintain the image's
+    # pixel aspect EXACTLY — so the image renders at its native ratio
+    # regardless of window size. `sizing_mode` is intentionally not
+    # set; the figure stays a fixed pixel block in the layout and the
+    # surrounding column letterboxes around it.
+    frame_width=800,
+    frame_height=800,
     match_aspect=True,
     # IMPORTANT: leave x_range / y_range at the default DataRange1d.
     # Per Bokeh docs match_aspect=True only works with DataRange1d —
     # switching to explicit Range1d silently breaks the aspect lock and
     # rectangular images (e.g. 2200×2500 FITS) get stretched horizontally
-    # by ~factor canvas_aspect/data_aspect. The earlier Range1d "fix to
-    # prevent auto-zoom-out after a click" is reverted; that potential
-    # zoom-out is harmless in practice (the spec-overlap polygons stay
-    # within the already-visible MSA footprint at the relevant zooms).
+    # by ~factor canvas_aspect/data_aspect.
     #
     # No "tap" tool: it auto-selects clicked glyphs, which causes Bokeh's
     # default nonselection-rendering to fade every *other* open shutter
@@ -679,6 +1153,15 @@ fig.add_tools(wheel_zoom)
 fig.toolbar.active_scroll = wheel_zoom
 
 img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=src_image)
+# Pin DataRange1d to track only the image extent. Otherwise overlay
+# renderers whose data lies outside [0, W] × [0, H] (e.g. MSA outline
+# at corner shutters when the image is smaller than the MSA, or
+# catalog markers at the image edges) extend the auto-range and
+# break the aspect lock — the symptom is the image stretching
+# horizontally when both image and catalog are loaded together
+# (e.g. via run.sh --jpg --wcs --catalog).
+fig.x_range.renderers = [img_glyph]
+fig.y_range.renderers = [img_glyph]
 
 # Bottom-to-top render order: image, operable shutters, stuck-open shutters,
 # open shutters (user picks), highlighted shutters, MSA outline, fixed slits,
@@ -1497,6 +1980,23 @@ def refresh_image_glyph() -> None:
     # aspect comes out wrong" bug.
     fig.x_range.update(start=0, end=W)
     fig.y_range.update(start=0, end=H)
+    # Lock the canvas frame pixel dimensions to the image's W:H so 1
+    # image pixel = (FRAME_SCALE × W / max(W, H)) screen pixels,
+    # consistently in X and Y. Window resizes leave these alone —
+    # the canvas is a fixed-pixel block; the layout column letterboxes
+    # around it. Trade-off: the canvas doesn't grow on big monitors,
+    # but image pixels are guaranteed square.
+    if W > 0 and H > 0:
+        # Constrain the canvas so neither dimension exceeds FRAME_MAX.
+        # Whichever image axis is longer becomes FRAME_MAX; the other
+        # shrinks proportionally to preserve W:H exactly.
+        FRAME_MAX = 800
+        if W >= H:
+            fig.frame_width = FRAME_MAX
+            fig.frame_height = int(round(FRAME_MAX * H / W))
+        else:
+            fig.frame_height = FRAME_MAX
+            fig.frame_width = int(round(FRAME_MAX * W / H))
     # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
     # WCS. Linear approximation around the image center — accurate at the
     # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
@@ -1597,7 +2097,8 @@ def _set_image_and_recenter(
     _set_status(f"Loaded {source_label} ({W}×{H}).{suffix}", "ok")
 
 
-def _load_fits_from_path(path: str, force_recenter: bool = False) -> None:
+def _load_fits_from_path(path: str, force_recenter: bool = False,
+                         on_complete=None) -> None:
     try:
         img = load_fits(path)
         _set_image_and_recenter(
@@ -1608,10 +2109,13 @@ def _load_fits_from_path(path: str, force_recenter: bool = False) -> None:
         traceback.print_exc()
     finally:
         _hide_loading()
+        if on_complete is not None:
+            curdoc().add_next_tick_callback(on_complete)
 
 
 def _load_jpg_pair_from_paths(
     jpg_path: str, sidecar_path: str, force_recenter: bool = False,
+    on_complete=None,
 ) -> None:
     try:
         img = load_jpg_with_sidecar(jpg_path, sidecar_path, max_dim=6000)
@@ -1624,6 +2128,8 @@ def _load_jpg_pair_from_paths(
         traceback.print_exc()
     finally:
         _hide_loading()
+        if on_complete is not None:
+            curdoc().add_next_tick_callback(on_complete)
 
 
 def _catalog_alpha_for_depth(depth: int) -> float:
@@ -1812,7 +2318,7 @@ def _render_catalog_list() -> None:
     catalog_list_column.children = rows
 
 
-def _load_catalog_from_path(path: str) -> None:
+def _load_catalog_from_path(path: str, on_complete=None) -> None:
     try:
         cat = load_catalog(path)
         name = Path(path).name
@@ -1852,11 +2358,15 @@ def _load_catalog_from_path(path: str) -> None:
         traceback.print_exc()
     finally:
         _hide_loading()
+        if on_complete is not None:
+            curdoc().add_next_tick_callback(on_complete)
 
 
 # Path-based callbacks (primary input for a local tool).
 # Slow loads are deferred to the next tick so the loading banner renders first.
 def on_fits_path(attr, old, new):
+    if state.get("_autoload_active"):
+        return
     p = fits_path_input.value.strip()
     if not p:
         return
@@ -1868,6 +2378,8 @@ def on_fits_path(attr, old, new):
 
 
 def on_sidecar_path(attr, old, new):
+    if state.get("_autoload_active"):
+        return
     p = sidecar_path_input.value.strip()
     if not p:
         return
@@ -1884,6 +2396,8 @@ def on_sidecar_path(attr, old, new):
 
 
 def on_jpg_path(attr, old, new):
+    if state.get("_autoload_active"):
+        return
     jpg_p = jpg_path_input.value.strip()
     side_p = state.get("tmp_sidecar_path") or sidecar_path_input.value.strip()
     if not jpg_p:
@@ -1903,6 +2417,8 @@ def on_catalog_path(attr, old, new):
     pastes-a-path flow. The explicit "Add" button is a parallel
     trigger so the user can re-load a catalog that was previously
     removed without first clearing the path."""
+    if state.get("_autoload_active"):
+        return
     p = catalog_path_input.value.strip()
     if not p:
         return
@@ -2994,7 +3510,7 @@ def _apply_plan(plan) -> None:
         _set_status(
             f"Loaded plan '{plan.name}': {n_open} open shutters at "
             f"APA={plan.aperture_pa_deg:.2f}°, V3 PA={plan.v3_pa_deg:.2f}°. "
-            f"Load an image (Image tab) to see and edit the overlay.",
+            f"Load an image (Input tab) to see and edit the overlay.",
             "warn", clear_after=20,
         )
         return
@@ -3194,6 +3710,8 @@ _bind_browse(session_save_browse_btn, session_save_path_input,
              "Save session as…", _JSON_TYPES, mode="save")
 _bind_browse(session_load_browse_btn, session_load_path_input,
              "Load session JSON", _JSON_TYPES)
+_bind_browse(cat_edit_csv_browse_btn, cat_edit_csv_path_input,
+             "Save edited catalog as…", _CSV_TYPES, mode="save")
 _bind_browse(export_dir_browse_btn, export_dir_input,
              "Pick export directory", None, mode="directory")
 snap_box.on_change("active", on_snap)
@@ -3444,6 +3962,1293 @@ visibility_btn.on_click(on_visibility)
 
 
 # ---------------------------------------------------------------------------
+# Pointing-optimizer callbacks
+# ---------------------------------------------------------------------------
+# Wrapped imports — heavy (scipy.interpolate Delaunay), so we keep them
+# local to delay the first-build cost until the user actually clicks
+# Run optimization.
+def _open_advanced_modal():
+    opt_advanced_modal_backdrop.visible = True
+    opt_advanced_modal_card.visible = True
+
+
+def _close_advanced_modal():
+    opt_advanced_modal_backdrop.visible = False
+    opt_advanced_modal_card.visible = False
+
+
+opt_advanced_btn.on_click(_open_advanced_modal)
+opt_advanced_modal_close_btn.on_click(_close_advanced_modal)
+
+
+# ── Catalog editor handlers ──────────────────────────────────────────────
+
+# Undo / redo stacks hold prior-state snapshots (copies of the
+# ColumnDataSource data dict). `_cat_edit_suppress` muzzles the
+# on_change("data") listener while we're applying snapshots — otherwise
+# undo / redo / populate operations would recursively push to the stack.
+_cat_edit_undo_stack: list[dict] = []
+_cat_edit_redo_stack: list[dict] = []
+_cat_edit_suppress: dict = {"flag": False}
+_CAT_EDIT_MAX_HISTORY = 100
+
+
+def _cat_edit_snapshot() -> dict:
+    """Take a deep copy of the current working-copy source.data."""
+    return {k: list(v) for k, v in _cat_edit_source.data.items()}
+
+
+def _cat_edit_set_data_silently(data: dict) -> None:
+    """Replace source.data without triggering an undo push."""
+    _cat_edit_suppress["flag"] = True
+    try:
+        _cat_edit_source.data = {k: list(v) for k, v in data.items()}
+    finally:
+        _cat_edit_suppress["flag"] = False
+
+
+def _cat_edit_render_history():
+    n_u = len(_cat_edit_undo_stack)
+    n_r = len(_cat_edit_redo_stack)
+    cat_edit_undo_btn.disabled = (n_u == 0)
+    cat_edit_redo_btn.disabled = (n_r == 0)
+    cat_edit_history_div.text = (
+        f"<small style='color:#5a6b85'>"
+        f"{n_u} undo · {n_r} redo</small>"
+    )
+
+
+def _cat_edit_fmt_optional(v) -> str:
+    """Render a possibly-NaN numeric as a clean string ("" for NaN)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return ""
+    if not np.isfinite(f):
+        return ""
+    return _fmt_num(f)
+
+
+# Standard columns the loader always populates. Extras live under
+# `Catalog.extras` and are surfaced through the same picker.
+_CAT_STD_COLS = ("id", "ra", "dec", "priority", "weight", "mag", "z", "label")
+_CAT_STD_TITLES = {
+    "id": "ID", "ra": "RA (deg)", "dec": "Dec (deg)",
+    "priority": "Priority", "weight": "Weight",
+    "mag": "Mag", "z": "z", "label": "Label",
+}
+_CAT_STD_WIDTHS = {
+    "id": 110, "ra": 110, "dec": 110,
+    "priority": 80, "weight": 80,
+    "mag": 80, "z": 80, "label": 150,
+}
+
+
+def _cat_edit_populate_table(idx: int) -> None:
+    """Copy the indexed catalog's rows into the editor's source.
+
+    All numeric columns are PRE-FORMATTED to strings (NaN → "") so the
+    DataTable's StringEditor never sees a NaN it can't render. Extras
+    columns from the original CSV/FITS file are stuffed in alongside
+    the standard ones — the column picker (`cat_edit_columns_choice`)
+    controls which are visible in the table."""
+    if not (0 <= idx < len(state["catalogs"])):
+        _cat_edit_set_data_silently(dict(
+            id=[], ra=[], dec=[], priority=[], weight=[],
+            mag=[], z=[], label=[], _idx=[],
+        ))
+        cat_edit_columns_choice.options = []
+        cat_edit_columns_choice.value = []
+    else:
+        cat = state["catalogs"][idx]["catalog"]
+        n = len(cat.ra_deg)
+        ra_arr = np.asarray(cat.ra_deg, dtype=float)
+        dec_arr = np.asarray(cat.dec_deg, dtype=float)
+        # `weight` may be missing (older sessions / catalogs loaded
+        # before the field existed). Pad to the row count with NaN.
+        weight_arr = np.asarray(getattr(cat, "weight", []), dtype=float)
+        if weight_arr.size != n:
+            weight_arr = np.full(n, np.nan, dtype=float)
+        data: dict = dict(
+            id=[str(v) for v in np.asarray(cat.ids).tolist()],
+            ra=[f"{v:.7f}" for v in ra_arr.tolist()],
+            dec=[f"{v:.7f}" for v in dec_arr.tolist()],
+            priority=[_cat_edit_fmt_optional(v) for v in cat.priority],
+            weight=[_cat_edit_fmt_optional(v) for v in weight_arr],
+            mag=[_cat_edit_fmt_optional(v) for v in cat.mag],
+            z=[_cat_edit_fmt_optional(v) for v in cat.z],
+            label=[str(v) for v in (cat.label if cat.label is not None
+                                    else [""] * n)],
+            _idx=list(range(n)),
+        )
+        # Add every extras column verbatim (already object arrays of
+        # str values, courtesy of `load_catalog`).
+        extras = getattr(cat, "extras", {}) or {}
+        for ex_name, ex_vals in extras.items():
+            # Avoid clobbering a standard column if some catalog uses
+            # the same name (it shouldn't, since `claimed` in the
+            # loader prevents that, but defend in depth).
+            if ex_name in data:
+                continue
+            data[ex_name] = list(ex_vals)
+        _cat_edit_set_data_silently(data)
+
+        # Refresh the column picker. Default selection: the 7 standard
+        # columns. Extras are listed but off by default so the table
+        # opens to its familiar layout.
+        std_titled = [(c, _CAT_STD_TITLES[c]) for c in _CAT_STD_COLS]
+        ex_titled = [(k, k) for k in extras.keys()]
+        all_opts = std_titled + ex_titled
+        cat_edit_columns_choice.options = [t for _, t in all_opts]
+        cat_edit_columns_choice.value = [t for c, t in std_titled]
+    _cat_edit_undo_stack.clear()
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+    _cat_edit_rebuild_columns()
+
+
+def _cat_edit_rebuild_columns() -> None:
+    """Rebuild `cat_edit_table.columns` according to the picker. The
+    trash column always stays at the end."""
+    visible_titles = set(cat_edit_columns_choice.value or [])
+    title_to_field = {**{_CAT_STD_TITLES[c]: c for c in _CAT_STD_COLS}}
+    data = _cat_edit_source.data
+    # Extras: any source-data key not in the standard set + not `_idx`.
+    extras = [k for k in data.keys()
+              if k not in _CAT_STD_COLS and k != "_idx"]
+    for k in extras:
+        title_to_field[k] = k
+
+    cols: list = []
+    # Standard columns first, in their fixed order.
+    for c in _CAT_STD_COLS:
+        if _CAT_STD_TITLES[c] in visible_titles:
+            cols.append(TableColumn(
+                field=c, title=_CAT_STD_TITLES[c],
+                editor=StringEditor(), width=_CAT_STD_WIDTHS[c],
+            ))
+    # Extras in CSV order.
+    for k in extras:
+        if k in visible_titles:
+            cols.append(TableColumn(
+                field=k, title=k, editor=StringEditor(), width=120,
+            ))
+    # Trash column always last.
+    cols.append(TableColumn(
+        field="_idx", title="🗑", width=34,
+        formatter=HTMLTemplateFormatter(template=_TRASH_TEMPLATE),
+        sortable=False,
+    ))
+    cat_edit_table.columns = cols
+
+
+def _on_cat_edit_columns_change(attr, old, new):
+    _cat_edit_rebuild_columns()
+
+
+def _on_cat_edit_add_column():
+    """Append a user-named string column to the working copy.
+
+    The new column starts empty and is auto-ticked in the picker so
+    it appears in the table immediately. Edits flow into it via
+    Bokeh's normal cell-edit path; Apply pushes it back into
+    `Catalog.extras` so it round-trips through Save-as-CSV and
+    survives session reload."""
+    name = (cat_edit_new_col_input.value or "").strip()
+    if not name:
+        _set_status("Type a column name first.", "warn")
+        return
+    # Disallow names that would shadow internal or standard fields.
+    if name == "_idx":
+        _set_status("`_idx` is reserved.", "err")
+        return
+    data = dict(_cat_edit_source.data)
+    n = len(data.get("ra", []))
+    if name in data:
+        # Already exists — just make sure it's ticked + visible.
+        title = _CAT_STD_TITLES.get(name, name)
+        if title not in (cat_edit_columns_choice.value or []):
+            cat_edit_columns_choice.value = [
+                *(cat_edit_columns_choice.value or []), title,
+            ]
+        _set_status(
+            f"Column {name!r} already exists; made it visible.",
+            "ok", clear_after=8,
+        )
+        cat_edit_new_col_input.value = ""
+        return
+    # Add as an empty-string column.
+    data[name] = ["" for _ in range(n)]
+    _cat_edit_set_data_silently(data)
+    # Push to the picker as a new option and tick it.
+    cat_edit_columns_choice.options = [
+        *(cat_edit_columns_choice.options or []), name,
+    ]
+    cat_edit_columns_choice.value = [
+        *(cat_edit_columns_choice.value or []), name,
+    ]
+    _cat_edit_rebuild_columns()
+    _set_status(
+        f"Added column {name!r}. Fill values then click Apply.",
+        "ok", clear_after=10,
+    )
+    cat_edit_new_col_input.value = ""
+
+
+from app.catalog_ops import (
+    compute_priorities_from_weights as _compute_priorities_from_weights,
+    compute_weights_from_priorities as _compute_weights_from_priorities,
+)
+
+
+def _on_cat_edit_compute_w_from_p():
+    data = dict(_cat_edit_source.data)
+    pris = list(data.get("priority", []))
+    new_w = _compute_weights_from_priorities(pris)
+    if new_w is None:
+        _set_status(
+            "Compute w from p: no finite priorities found. "
+            "Fill the Priority column first.", "warn",
+        )
+        return
+    data["weight"] = new_w
+    _cat_edit_set_data_silently(data)
+    # Make sure Weight is visible in the picker.
+    titles = cat_edit_columns_choice.value or []
+    if _CAT_STD_TITLES["weight"] not in titles:
+        cat_edit_columns_choice.value = [*titles, _CAT_STD_TITLES["weight"]]
+    # Record on undo stack so this isn't a one-way action.
+    snap = {k: list(v) for k, v in _cat_edit_source.data.items()}
+    _cat_edit_undo_stack.append(snap)
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+    _set_status("Computed weights from priorities. Click Apply to commit.",
+                "ok", clear_after=10)
+
+
+def _on_cat_edit_compute_p_from_w():
+    data = dict(_cat_edit_source.data)
+    weights = list(data.get("weight", []))
+    new_p = _compute_priorities_from_weights(weights)
+    if new_p is None:
+        _set_status(
+            "Compute p from w: no finite weights found. "
+            "Fill the Weight column first.", "warn",
+        )
+        return
+    data["priority"] = new_p
+    _cat_edit_set_data_silently(data)
+    titles = cat_edit_columns_choice.value or []
+    if _CAT_STD_TITLES["priority"] not in titles:
+        cat_edit_columns_choice.value = [*titles, _CAT_STD_TITLES["priority"]]
+    snap = {k: list(v) for k, v in _cat_edit_source.data.items()}
+    _cat_edit_undo_stack.append(snap)
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+    _set_status("Computed priorities from weights. Click Apply to commit.",
+                "ok", clear_after=10)
+
+
+def _on_cat_edit_data_change(attr, old, new):
+    """Listener on source.data — fires after any cell edit. Pushes the
+    PRIOR state onto the undo stack so the user can revert it."""
+    if _cat_edit_suppress["flag"]:
+        return
+    snap = {k: list(v) for k, v in old.items()}
+    _cat_edit_undo_stack.append(snap)
+    if len(_cat_edit_undo_stack) > _CAT_EDIT_MAX_HISTORY:
+        _cat_edit_undo_stack.pop(0)
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+
+
+def _on_cat_edit_undo():
+    if not _cat_edit_undo_stack:
+        return
+    _cat_edit_redo_stack.append(_cat_edit_snapshot())
+    snap = _cat_edit_undo_stack.pop()
+    _cat_edit_set_data_silently(snap)
+    _cat_edit_render_history()
+
+
+def _on_cat_edit_redo():
+    if not _cat_edit_redo_stack:
+        return
+    _cat_edit_undo_stack.append(_cat_edit_snapshot())
+    snap = _cat_edit_redo_stack.pop()
+    _cat_edit_set_data_silently(snap)
+    _cat_edit_render_history()
+
+
+def _on_cat_edit_delete_signal(attr, old, new):
+    """JS-side `window.__vmpt_delete_row(idx)` writes the row index here.
+    We delete that row from the working copy AND push the prior state
+    onto the undo stack."""
+    try:
+        target = int(new.get("idx", [-1])[0])
+    except (TypeError, ValueError, IndexError):
+        return
+    if target < 0:
+        return
+    data = _cat_edit_source.data
+    idxs = list(data.get("_idx", []))
+    if target not in idxs:
+        return
+    # Capture the prior state for undo.
+    snap = {k: list(v) for k, v in data.items()}
+    _cat_edit_undo_stack.append(snap)
+    if len(_cat_edit_undo_stack) > _CAT_EDIT_MAX_HISTORY:
+        _cat_edit_undo_stack.pop(0)
+    _cat_edit_redo_stack.clear()
+
+    # Drop the row whose `_idx` == target. (We use _idx, not the
+    # positional index in the list, because the user may have sorted.)
+    keep = [i for i, v in enumerate(idxs) if v != target]
+    new_data = {k: [v[i] for i in keep] for k, v in data.items()}
+    # Re-stamp _idx so future rows have unique non-colliding indices.
+    new_data["_idx"] = list(range(len(keep)))
+    _cat_edit_set_data_silently(new_data)
+    _cat_edit_render_history()
+
+
+def _cat_edit_open():
+    if not state["catalogs"]:
+        _set_status("Load a catalog first.", "warn")
+        return
+    options = [
+        f"#{i + 1}: {e['name']} ({len(e['catalog'].ra_deg)} rows)"
+        for i, e in enumerate(state["catalogs"])
+    ]
+    cat_edit_select.options = options
+    # Default: edit the first enabled catalog (or first overall).
+    default_idx = next(
+        (i for i, e in enumerate(state["catalogs"]) if e["enabled"]),
+        0,
+    )
+    cat_edit_select.value = options[default_idx]
+    _cat_edit_populate_table(default_idx)
+    # Pre-fill the save-as path with "<source>_edited.csv" — only if
+    # the input box is currently empty.
+    if not cat_edit_csv_path_input.value.strip():
+        src = state["catalogs"][default_idx]["catalog"].source_path or ""
+        if src:
+            stem, _, ext = src.rpartition(".")
+            suggested = (stem or src) + "_edited.csv"
+            cat_edit_csv_path_input.value = suggested
+    cat_edit_modal_backdrop.visible = True
+    cat_edit_modal_card.visible = True
+
+
+def _cat_edit_close():
+    cat_edit_modal_backdrop.visible = False
+    cat_edit_modal_card.visible = False
+
+
+def _cat_edit_selected_idx() -> int:
+    """Return the index of the catalog currently picked in the dropdown."""
+    try:
+        return int(cat_edit_select.value.split(":", 1)[0].lstrip("#")) - 1
+    except (ValueError, AttributeError, IndexError):
+        return -1
+
+
+def _on_cat_edit_select(attr, old, new):
+    _cat_edit_populate_table(_cat_edit_selected_idx())
+
+
+def _str_to_float_or_nan(v) -> float:
+    """Tolerantly parse a cell value back to float. Empty / unparsable
+    → NaN. Used when committing string-edited columns to numeric
+    Catalog arrays."""
+    s = str(v).strip()
+    if not s or s.lower() in ("nan", "none", "null", "--"):
+        return float("nan")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
+def _on_cat_edit_apply():
+    """Write the working copy back to state['catalogs'][idx] and refresh."""
+    idx = _cat_edit_selected_idx()
+    if not (0 <= idx < len(state["catalogs"])):
+        _set_status("No catalog selected.", "warn")
+        return
+    data = _cat_edit_source.data
+    n = len(data["ra"])
+    if n == 0:
+        _set_status(
+            "Catalog is empty after edits. Delete the catalog instead "
+            "if you don't need it.", "err",
+        )
+        return
+    # Coerce string columns back to the Catalog dataclass schema.
+    ids_in = list(data["id"])
+    ids_out: list = []
+    for v in ids_in:
+        s = str(v).strip()
+        try:
+            ids_out.append(int(float(s)))
+        except (ValueError, TypeError):
+            ids_out.append(s)
+    cat = state["catalogs"][idx]["catalog"]
+    # Round-trip extras + any user-added columns. Treat the working
+    # copy as the source of truth: every column in source.data that
+    # isn't a standard field or the internal _idx becomes / updates
+    # an extras entry. Columns in the original `cat.extras` that the
+    # user removed from the picker still survive (we never strip
+    # source.data on column-hide), but if a user explicitly added a
+    # new column it lands here for the first time.
+    new_extras: dict = {}
+    src_keys = set(_cat_edit_source.data.keys())
+    for k in src_keys:
+        if k in _CAT_STD_COLS or k == "_idx":
+            continue
+        new_extras[k] = np.asarray(list(data[k]), dtype=object)
+    # Carry through any extras that for some reason weren't in source
+    # (defensive: should never happen with the current flow).
+    for k, v in (getattr(cat, "extras", {}) or {}).items():
+        new_extras.setdefault(k, np.asarray(list(v), dtype=object))
+    weight_in = data.get("weight", ["" for _ in range(n)])
+    new_cat = Catalog(
+        ids=np.asarray(ids_out, dtype=object),
+        ra_deg=np.asarray([_str_to_float_or_nan(v) for v in data["ra"]],
+                          dtype=float),
+        dec_deg=np.asarray([_str_to_float_or_nan(v) for v in data["dec"]],
+                           dtype=float),
+        priority=np.asarray([_str_to_float_or_nan(v) for v in data["priority"]],
+                            dtype=float),
+        weight=np.asarray([_str_to_float_or_nan(v) for v in weight_in],
+                          dtype=float),
+        mag=np.asarray([_str_to_float_or_nan(v) for v in data["mag"]],
+                       dtype=float),
+        z=np.asarray([_str_to_float_or_nan(v) for v in data["z"]],
+                     dtype=float),
+        label=np.asarray([str(v) for v in data["label"]], dtype=object),
+        source_path=cat.source_path,
+        extras=new_extras,
+    )
+    state["catalogs"][idx]["catalog"] = new_cat
+    _rebuild_merged_catalog()
+    _rebuild_shutter_catalog_index()
+    _render_catalog_list()
+    refresh_overlays()
+    _set_status(
+        f"Applied edits → catalog #{idx + 1} now has {n} rows.",
+        "ok", clear_after=10,
+    )
+    _cat_edit_close()
+
+
+def _on_cat_edit_save_csv():
+    """Write the working copy to CSV at the user-supplied path.
+
+    Source.data already carries strings for every editable column
+    (blank for NaN), so we can pass values straight through.
+    """
+    path = (cat_edit_csv_path_input.value or "").strip()
+    if not path:
+        _set_status("Enter a save path first.", "warn")
+        return
+    data = _cat_edit_source.data
+    n = len(data["ra"])
+    if n == 0:
+        _set_status("Nothing to save — table is empty.", "warn")
+        return
+    p = Path(path).expanduser()
+    p.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        import csv as _csv
+        # Column order: the eight standard columns first, then any
+        # extras columns the source carries (in insertion order). Skip
+        # the internal `_idx` column.
+        extras_cols = [k for k in data.keys()
+                       if k not in _CAT_STD_COLS and k != "_idx"]
+        header = ["ID", "RA", "DEC", "priority", "weight", "mag", "z",
+                  "label", *extras_cols]
+        with open(p, "w", newline="") as f:
+            w = _csv.writer(f)
+            w.writerow(header)
+            for i in range(n):
+                row_vals = [
+                    data["id"][i], data["ra"][i], data["dec"][i],
+                    data["priority"][i],
+                    data.get("weight", [""] * n)[i],
+                    data["mag"][i], data["z"][i],
+                    data["label"][i],
+                ]
+                for k in extras_cols:
+                    row_vals.append(data[k][i])
+                w.writerow(row_vals)
+        _set_status(f"Saved {n} rows → {p}", "ok", clear_after=10)
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"CSV save failed: {e}", "err")
+        traceback.print_exc()
+
+
+def _fmt_num(v: float) -> str:
+    """Strip trailing zeros from a float so the CSV is tidy."""
+    s = f"{float(v):.6f}".rstrip("0").rstrip(".")
+    return s if s else "0"
+
+
+catalog_edit_btn.on_click(_cat_edit_open)
+cat_edit_close_btn.on_click(_cat_edit_close)
+cat_edit_select.on_change("value", _on_cat_edit_select)
+cat_edit_columns_choice.on_change("value", _on_cat_edit_columns_change)
+cat_edit_new_col_btn.on_click(_on_cat_edit_add_column)
+cat_edit_compute_w_btn.on_click(_on_cat_edit_compute_w_from_p)
+cat_edit_compute_p_btn.on_click(_on_cat_edit_compute_p_from_w)
+cat_edit_undo_btn.on_click(_on_cat_edit_undo)
+cat_edit_redo_btn.on_click(_on_cat_edit_redo)
+cat_edit_apply_btn.on_click(_on_cat_edit_apply)
+cat_edit_csv_save_btn.on_click(_on_cat_edit_save_csv)
+
+# Push every cell-edit's prior state onto the undo stack.
+_cat_edit_source.on_change("data", _on_cat_edit_data_change)
+# JS-side trash icons write to the signal source; Python deletes the row.
+_cat_edit_delete_signal.on_change("data", _on_cat_edit_delete_signal)
+
+# Install the JS-side `window.__vmpt_delete_row(idx)` — called from
+# the trash-icon column's `onclick`. The function closes over `sig`
+# (our Python-side signal ColumnDataSource) so it can publish a
+# change Python listens to. We bind to TWO triggers for reliability:
+#
+#   1. `DocumentReady` on the document — covers the case where the
+#      table is populated by autoload (sys.argv → catalog → editor).
+#   2. `source.js_on_change("data")` — fires every time the editor's
+#      data is repopulated. The `if (!window.__vmpt_delete_row)` guard
+#      makes re-installation a no-op.
+_cat_edit_install_js = CustomJS(
+    args=dict(sig=_cat_edit_delete_signal),
+    code="""
+    if (!window.__vmpt_delete_row) {
+        window.__vmpt_delete_row = function(idx) {
+            // Coerce to int (template substitutes a numeric literal).
+            const n = parseInt(idx, 10);
+            // Stamp ensures every click is a fresh `data` value,
+            // even if the same row is deleted twice in a session.
+            sig.data = {idx: [n], stamp: [Date.now() + Math.random()]};
+            sig.properties.data.change.emit();
+        };
+    }
+    """,
+)
+curdoc().js_on_event(DocumentReady, _cat_edit_install_js)
+_cat_edit_source.js_on_change("data", _cat_edit_install_js)
+
+# SlickGrid intercepts Cmd-C / Ctrl-C at the grid container level and
+# copies the entire selected column / row from its internal data
+# model, which defeats the in-cell drag-select + copy workflow. We
+# install a CAPTURE-phase keydown listener at the document level that
+# runs BEFORE SlickGrid: if an input/textarea is focused and a
+# selection exists, we copy that selection ourselves via
+# `navigator.clipboard.writeText`, then `preventDefault` + `stop-
+# ImmediatePropagation` so SlickGrid never sees the event.
+_cat_edit_clipboard_js = CustomJS(code="""
+if (!window.__vmpt_copy_installed) {
+    window.__vmpt_copy_installed = true;
+    document.addEventListener('keydown', function(e) {
+        if (!(e.metaKey || e.ctrlKey)) return;
+        const k = (e.key || '').toLowerCase();
+        if (k !== 'c' && k !== 'x') return;
+        const a = document.activeElement;
+        if (!a) return;
+        if (a.tagName !== 'INPUT' && a.tagName !== 'TEXTAREA') return;
+        const s = a.selectionStart, t = a.selectionEnd;
+        if (s == null || t == null || s === t) return;
+        const text = (a.value || '').substring(s, t);
+        try {
+            navigator.clipboard.writeText(text);
+        } catch (err) {
+            // Fallback for non-secure contexts.
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); } catch (_) {}
+            document.body.removeChild(ta);
+        }
+        if (k === 'x') {
+            // Implement cut: clear the selected slice from the input.
+            a.value = (a.value || '').substring(0, s) +
+                      (a.value || '').substring(t);
+            a.selectionStart = a.selectionEnd = s;
+            a.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        e.preventDefault();
+        e.stopImmediatePropagation();
+    }, true);
+}
+""")
+curdoc().js_on_event(DocumentReady, _cat_edit_clipboard_js)
+# Re-install on every catalog populate too — covers the case where
+# the page never fired DocumentReady (rare) or the function got wiped.
+_cat_edit_source.js_on_change("data", _cat_edit_clipboard_js)
+
+
+def _apply_optimizer_result(ra_p: float, dec_p: float, pa_v3: float) -> None:
+    """Apply one of the optimizer's pointings AND open an N-shutter
+    slitlet at every observable target.
+
+    Mechanics:
+      1. Push current open_shutters to history so the user can Undo
+         the whole optimizer apply in one step.
+      2. Set RA/Dec/V3 PA via the widgets (their on_change handlers
+         update state and queue a refresh).
+      3. Use the in-flight `_opt_run["evaluator"]` to compute, for
+         this pointing, which sources are observable and where their
+         shutter centres are. Open a slitlet at each — its height
+         (1/2/3/5) follows the current Setting-tab dropdown.
+      4. Status bar reports how many slitlets opened.
+
+    Per-source IDs come from `_opt_run["source_ids"]`, the parallel
+    array of catalog IDs stashed in `on_optimize`.
+    """
+    _push_history()  # snapshot so the next Undo reverts the whole apply
+
+    ra_input.value = f"{ra_p:.6f}"
+    dec_input.value = f"{dec_p:.6f}"
+    _sync_pa_widgets(float(pa_v3))
+
+    n_targets = 0
+    n_opened = 0
+    ev = _opt_run.get("evaluator") if _opt_run else None
+    ids = _opt_run.get("source_ids", []) if _opt_run else []
+    if ev is not None:
+        try:
+            detected, _tp, shutters = ev.evaluate(ra_p, dec_p, pa_v3)
+            quad, s_frac, d_frac = shutters
+            for i in range(len(detected)):
+                if not bool(detected[i]):
+                    continue
+                n_targets += 1
+                q = int(quad[i])
+                s = int(round(float(s_frac[i])))
+                d = int(round(float(d_frac[i])))
+                if not (1 <= q <= 4 and 1 <= s <= 171 and 1 <= d <= 365):
+                    continue
+                target_id = str(ids[i]) if i < len(ids) else None
+                try:
+                    if _add_slitlet(q, s, d, target_id=target_id) > 0:
+                        n_opened += 1
+                except Exception:  # noqa: BLE001
+                    # Edge cases (e.g. slitlet partially off the MSA)
+                    # are silently skipped; we still try the rest.
+                    pass
+        except Exception as e:  # noqa: BLE001
+            _set_status(f"Auto-open after Apply failed: {e}", "warn")
+            traceback.print_exc()
+
+    n_shutters = int(state.get("slitlet_height", 3))
+    _set_status(
+        f"Applied: pointing → RA={ra_p:.5f}, Dec={dec_p:.5f}, "
+        f"V3 PA={pa_v3:.2f}° · opened {n_opened}/{n_targets} "
+        f"{n_shutters}-shutter slitlets.",
+        "ok", clear_after=14,
+    )
+
+
+# ── Pop-up modal helpers ─────────────────────────────────────────────────
+
+
+def _opt_show_modal() -> None:
+    """Reveal the optimizer modal in its 'progress' state."""
+    opt_modal_backdrop.visible = True
+    opt_modal_card.visible = True
+    opt_modal_progress_box.visible = True
+    opt_modal_results_box.visible = False
+    opt_modal_results_summary.text = ""
+    opt_modal_results_rows.children = []
+
+
+def _opt_hide_modal() -> None:
+    opt_modal_backdrop.visible = False
+    opt_modal_card.visible = False
+
+
+def _opt_update_progress(text: str, frac: float) -> None:
+    """Update the progress text + CSS progress bar. `frac` ∈ [0, 1].
+
+    The bar's `text` is set ONCE at construction (so the stripe + pulse
+    CSS animations keep running uninterrupted). Here we only swap the
+    `--vmpt-pct` custom property on the wrapper Div's inline style;
+    Bokeh applies that without replacing innerHTML, so animations
+    don't restart.
+    """
+    pct = max(0.0, min(1.0, float(frac))) * 100.0
+    opt_modal_progress_text.text = f"<i>{text}</i>"
+    opt_modal_progress_bar.styles = {"--vmpt-pct": f"{pct:.1f}%"}
+
+
+def _opt_render_results_in_modal(
+    results: dict, ra_ref: float, dec_ref: float, pa_ref: float,
+    n_sources: int,
+) -> None:
+    """Build the post-run results table: one Bokeh row per solution
+    so the Apply button sits exactly next to its cells (no Bokeh
+    column-spacing drift between buttons and table rows)."""
+    n = len(results["score"])
+    if n == 0:
+        opt_modal_progress_box.visible = False
+        opt_modal_results_box.visible = True
+        opt_modal_results_summary.text = (
+            "<i>No solutions found inside the search box. "
+            "Try widening ΔRA / ΔDec / ΔPA, lowering the centration "
+            "class, or relaxing the priority cutoff.</i>"
+        )
+        opt_modal_results_rows.children = []
+        return
+
+    n_show = min(10, n)
+    cos_dec = np.cos(np.deg2rad(dec_ref))
+
+    # Summary line.
+    opt_modal_results_summary.text = (
+        f"<div style='font-size:12px; margin-bottom:4px'>"
+        f"<b>Top {n_show}</b> distinct solutions of {n} total · "
+        f"{n_sources} candidate sources. Numbers are offsets from the "
+        f"search centre.</div>"
+    )
+
+    # Header row (Bokeh row of Divs aligning with the data rows).
+    HEADER_BG = "#eef2f8"
+    ROW_H = 26
+    CELL_STYLES = {
+        "padding": "0 6px",
+        "line-height": f"{ROW_H}px",
+        "border-bottom": "1px solid #d8dee8",
+        "box-sizing": "border-box",
+        "height": f"{ROW_H}px",
+    }
+    def _cell(text, width, *, header=False, bold=False, mono=False):
+        styles = dict(CELL_STYLES)
+        if header:
+            styles["background"] = HEADER_BG
+            styles["font-weight"] = "600"
+            styles["text-align"] = "center"
+        if bold:
+            styles["font-weight"] = "600"
+        if mono:
+            styles["font-family"] = "monospace"
+            styles["text-align"] = "right"
+        else:
+            styles["text-align"] = "center"
+        return Div(text=text, width=width, height=ROW_H, styles=styles)
+
+    COL_WIDTHS = (32, 60, 90, 90, 100, 168)  # last is wide enough for "Apply #N"
+    header_row = row(
+        _cell("#",     COL_WIDTHS[0], header=True),
+        _cell("Score", COL_WIDTHS[1], header=True),
+        _cell("ΔRA",   COL_WIDTHS[2], header=True),
+        _cell("ΔDec",  COL_WIDTHS[3], header=True),
+        _cell("ΔPA",   COL_WIDTHS[4], header=True),
+        _cell("",      COL_WIDTHS[5], header=True),  # spacer over the Apply col
+        spacing=0, width=540,
+    )
+    data_rows: list = []
+    for i in range(n_show):
+        s = float(results["score"][i])
+        ra_i = float(results["ra"][i])
+        dec_i = float(results["dec"][i])
+        pa_i = float(results["pa"][i])
+        d_ra = (ra_i - ra_ref) * 3600.0 * cos_dec
+        d_dec = (dec_i - dec_ref) * 3600.0
+        d_pa = (pa_i - pa_ref + 180.0) % 360.0 - 180.0
+
+        btn = Button(
+            label=f"Apply #{i+1}",
+            button_type="primary" if i == 0 else "default",
+            width=COL_WIDTHS[5] - 12, height=ROW_H,
+        )
+
+        def _make_apply(ra_, dec_, pa_):
+            def _cb():
+                _apply_optimizer_result(ra_, dec_, pa_)
+                _opt_hide_modal()
+            return _cb
+
+        btn.on_click(_make_apply(ra_i, dec_i, pa_i))
+
+        zebra = "#f7f9fc" if i % 2 else "#ffffff"
+        row_styles_bg = lambda c=zebra: {"background": c}
+        data_rows.append(row(
+            _cell(str(i + 1), COL_WIDTHS[0]),
+            _cell(f"{s:.1f}", COL_WIDTHS[1], bold=True),
+            _cell(f"{d_ra:+.2f}″", COL_WIDTHS[2], mono=True),
+            _cell(f"{d_dec:+.2f}″", COL_WIDTHS[3], mono=True),
+            _cell(f"{d_pa:+.3f}°", COL_WIDTHS[4], mono=True),
+            btn,
+            spacing=0, width=540, styles=row_styles_bg(),
+        ))
+
+    opt_modal_progress_box.visible = False
+    opt_modal_results_box.visible = True
+    opt_modal_results_rows.children = [header_row, *data_rows]
+
+
+# ── Chunked optimizer runner ─────────────────────────────────────────────
+
+
+_OPT_GRID_CHUNK = 400      # ~400 ms per chunk → bar updates ~3 ×/s
+_OPT_DE_PER_TICK = 1       # one DE refinement per tick
+
+
+def _opt_drive() -> None:
+    """One state-machine step. Re-schedules itself until done."""
+    if not _opt_run:
+        return  # cancelled / wiped
+    try:
+        if _opt_run["phase"] == "grid":
+            _opt_grid_step()
+        elif _opt_run["phase"] == "hierarchy":
+            _opt_hierarchy_step()
+        elif _opt_run["phase"] == "de":
+            _opt_de_step()
+        elif _opt_run["phase"] == "done":
+            return
+    except Exception as e:  # noqa: BLE001
+        _set_status(f"Optimizer failed: {e}", "err")
+        traceback.print_exc()
+        _opt_run.clear()
+        _opt_hide_modal()
+
+
+def _opt_grid_step() -> None:
+    """Process the next batch of grid pointings, update progress, and
+    either schedule another chunk or transition to DE refinement."""
+    ev = _opt_run["evaluator"]
+    weights = _opt_run["weights"]
+    use_flux = (_opt_run["objective"] == "flux")
+    ras = _opt_run["ra_cube"]
+    decs = _opt_run["dec_cube"]
+    pas = _opt_run["pa_cube"]
+    scores = _opt_run["grid_scores"]
+    idx = _opt_run["grid_idx"]
+    n_total = len(ras)
+    end = min(idx + _OPT_GRID_CHUNK, n_total)
+    for i in range(idx, end):
+        det, tp, _ = ev.evaluate(ras[i], decs[i], pas[i])
+        if use_flux:
+            scores[i] = float(np.sum(tp * ev.flux * weights))
+        else:
+            scores[i] = float(np.sum(det * weights))
+    _opt_run["grid_idx"] = end
+
+    elapsed = _now() - _opt_run["started"]
+    rate = end / max(0.01, elapsed)
+    eta = (n_total - end) / rate if rate > 0 else 0
+    _opt_update_progress(
+        f"Grid: {end:,} / {n_total:,} pointings evaluated · "
+        f"{elapsed:.1f}s elapsed · ~{eta:.1f}s left",
+        end / max(1, n_total) * 0.85,   # leave 15 % for DE
+    )
+
+    if end < n_total:
+        curdoc().add_next_tick_callback(_opt_drive)
+        return
+
+    # Grid phase done → sort.
+    order = np.argsort(-scores)
+    grid_res = {
+        "score": scores[order],
+        "ra": ras[order], "dec": decs[order], "pa": pas[order],
+    }
+    n_top = _opt_run["n_top"]
+    _opt_run["grid_result"] = grid_res
+    # Hierarchy: prepare the multi-stage filter. We keep a pool of up
+    # to 100 grid candidates and rank them lexicographically by
+    # tier-by-tier score from highest priority (smallest p) downward.
+    if _opt_run.get("method") == "Hierarchy":
+        K = min(100, len(scores))
+        _opt_run["hier_pool"] = list(range(K))   # indices into grid_res
+        _opt_run["hier_scores"] = {}             # per-(cand, tier) score
+        # Tier list: ascending priority value = descending importance.
+        pri = _opt_run["priorities"]
+        tiers = sorted(set(float(p) for p in pri if np.isfinite(p)))
+        _opt_run["hier_tiers"] = tiers
+        _opt_run["hier_tier_idx"] = 0
+        _opt_run["phase"] = "hierarchy"
+    else:
+        _opt_run["phase"] = "de"
+        _opt_run["de_idx"] = 0
+        _opt_run["de_total"] = min(n_top, len(scores))
+        _opt_run["de_scores"] = []
+        _opt_run["de_params"] = []
+    curdoc().add_next_tick_callback(_opt_drive)
+
+
+def _opt_hierarchy_step() -> None:
+    """One priority tier of the multi-stage hierarchy filter.
+
+    Score each surviving candidate by `1` per source at the current
+    tier; keep only those tied with the per-stage max. After the last
+    tier, the survivors are passed to DE refinement.
+    """
+    ev = _opt_run["evaluator"]
+    pri = _opt_run["priorities"]
+    grid_res = _opt_run["grid_result"]
+    pool = _opt_run["hier_pool"]
+    tiers = _opt_run["hier_tiers"]
+    t_idx = _opt_run["hier_tier_idx"]
+
+    if t_idx >= len(tiers) or not pool:
+        # Filter done → DE refinement on the surviving pool.
+        n_top = min(_opt_run["n_top"], len(pool))
+        # Build a "fake" grid_result from the pool ordering so the
+        # existing DE machinery can reuse its array layout.
+        pool_arr = np.asarray(pool, dtype=int)
+        _opt_run["grid_result"] = {
+            "score": np.asarray(
+                [_opt_run["hier_scores"].get((i, 0), 0.0) for i in pool],
+                dtype=float,
+            ),
+            "ra": grid_res["ra"][pool_arr],
+            "dec": grid_res["dec"][pool_arr],
+            "pa": grid_res["pa"][pool_arr],
+        }
+        _opt_run["phase"] = "de"
+        _opt_run["de_idx"] = 0
+        _opt_run["de_total"] = n_top
+        _opt_run["de_scores"] = []
+        _opt_run["de_params"] = []
+        # For DE refinement: bias weights toward the highest tier so
+        # the local search doesn't drift onto a lower-priority hill.
+        if tiers:
+            top_tier = tiers[0]
+            tier_weights = np.where(pri == top_tier, 1.0, 0.0)
+            # If the top tier has zero sources at this pointing, fall
+            # back to uniform weights (Democracy-style local search).
+            if tier_weights.sum() == 0:
+                tier_weights = np.ones_like(pri)
+            _opt_run["weights"] = tier_weights
+        curdoc().add_next_tick_callback(_opt_drive)
+        return
+
+    tier = tiers[t_idx]
+    tier_mask = (pri == tier)
+    new_pool: list[int] = []
+    scores_this_tier: list[float] = []
+    for k in pool:
+        ra_k = float(grid_res["ra"][k])
+        dec_k = float(grid_res["dec"][k])
+        pa_k = float(grid_res["pa"][k])
+        det, _tp, _ = ev.evaluate(ra_k, dec_k, pa_k)
+        s = float(np.sum(det[tier_mask])) if tier_mask.any() else 0.0
+        _opt_run["hier_scores"][(k, t_idx)] = s
+        scores_this_tier.append(s)
+    # Keep only candidates that tie the per-stage max.
+    if scores_this_tier:
+        best = max(scores_this_tier)
+        for k, s in zip(pool, scores_this_tier):
+            if s >= best - 1e-9:
+                new_pool.append(k)
+    _opt_run["hier_pool"] = new_pool
+    _opt_run["hier_tier_idx"] = t_idx + 1
+
+    frac = 0.85 + 0.10 * ((t_idx + 1) / max(1, len(tiers)))
+    elapsed = _now() - _opt_run["started"]
+    _opt_update_progress(
+        f"Hierarchy filter: tier {t_idx + 1} / {len(tiers)} "
+        f"(p={tier:g}) — survivors: {len(new_pool)} · "
+        f"{elapsed:.1f}s elapsed",
+        frac,
+    )
+    curdoc().add_next_tick_callback(_opt_drive)
+
+
+def _opt_de_step() -> None:
+    """Refine one (or a few) top grid candidates via DE."""
+    from app.optimizer import refine_top
+    de_idx = _opt_run["de_idx"]
+    de_total = _opt_run["de_total"]
+    if de_idx >= de_total:
+        # Already done — final ranking + dedup pass via refine_top's
+        # internal sort/dedup. Stitch our per-candidate refinements
+        # into a fake grid_results and re-feed (no extra work — DE box
+        # is zero so it terminates instantly).
+        refined = {
+            "score": np.asarray(_opt_run["de_scores"]),
+            "ra": np.asarray([p[0] for p in _opt_run["de_params"]]),
+            "dec": np.asarray([p[1] for p in _opt_run["de_params"]]),
+            "pa": np.asarray([p[2] for p in _opt_run["de_params"]]),
+        }
+        order = np.argsort(-refined["score"])
+        for k in ("score", "ra", "dec", "pa"):
+            refined[k] = refined[k][order]
+
+        # Manual dedup using same tolerances as refine_top default.
+        ra_tol = 0.3 / 3600.0 / np.cos(np.deg2rad(_opt_run["dec_ref"]))
+        dec_tol = 0.3 / 3600.0
+        pa_tol = 0.05
+        keep: list[int] = []
+        for i in range(len(refined["score"])):
+            dup = False
+            for j in keep:
+                if (abs(refined["ra"][i] - refined["ra"][j]) <= ra_tol
+                        and abs(refined["dec"][i] - refined["dec"][j]) <= dec_tol
+                        and abs(((refined["pa"][i] - refined["pa"][j]
+                                 + 180) % 360) - 180) <= pa_tol):
+                    dup = True
+                    break
+            if not dup:
+                keep.append(i)
+        refined = {k: refined[k][keep] for k in ("score", "ra", "dec", "pa")}
+
+        _opt_render_results_in_modal(
+            refined,
+            _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
+            _opt_run["n_sources"],
+        )
+        _set_status(
+            f"Optimization complete: best score "
+            f"{refined['score'][0]:.1f} of {_opt_run['n_sources']} sources.",
+            "ok", clear_after=10,
+        )
+        _opt_run["phase"] = "done"
+        return
+
+    # Refine one candidate. Re-uses optimizer.refine_top with n_top=1
+    # so we get the same dedup-aware bound-aware logic for free.
+    grid_res = _opt_run["grid_result"]
+    single = {
+        "score": grid_res["score"][de_idx:de_idx + 1],
+        "ra": grid_res["ra"][de_idx:de_idx + 1],
+        "dec": grid_res["dec"][de_idx:de_idx + 1],
+        "pa": grid_res["pa"][de_idx:de_idx + 1],
+    }
+    refined = refine_top(
+        _opt_run["evaluator"], single,
+        n_top=1,
+        dra_arcsec=_opt_run["de_dra_arcsec"],
+        ddec_arcsec=_opt_run["de_ddec_arcsec"],
+        dpa_deg=_opt_run["de_dpa_deg"],
+        maxiter=_opt_run["maxiter"],
+        weights=_opt_run["weights"], objective=_opt_run["objective"],
+    )
+    _opt_run["de_scores"].append(float(refined["score"][0]))
+    _opt_run["de_params"].append((
+        float(refined["ra"][0]),
+        float(refined["dec"][0]),
+        float(refined["pa"][0]),
+    ))
+    _opt_run["de_idx"] = de_idx + 1
+
+    elapsed = _now() - _opt_run["started"]
+    frac = 0.85 + 0.15 * ((de_idx + 1) / max(1, de_total))
+    _opt_update_progress(
+        f"Refining top {de_total}: {de_idx + 1} / {de_total} · "
+        f"{elapsed:.1f}s elapsed",
+        frac,
+    )
+    curdoc().add_next_tick_callback(_opt_drive)
+
+
+def _now() -> float:
+    """Wall-clock seconds since epoch (relative wall-time is fine)."""
+    import time as _time
+    return _time.time()
+
+
+def on_optimize():
+    """Validate inputs and start the chunked optimization run.
+
+    All work happens via `_opt_drive` ticks so the IO loop keeps
+    rendering — the user sees the progress bar advance instead of
+    a frozen UI."""
+    cat = state.get("catalog")
+    if cat is None or len(cat.ra_deg) == 0:
+        _set_status("Load a catalog first.", "warn")
+        return
+
+    try:
+        d_ra = float(opt_dra_input.value)
+        d_dec = float(opt_ddec_input.value)
+        d_pa = float(opt_dpa_input.value)
+        n_top = int(float(opt_n_top_input.value))
+    except (TypeError, ValueError):
+        _set_status("Optimizer: ΔRA/ΔDec/ΔPA/N must be numeric.", "err")
+        return
+    try:
+        n_ra = int(float(opt_grid_n_ra_input.value))
+        n_dec = int(float(opt_grid_n_dec_input.value))
+        n_pa = int(float(opt_grid_n_pa_input.value))
+        maxiter = int(float(opt_de_maxiter_input.value))
+        sigma = float(opt_sigma_input.value)
+    except (TypeError, ValueError):
+        _set_status("Optimizer: advanced numeric inputs invalid.", "err")
+        return
+
+    centration = opt_centration_select.value
+    objective = opt_objective_select.value
+    method = opt_method_select.value or "Democracy"
+
+    ra0 = float(state.get("ra_deg") or 0.0)
+    dec0 = float(state.get("dec_deg") or 0.0)
+    pa0 = float(state.get("pa_v3") or 0.0)
+
+    # Filter catalog by priority cutoff if set.
+    ra_arr = np.asarray(cat.ra_deg, dtype=float)
+    dec_arr = np.asarray(cat.dec_deg, dtype=float)
+    pri = np.asarray(cat.priority, dtype=float)
+    # Source IDs as strings, parallel to ra_arr. Used at Apply time
+    # to tag each opened slitlet with the right catalog-source ID.
+    ids_arr = np.asarray([str(v) for v in np.asarray(cat.ids).tolist()],
+                         dtype=object)
+    weight_arr_full = np.asarray(getattr(cat, "weight", []), dtype=float)
+    if weight_arr_full.size != len(ra_arr):
+        weight_arr_full = np.full(len(ra_arr), np.nan, dtype=float)
+    pri_cut_text = (opt_priority_input.value or "").strip()
+    keep = None
+    if pri_cut_text:
+        try:
+            cutoff = float(pri_cut_text)
+            keep = np.where(np.isnan(pri), False, pri <= cutoff)
+            if int(keep.sum()) == 0:
+                _set_status(
+                    f"Priority cutoff ≤ {cutoff} excludes every source.",
+                    "err",
+                )
+                return
+            ra_arr = ra_arr[keep]
+            dec_arr = dec_arr[keep]
+            pri = pri[keep]
+            ids_arr = ids_arr[keep]
+            weight_arr_full = weight_arr_full[keep]
+        except ValueError:
+            _set_status("Priority cutoff must be numeric.", "err")
+            return
+
+    # --- Method-specific weight array + validation ---
+    # Democracy: every source counts 1, NaN-priority sources still in.
+    # Meritocracy: weight column required; NaN → 0 (silent skip).
+    # Hierarchy: priority column required; multi-stage filter built later.
+    if method == "Meritocracy":
+        if not np.isfinite(weight_arr_full).any():
+            _set_status(
+                "Meritocracy needs a Weight column. Use the catalog "
+                "editor to add weights (or `Compute w from p`).", "err",
+            )
+            return
+        weights = np.where(np.isfinite(weight_arr_full),
+                           weight_arr_full, 0.0)
+    elif method == "Hierarchy":
+        if not np.isfinite(pri).any():
+            _set_status(
+                "Hierarchy needs a Priority column. Use the catalog "
+                "editor to fill priorities.", "err",
+            )
+            return
+        # Grid phase uses uniform weights so we cover candidates that
+        # serve any tier; the multi-stage filter applies the lex order.
+        weights = np.ones_like(ra_arr)
+    else:  # Democracy
+        weights = np.ones_like(ra_arr)
+
+    flux_arr = None
+    if objective == "flux":
+        mag = np.asarray(cat.mag, dtype=float)
+        if keep is not None:
+            mag = mag[keep]
+        flux_arr = np.where(np.isfinite(mag),
+                            10.0 ** (-0.4 * mag), 1.0)
+
+    # Honour ΔX=0 as "freeze that axis" — same convention as the
+    # underlying optimizer module.
+    if d_ra <= 0:
+        n_ra = 1
+    if d_dec <= 0:
+        n_dec = 1
+    if d_pa <= 0:
+        n_pa = 1
+    n_total = n_ra * n_dec * n_pa
+    n_sources = len(ra_arr)
+
+    # Build the (ra, dec, pa) cube.
+    cos_dec = max(np.cos(np.deg2rad(dec0)), 1e-3)
+    dra_deg = max(d_ra, 0.0) / 3600.0 / cos_dec
+    ddec_deg = max(d_dec, 0.0) / 3600.0
+    ras = ra0 + (np.array([0.0]) if n_ra == 1
+                 else np.linspace(-dra_deg, dra_deg, n_ra))
+    decs = dec0 + (np.array([0.0]) if n_dec == 1
+                   else np.linspace(-ddec_deg, ddec_deg, n_dec))
+    pas_grid = pa0 + (np.array([0.0]) if n_pa == 1
+                      else np.linspace(-d_pa, d_pa, n_pa))
+    R, D, P = np.meshgrid(ras, decs, pas_grid, indexing="ij")
+    ra_cube = R.ravel()
+    dec_cube = D.ravel()
+    pa_cube = P.ravel()
+
+    # Build the evaluator now so the heavy CloughTocher Delaunay step
+    # happens before we show the modal — the user sees the bar start
+    # at 0 % and advance, instead of staring at a frozen 0 % for 2 s.
+    from app.optimizer import PointingEvaluator
+    _set_status(
+        "Building MSA inverse map (first time only)…",
+        "info", clear_after=0,
+    )
+    ev = PointingEvaluator(
+        ra_arr, dec_arr, flux_sources=flux_arr,
+        sigma_arcsec=sigma, centration=centration,
+        slit_length=int(state.get("slitlet_height", 3)),
+        # Operability is loaded fresh by PointingEvaluator from
+        # `app/msa.load_operability()` — the same CRDS file the main
+        # canvas uses. No state-side caching to drift between them.
+    )
+
+    _opt_run.clear()
+    _opt_run.update({
+        "phase": "grid",
+        "method": method,
+        "evaluator": ev,
+        # Catalog IDs parallel to evaluator.ra/dec — used by
+        # `_apply_optimizer_result` to tag each opened slitlet with
+        # its catalog source ID.
+        "source_ids": ids_arr,
+        "ra_cube": ra_cube, "dec_cube": dec_cube, "pa_cube": pa_cube,
+        "grid_scores": np.zeros(n_total, dtype=float),
+        "grid_idx": 0,
+        "n_top": max(1, n_top),
+        "weights": weights, "objective": objective,
+        # Hierarchy needs the per-source priority array to compute
+        # tier indicator weights during the filter phase.
+        "priorities": pri,
+        "weight_arr": weight_arr_full,
+        "ra_ref": ra0, "dec_ref": dec0, "pa_ref": pa0,
+        "n_sources": n_sources,
+        "maxiter": maxiter,
+        "de_dra_arcsec": max(2.0, d_ra / 10.0) if d_ra > 0 else 0.0,
+        "de_ddec_arcsec": max(2.0, d_dec / 10.0) if d_dec > 0 else 0.0,
+        "de_dpa_deg": max(0.5, d_pa / 10.0) if d_pa > 0 else 0.0,
+        "started": _now(),
+    })
+
+    _opt_show_modal()
+    _opt_update_progress(
+        f"Grid: 0 / {n_total:,} pointings over {n_sources} sources…", 0.0,
+    )
+    _set_status(
+        f"Optimization started: {n_total:,} grid pointings × "
+        f"{n_sources} sources.", "info", clear_after=3,
+    )
+    curdoc().add_next_tick_callback(_opt_drive)
+
+
+def _on_modal_close() -> None:
+    """Close the modal mid-run or post-run. If a run is in progress
+    we clear state too so chunks stop firing."""
+    _opt_hide_modal()
+    if _opt_run.get("phase") in ("grid", "hierarchy", "de"):
+        _opt_run.clear()
+        _set_status("Optimization cancelled.", "warn", clear_after=6)
+
+
+opt_modal_close_btn.on_click(_on_modal_close)
+opt_run_btn.on_click(on_optimize)
+
+
+# ---------------------------------------------------------------------------
 # Wiring
 # ---------------------------------------------------------------------------
 
@@ -3476,7 +5281,7 @@ slitlet_select.on_change("value", on_slitlet_height)
 # Pick (instrument, layers, slitlet, filters, undo/clear) →
 # Save (session save/load, APT export).
 
-image_tab = TabPanel(title="Image", child=column(
+image_tab = TabPanel(title="Input", child=column(
     Div(text="<b>Image</b> — try an example:"),
     row(example_a370_btn, example_r0600_btn),
     Div(text="<small><b>or</b> a local FITS:</small>"),
@@ -3489,24 +5294,39 @@ image_tab = TabPanel(title="Image", child=column(
     row(catalog_path_input, catalog_browse_btn),
     row(catalog_add_btn),
     catalog_list_column,
+    catalog_edit_btn,
     catalog_priority_input,
     catalog_mag_input,
     width=SIDEBAR_W - 20,
 ))
 
-aim_tab = TabPanel(title="Aim", child=column(
+aim_tab = TabPanel(title="Pointing", child=column(
+    Div(text="<b>Disperser / Filter</b>"),
+    disperser_filter_select,
     Div(text="<b>Pointing center</b>"),
-    ra_input, dec_input,
+    row(ra_input, dec_input),
     Div(text="<b>Rotation</b>"),
-    v3pa_slider, v3pa_input, apa_input, pa_help_div,
+    v3pa_slider,
+    row(v3pa_input, apa_input),
+    pa_help_div,
     Div(text="<b>Visibility window</b>"),
-    visibility_date_input, visibility_btn, visibility_div,
+    row(visibility_date_input, visibility_btn),
+    visibility_div,
+    Div(text="<b>Optimize MSA pointing</b> "
+             "<small>(grid search + refine, hMPT-derived)</small>"),
+    opt_method_select,
+    opt_method_help_div,
+    row(opt_dra_input, opt_ddec_input),
+    row(opt_dpa_input, opt_n_top_input),
+    opt_centration_select,
+    opt_priority_input,
+    opt_advanced_btn,
+    opt_run_btn,
+    opt_status_div,
     width=SIDEBAR_W - 20,
 ))
 
-pick_tab = TabPanel(title="Pick", child=column(
-    Div(text="<b>Disperser / Filter</b>"),
-    disperser_filter_select,
+pick_tab = TabPanel(title="Setting", child=column(
     Div(text="<b>Layers</b>"),
     layers_box,
     Div(text="<b>Slitlet</b>"),
@@ -3560,10 +5380,15 @@ sidebar_tabs = Tabs(
 sidebar = column(
     loading_banner,
     sidebar_tabs,
-    status,
     width=SIDEBAR_W,
     height_policy="max",
-    styles={"overflow-y": "auto", "max-height": "100vh"},
+    styles={
+        "overflow-y": "auto",
+        # Leave room at the bottom for the position-fixed status bar
+        # (42 px tall) so the last widget in any tab isn't covered.
+        "max-height": "calc(100vh - 46px)",
+        "padding-bottom": "8px",
+    },
 )
 
 # Figure column: status bar on top (stretches to canvas width) and the
@@ -3578,14 +5403,138 @@ sidebar = column(
 figure_column = column(
     stats_div,
     fig,
-    sizing_mode="stretch_both",
+    # `stretch_width` so the column itself fills horizontal space in
+    # the root row (the figure inside is fixed-pixel; the column lets
+    # the stats_div span the full available width).
+    sizing_mode="stretch_width",
 )
 
 curdoc().add_root(row(
     sidebar, figure_column, help_panel,
     sizing_mode="stretch_both",
 ))
+# Optimizer modal — added as separate roots so the position:fixed
+# CSS isn't clipped by the parent row's flex layout.
+curdoc().add_root(opt_modal_backdrop)
+curdoc().add_root(opt_modal_card)
+curdoc().add_root(opt_advanced_modal_backdrop)
+curdoc().add_root(opt_advanced_modal_card)
+curdoc().add_root(cat_edit_modal_backdrop)
+curdoc().add_root(cat_edit_modal_card)
+# Status bar — separate root so its position:fixed style escapes the
+# sidebar's scrollable container. Lives at the bottom-left of the
+# viewport, under the sidebar.
+curdoc().add_root(status)
 curdoc().title = "vMPT — visual MSA Planning Tool"
+
+
+# ── CLI auto-load ─────────────────────────────────────────────────────
+# Args forwarded by `run.sh --args ...` arrive in sys.argv. We pre-fill
+# the relevant path inputs; the existing on_change handlers do the
+# actual loading. Loads are deferred to the next IO tick so the
+# document is fully wired before we trigger heavy work.
+def _parse_startup_args(argv: list[str]) -> dict:
+    """Tolerant parser for `--fits`, `--jpg`, `--wcs`, `--catalog` (repeatable).
+
+    Unknown args are silently ignored — Bokeh prefixes some of its own
+    flags before --args and we don't want to throw on them."""
+    out: dict = {"fits": None, "jpg": None, "wcs": None, "catalogs": []}
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a in ("--fits", "--jpg", "--wcs") and i + 1 < len(argv):
+            out[a[2:]] = argv[i + 1]
+            i += 2
+        elif a == "--catalog" and i + 1 < len(argv):
+            out["catalogs"].append(argv[i + 1])
+            i += 2
+        else:
+            i += 1
+    return out
+
+
+def _autoload_from_args() -> None:
+    """Sequence the path-loads the user asked for via run.sh.
+
+    Loads must run one at a time: a catalog overlay needs the image's
+    WCS to project source positions to pixels. If they fire in the
+    same tick the canvas aspect ratio comes out wrong because the
+    catalog refresh races the image-set-and-recenter handler. Each
+    loader now accepts an `on_complete` callback we chain through.
+    """
+    args = _parse_startup_args(list(sys.argv[1:]))
+
+    # Build an explicit step queue. Each step receives the next-step
+    # callback so it can chain after its load finishes.
+    steps: list = []
+
+    if args["fits"]:
+        fits_path = args["fits"]
+        def step_fits(cb, p=fits_path):
+            if not Path(p).exists():
+                _set_status(f"--fits path not found: {p}", "err")
+                cb()
+                return
+            # Set the input AND mirror the value through the loader
+            # directly with `on_complete` so we can chain. Setting the
+            # TextInput also fires `on_fits_path` which kicks off its
+            # own _deferred load; that's redundant but harmless (the
+            # second load is a no-op since state["image"] is already
+            # set, but we suppress that race by NOT calling on_fits_path
+            # — set the value silently is fine because we own this codepath).
+            fits_path_input.value = p
+            _show_loading(f"Loading FITS: {Path(p).name}…")
+            _deferred(_load_fits_from_path, p, on_complete=cb)
+        steps.append(step_fits)
+    elif args["jpg"] and args["wcs"]:
+        jpg_path = args["jpg"]
+        wcs_path = args["wcs"]
+        def step_jpg(cb, j=jpg_path, w=wcs_path):
+            if not Path(j).exists() or not Path(w).exists():
+                missing = j if not Path(j).exists() else w
+                _set_status(f"--jpg/--wcs path not found: {missing}", "err")
+                cb()
+                return
+            # Surface the paths in the inputs (mostly cosmetic; saves
+            # the user from re-typing if they want to reload).
+            sidecar_path_input.value = w
+            jpg_path_input.value = j
+            _show_loading(f"Loading JPG + WCS sidecar…")
+            _deferred(_load_jpg_pair_from_paths, j, w, on_complete=cb)
+        steps.append(step_jpg)
+
+    for cat_path in args["catalogs"]:
+        def step_cat(cb, c=cat_path):
+            if not Path(c).exists():
+                _set_status(f"--catalog path not found: {c}", "err")
+                cb()
+                return
+            # Surface the FIRST catalog's path in the input box too —
+            # later ones don't, since the input only holds one path.
+            if not catalog_path_input.value:
+                catalog_path_input.value = c
+            _show_loading(f"Loading catalog: {Path(c).name}…")
+            _deferred(_load_catalog_from_path, c, on_complete=cb)
+        steps.append(step_cat)
+
+    # Chain runner — each step calls its `cb` (= run_next) in `finally`
+    # so the next step starts only after the previous one releases.
+    # `state["_autoload_active"]` muzzles the path-input on_change
+    # handlers while we're driving — otherwise a value-set would
+    # trigger its own _deferred load and race with our sequenced one.
+    def run_next():
+        if not steps:
+            state["_autoload_active"] = False
+            _set_status("Autoload complete.", "ok", clear_after=4)
+            return
+        steps.pop(0)(run_next)
+
+    if steps:
+        state["_autoload_active"] = True
+        run_next()
+
+
+curdoc().add_next_tick_callback(_autoload_from_args)
 
 
 # Rotate the tip card every 15 s. _render_tip carries its own @keyframes

@@ -4,6 +4,124 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.0] — 2026-06-02
+
+Headline feature: a complete **MSA pointing optimizer** with three
+methods (Democracy / Meritocracy / Hierarchy), plus an editable,
+sortable catalog editor. Several quality-of-life improvements
+elsewhere.
+
+### MSA pointing optimizer
+
+- New panel at the bottom of the **Pointing** tab. Searches over
+  (ΔRA, ΔDec, ΔPA) for an (RA, Dec, V3 PA) that maximises a
+  user-selectable objective. Re-implemented in vMPT style from
+  [hMPT](https://github.com/zihaowu-astro/hMPT) (Eisenstein, McCarty,
+  Wu; CfA / Harvard); see `app/optimizer.py` for attribution +
+  algorithm notes.
+- **Three methods**:
+  - **Democracy** — raw source count; ignores priority and weight.
+  - **Meritocracy** — sum of `weight` of placed sources (MPT-style).
+    Requires a populated weight column.
+  - **Hierarchy** — strict priority-tier lex ordering (eMPT-style).
+    Multi-stage filter: a higher-priority source is never traded for
+    any number of lower-priority sources.
+- **Pop-up modal** with an animated striped progress bar, a spinning
+  ring, and a status line showing the current phase
+  (`Grid: 5,200 / 20,000 · 4.2s elapsed · ~12s left`,
+  `Hierarchy filter: tier 2 / 4 (p=1) — survivors: 18`,
+  `Refining top 10: 3 / 10 · 7.4s elapsed`).
+- **Results table** with the top-10 distinct solutions (near-
+  duplicates collapsed). Each row pairs score + (ΔRA, ΔDec, ΔPA)
+  with an **Apply #N** button.
+- **Apply #N** sets the pointing AND opens an N-shutter slitlet
+  (N from the Setting tab) at every observable target's shutter,
+  auto-tagged with the catalog source ID. One Undo step reverts
+  the whole apply.
+- **ΔX = 0 freezes the axis** — set ΔPA = 0 to search RA/Dec only
+  at the current roll, etc. Both the grid sweep and the DE
+  refinement honour the freeze.
+- **Advanced settings…** modal exposes grid resolution (n_RA, n_Dec,
+  n_PA), DE max iterations, objective (count/flux), source σ, and
+  the APT DVA θ.
+
+### Catalog editor
+
+- New **Edit catalog…** button in the Input tab opens a sortable,
+  in-cell-editable spreadsheet pop-up.
+  - Single-click any cell to edit. Tab / Enter commits; Esc cancels.
+  - Drag inside a cell to highlight text; Cmd/Ctrl-C / Cmd/Ctrl-V
+    copy / paste — a custom capture-phase keydown handler bypasses
+    SlickGrid's column-copy default so only the selected text is
+    copied.
+  - 🗑️ icon at the end of each row deletes that row.
+  - ↶ Undo / ↷ Redo for every edit, delete, derivation, and
+    column add (100-step history).
+- **Column picker** — toggle which columns are visible. Extras
+  columns from the source CSV/FITS (the loader now preserves every
+  column it didn't claim) live alongside the standard set and can
+  be turned on or off.
+- **Add a custom column** via a text input + button. Empty by
+  default; useful for `weight`, `reference`, etc. Round-trips
+  through Apply changes and Save as CSV.
+- **Compute w from p** and **Compute p from w** buttons derive
+  one column from the other:
+  - `w(lowest p) = 1`; for each higher-priority class, the smallest
+    integer `w(p)` satisfying `w(p) > w(p+1)` AND
+    `N(p) * w(p) > N(p+1) * w(p+1)`. Guarantees strict-dominance:
+    one source at any tier outweighs every source at all lower
+    tiers combined.
+  - `p` from `w` groups unique weights descending and assigns
+    priorities 1, 2, 3, …
+- **Save as CSV** with a Browse… file picker.
+- **Apply changes & close** commits the working copy to the
+  in-memory catalog so the eMPT bundle export reflects edits.
+
+### Catalog model
+
+- `Catalog.weight` is now a first-class field (sibling of
+  `priority`). Loader detects `weight` / `w` / `wt` / `weights`
+  aliases. Empty cells in numeric columns properly become NaN
+  (previously masked integer columns silently became 0).
+- Extras columns the loader didn't claim are preserved on the
+  `Catalog.extras` dict (object arrays, original column name as
+  key) and surfaced through the editor's column picker.
+
+### UI polish
+
+- **`run.sh`** gained `--port N`, `--fits PATH`, `--jpg PATH`,
+  `--wcs PATH`, `--catalog PATH` (repeatable) flags. Mutual-
+  exclusion rules: `--jpg` and `--wcs` come as a pair; `--fits` is
+  exclusive with them.
+- **Tabs renamed**: Image → Input, Aim → Pointing, Pick → Setting.
+- **Pointing tab** now also hosts Disperser/Filter (was on the
+  former Pick tab). RA/Dec inputs share a row; V3 PA/APA share a
+  row; Visibility date + button share a row.
+- **Canvas pixel aspect locked** — `frame_width` / `frame_height`
+  match the loaded image's pixel W:H exactly. Window resizes
+  letterbox around the canvas; the image is never stretched.
+- **Sequenced autoload**: `run.sh --jpg ... --wcs ... --catalog ...`
+  loads the image first and the catalogs strictly after, via an
+  `on_complete` callback chain so the catalog overlay never races
+  the image's `_set_image_and_recenter`.
+- **Status bar** moved out of the scrollable sidebar column and
+  pinned to the bottom-left of the viewport (position:fixed) so
+  it can't render on top of tab content.
+- **Optimizer Advanced settings** moved into a pop-up modal.
+- **6 new tips** in the help-panel carousel — `run.sh` args,
+  optimizer, catalog editor, multi-catalog, pixel aspect, big-ID
+  mod.
+
+### Tests
+
+- 124 passing (was 96 at v1.0.1). New coverage: catalog `weight`
+  column, mod-1e7 + empty-cell NaN handling, optimizer correctness
+  (radec→Axy, quadrant inverse, centration monotonicity,
+  Hierarchy-vs-Democracy divergence, dΔ=0 freezes, dedup), the two
+  weight↔priority compute helpers in `app/catalog_ops.py`.
+
+[1.1.0]: https://github.com/fengwusun/vMPT/releases/tag/v1.1.0
+
 ## [1.0.1] — 2026-05-21
 
 Patch release. Two large quality-of-life corrections — accurate

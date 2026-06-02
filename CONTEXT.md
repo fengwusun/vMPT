@@ -36,7 +36,8 @@ app/
 ├── main.py            Bokeh server entry; UI wiring; refresh_overlays
 ├── coords.py          V2/V3 ↔ RA/Dec transforms (pysiaf-backed)
 ├── msa.py             MSA shutter grid + CRDS operability loader
-├── wavelengths.py     Per-grating dispersion model + cutoffs
+├── wavelengths.py     Per-shutter dispersion model + lookup table
+├── optimizer.py       MSA pointing optimizer (hMPT-derived, see docstring)
 ├── image_io.py        FITS + JPG-with-sidecar loaders (LoadedImage)
 ├── catalog.py         Catalog reader → Catalog dataclass
 ├── empt_io.py         eMPT-format writers + MPT-importable .cat writer
@@ -46,13 +47,31 @@ app/
 └── templates/index.html  Injects favicon via data URI
 
 data/
-└── nirspec_msa_v2v3.npz   (4 × 171 × 365) shutter V2/V3 arcsec
+├── nirspec_msa_v2v3.npz   (4 × 171 × 365) shutter V2/V3 arcsec
+└── dispersion_cutoffs.npz per-shutter wavelength bounds (all 9 disperser
+                           × filter combos; built from msaviz)
 
-tests/                 pytest suite (60+ tests; ~7 s)
+scripts/
+└── precompute_dispersion_cutoffs.py  (re-)generates dispersion_cutoffs.npz
+
+tests/                 pytest suite (110+ tests; ~10 s)
 example_a370/          Abell 370 FITS (44 MB)
 example_r0600/         RXCJ0600 JPG + sidecar (240 MB)
 exports/               default output dir
 ```
+
+### Sidebar tabs (current names)
+
+- **Input** — image + catalog loading (FITS, JPG+sidecar, multi-catalog).
+- **Pointing** — RA/Dec, V3 PA, disperser/filter, visibility window,
+  pointing-optimizer panel.
+- **Setting** — layers toggle, slitlet size, snap-to-operable, overlay
+  appearance picker, undo/clear.
+- **MPT** — import APT plans, session save/load, export eMPT bundle.
+
+Older tab names (`Image / Aim / Pick`) were renamed in the May 2026
+UI pass. Comments still using the old names should be updated when
+touched.
 
 ---
 
@@ -144,6 +163,17 @@ even if the user hasn't opened them.
 | `history` | Undo stack (capped at 50 snapshots of `open_shutters`). |
 | `shutter_to_catids` | `dict[(q, s, d) → [source_id, …]]` — catalog sources whose footprint lands in each shutter. Rebuilt on pointing / PA / catalog change. |
 | `snap_to_operable` | When a target click misses, snap to the nearest operable shutter. |
+| `catalog_alphas` | Per-source line_alpha (decayed by z-depth in the catalog stack so earlier-loaded catalogs read more strongly than later ones). |
+| `_autoload_active` | Guard flag set while `_autoload_from_args` is driving sequenced loads from `run.sh` args. The path-input on_change handlers no-op while it's True so they don't double-trigger loads. |
+
+Two module-local dicts hold transient work:
+
+- `_opt_run` (in `main.py`) — in-flight optimizer state machine for
+  the chunked grid + DE driver. Cleared on Close / when the run
+  finishes / on a fresh run.
+- `_inverse_cache` (in `app/optimizer.py`) — per-quadrant
+  CloughTocher2D interpolators (Axy → fractional shutter indices).
+  Lazy-built on first use (~2 s for the Delaunay triangulations).
 
 ---
 
@@ -452,6 +482,161 @@ NOT depend on msaviz at runtime — only the precompute does.
 
 ---
 
+## MSA pointing optimizer (`app/optimizer.py`)
+
+Searches for an (RA, Dec, V3 PA) that maximises the count — or
+weighted flux — of catalog sources placed in operable, well-centred
+MSA shutters. Re-implemented in vMPT style from
+[**hMPT**](https://github.com/zihaowu-astro/hMPT) (Eisenstein,
+McCarty, Wu; CfA/Harvard), itself derived from ESA's eMPT
+(Bonaventura et al. 2023). Credit in the module docstring.
+
+### Algorithm
+
+1. **`radec_to_axy`** — vectorised gnomonic projection of source
+   (RA, Dec) → MSA aperture plane (ax, ay) in arcsec. Includes the
+   APT DVA correction (parameter `theta_deg`, default 90 = no shift)
+   and the PA + intra-MSA rotation.
+2. **`axy_to_shutter`** — per-quadrant `scipy.interpolate.
+   CloughTocher2DInterpolator` maps (ax, ay) → fractional shutter
+   indices `(quad, s_frac, d_frac)`. Built lazily on first call
+   (Delaunay triangulation over ~62 k points per quadrant, ~2-3 s
+   one-time). Cached at module level via `_inverse_cache`.
+3. **`PointingEvaluator.evaluate`** — combines the above with the
+   CRDS operability mask (incl. configurable 3-shutter vertical
+   slit), an APT-style centration buffer (`CENTRATION_BUFFERS` dict
+   — UNCONSTRAINED → TIGHTLY_CONSTRAINED), and a Gaussian-PSF
+   throughput integral through the 0.27″×0.53″ aperture.
+4. **`grid_search`** — brute force over a (ΔRA, ΔDec, ΔPA) cube.
+   `ΔX = 0` freezes that axis (`n_X` forced to 1; the central
+   value is the only sample). Returns the top-ranked candidates.
+5. **`refine_top`** — `scipy.optimize.differential_evolution`
+   polish of the top-N grid candidates inside a small bound box.
+   When ΔX = 0 the corresponding variable is dropped from the
+   DE problem (scipy can't take zero-width bounds). After
+   refinement the list is sorted then **de-duplicated** within
+   tolerance (default 0.3″ in RA / Dec, 0.05° in PA) so the user
+   doesn't see N copies of the same pointing when the score
+   landscape has a plateau.
+
+### Method (Democracy / Meritocracy / Hierarchy)
+
+The **Method** dropdown determines how source counts are weighted:
+
+- **Democracy** — uniform weight (1) per source. Maximises count.
+  Works with any catalog.
+- **Meritocracy** — weights = `Catalog.weight` (NaN → 0). Maximises
+  the sum of weights of placed sources. Requires a populated weight
+  column.
+- **Hierarchy** — strict priority-tier lex ordering. Requires a
+  populated priority column. Multi-stage:
+  1. Grid search with uniform weights (Democracy-style score)
+     gives a candidate pool of up to K = 100 pointings.
+  2. For each priority tier (ascending priority value = descending
+     importance), re-evaluate every surviving candidate with
+     `weights = 𝟙(priority == tier)` and keep only those tied with
+     the per-tier max. Single tick per tier; fast.
+  3. DE-refine the surviving pool with top-tier weights.
+
+  Same result as constructing a single "huge multiplier per tier"
+  weights vector, but explicit multi-stage filtering makes the
+  intermediate counts inspectable in the progress modal.
+
+Sources with NaN in the required column contribute weight 0 — they're
+visible on the canvas but invisible to that mode's optimizer.
+
+### Catalog editor (`app/catalog_ops.py`)
+
+The editor's **Compute w from p** and **Compute p from w** buttons
+call `compute_weights_from_priorities` / `compute_priorities_from_weights`
+from a separate module (`app/catalog_ops.py`) so the formulas can be
+unit-tested without importing Bokeh.
+
+The w-from-p formula iterates from the LOWEST priority class
+(largest p) upward:
+- `w(lowest_p) = 1`
+- For each higher class p, find the smallest integer `w(p)` such that
+  `w(p) > w(p+1)` and `N(p) * w(p) > N(p+1) * w(p+1)`.
+
+This guarantees that one source at any priority tier strictly
+outweighs every source at all lower tiers COMBINED — i.e. equivalent
+to lex ordering. The multi-stage Hierarchy filter achieves the same
+behaviour without needing huge integers.
+
+### Driver in main.py (`_opt_drive`)
+
+The UI runs the grid + DE asynchronously as a state machine so the
+Bokeh IO loop can keep rendering. Phases:
+
+- `phase = "grid"`: process `_OPT_GRID_CHUNK = 400` pointings per
+  tick (~0.5 s), then re-schedule via `curdoc().add_next_tick_callback`.
+  Progress fraction 0 → 0.85 of the bar.
+- `phase = "hierarchy"`: ONLY for the Hierarchy method. Multi-stage
+  tier filter, one tier per tick (cheap — ~ms per tier). Progress
+  0.85 → ~0.95 (sub-step proportional to tier index).
+- `phase = "de"`: one DE refinement per tick. Progress remaining → 1.0.
+- `phase = "done"`: results rendered in the pop-up modal.
+
+### Modal UI
+
+Two-state pop-up (`opt_modal_card`, with `opt_modal_backdrop`):
+
+1. **Progress** — spinning ring + status line + animated striped
+   progress bar. The bar uses a CSS custom property
+   (`--vmpt-pct`) on the wrapper Div so width updates don't
+   replace the inner DOM — the stripe / glow animations keep
+   running uninterrupted across the dozens of progress updates.
+2. **Results** — top-10 distinct solutions as a Bokeh column of
+   `row(rank, score, ΔRA, ΔDec, ΔPA, Apply_btn)`. Each Apply
+   button sets RA/Dec/V3 PA via `_apply_optimizer_result` and
+   closes the modal. **Picks are NOT auto-placed** — the user
+   chooses how to fill shutters.
+
+Advanced settings (grid resolution, DE max-iter, objective, σ, θ)
+live in a separate pop-up (`opt_advanced_modal_card`) opened by
+the "Advanced settings…" button in the Pointing tab. The widgets
+retain their values regardless of modal visibility; the optimizer
+reads them when Run is clicked.
+
+### Performance
+
+For a typical run (~500 sources, 20³ = 8 000 grid pointings, top-10
+DE refinement) total wall time is **~5–15 s** depending on machine.
+Grid dominates; per-pointing eval is ~1 ms after the
+CloughTocher2D triangulation is cached.
+
+---
+
+## CLI auto-load (`run.sh --args`)
+
+`run.sh` forwards `--port`, `--fits`, `--jpg`, `--wcs`,
+`--catalog` (repeatable) via Bokeh's `--args`. Inside main.py,
+`_autoload_from_args` parses `sys.argv`, builds a **sequenced
+queue** of (image → catalogs) loaders, and invokes them via an
+explicit on_complete chain — each loader's `finally` block
+schedules the next step on the next tick.
+
+Sequencing is critical: the catalog overlay's pixel positions
+come from the image WCS, so running the catalog load in the same
+tick as the image load races against `_set_image_and_recenter`
+and breaks the canvas aspect. The guard flag
+`state["_autoload_active"]` muzzles the on_change handlers on
+the path-input widgets while autoload drives them directly, so
+each input value-set doesn't fire its own redundant load.
+
+### 1:1 pixel aspect lock
+
+The figure uses `frame_width` + `frame_height` (the inner canvas
+frame's pixel dimensions) — NOT `sizing_mode` + `aspect_ratio`.
+`refresh_image_glyph` sets `frame_width` / `frame_height` to
+match the image's W:H exactly, with the longer axis pinned to
+`FRAME_MAX = 800 px`. Window resizes change only the surrounding
+black space; the canvas itself never reflows. Earlier attempts
+with `stretch_both + match_aspect` and `scale_both + aspect_ratio`
+both ended up distorting the image during reflow.
+
+---
+
 ## Importing APT plans (MPT tab)
 
 `app/mpt_io.py`:
@@ -501,7 +686,7 @@ _hide_loading()` clause guarantees it disappears even on error.
 ## Tests
 
 ```
-pytest tests/    # 60+ tests, ~7 s
+pytest tests/    # 110+ tests, ~10 s
 ```
 
 Notable coverage:
@@ -513,8 +698,15 @@ Notable coverage:
 - `tests/test_empt_io.py` — eMPT shutter-mask byte compatibility,
   observed-targets formatting, MPT-catalog writer header/data.
 - `tests/test_end_to_end.py` — full bundle write + parse cycle.
-- `tests/test_wavelengths.py` — fiducial wavelengths match published
-  values, gap behaviour, clamping.
+- `tests/test_wavelengths.py` — per-shutter table values match
+  msaviz fiducial; gap_lo varies > 0.5 µm across MSA for PRISM;
+  Q3/Q4 PRISM shutters have no gap.
+- `tests/test_optimizer.py` — radec → axy + quadrant lookup
+  correctness, hMPT-published-example score range,
+  centration-class monotonicity, ΔX=0 freezes axes, refine_top
+  dedups, flux objective differs from count.
+- `tests/test_catalog.py` — loose column matching (RA[deg],
+  RAJ2000, DEJ2000, etc.), ID synth, mod-10⁷, name-as-numeric-ID.
 
 ---
 
@@ -557,6 +749,46 @@ Notable coverage:
   + missing `stats/errors/plannerSpecification` blocks. Fix: move
   vMPT-only data to a sidecar `vMPT_workspace.json`; fill all the
   nested null blocks with the reference shape.
+- **PRISM gap wrong everywhere except the central shutter**: the
+  old model held the NRS1/NRS2 gap at a fixed wavelength pair
+  (≈ 2.7–3.2 μm). msaviz integration showed the gap actually varies
+  by ±1.5 μm across the MSA because PRISM dispersion is non-linear.
+  Fix: precomputed per-shutter table at `data/dispersion_cutoffs.npz`
+  (built from msaviz; 9 disperser × filter combos).
+- **Canvas aspect distorted on window resize** in run.sh autoload
+  mode: `stretch_both` + `match_aspect=True` looked right standing
+  still but stretched the image when the user dragged the window
+  edges. Even `scale_both` + `aspect_ratio=W/H` wasn't reliable.
+  Fix: use `frame_width`/`frame_height` (inner canvas frame pixels)
+  pinned to the image's W:H exactly; no `sizing_mode` on the figure.
+  Window resizes change only the surrounding letterbox.
+- **Catalog overlay raced the image load** in run.sh autoload mode:
+  setting fits_path + catalog_path in the same tick fired both
+  loads in parallel, with the catalog's pixel-position computation
+  using stale WCS. Fix: each loader now takes `on_complete=cb`;
+  `_autoload_from_args` chains image → catalogs explicitly via
+  these callbacks. The `state["_autoload_active"]` guard muzzles
+  the path-input on_change handlers while autoload is driving.
+- **Optimizer Apply buttons drifted out of alignment with HTML
+  table rows**: separate "HTML table + Bokeh button column" pattern
+  accumulated 5 px of column-spacing per row in the buttons
+  column. Fix: build the table as `column(header_row, row(cell,
+  cell, cell, cell, cell, Apply_btn), ...)` with `spacing=0` —
+  one Bokeh row per result so the Apply button is a sibling of
+  its own cells.
+- **Progress-bar CSS animation restarted on every progress tick**:
+  Bokeh's `Div.text = ...` replaces innerHTML, which unmounts the
+  bar element and resets its `@keyframes`. Fix: bar HTML is set
+  once at construction; only the wrapper's `--vmpt-pct` CSS
+  custom property changes per tick (via `Div.styles`), which
+  Bokeh applies without touching innerHTML. The stripe + glow
+  animations now run continuously across the entire optimization.
+- **Optimizer top-10 list filled with identical solutions** when
+  ΔX = 0 was used: DE in a zero-width box returned the same
+  optimum from every starting point. Fix: `refine_top` drops the
+  frozen variable from the DE problem entirely, and dedups
+  near-identical results before returning (default tolerance:
+  0.3″ RA/Dec, 0.05° PA).
 
 ---
 
@@ -568,6 +800,11 @@ Notable coverage:
 - **JDox MPT Catalogs**: <https://jwst-docs.stsci.edu/jwst-near-infrared-spectrograph/nirspec-apt-templates/nirspec-multi-object-spectroscopy-apt-template/nirspec-mpt-catalogs>
 - **JDox JWST PA reference**: <https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/jwst-position-angles-ranges-and-offsets>
 - **STScI APT downloader**: `https://www.stsci.edu/jwst-program-info/download/jwst/apt/<program_id>/`
+- **hMPT** (optimizer algorithm): Eisenstein, McCarty, Wu (CfA),
+  [GitHub](https://github.com/zihaowu-astro/hMPT). vMPT
+  re-implements the algorithm; see `app/optimizer.py` docstring.
+- **msaviz** (per-shutter dispersion reference, used by precompute
+  script only): <https://github.com/spacetelescope/msaviz>.
 - **MSA operability** (CRDS): `jwst_nirspec_msaoper_*.json`
-- **Source of coordinate code**: `/Users/sunfengwu/jwst_cycle4/footprint_emerald.ipynb`
-  (cells around In[54], In[151], In[164], In[166], In[125]).
+- **Source of coordinate code**: an internal cycle-4 footprint
+  notebook (cells around In[54], In[151], In[164], In[166], In[125]).

@@ -95,7 +95,18 @@ The repo ships with two example fields you can load with one click.
    Browser opens at `http://localhost:5006/app`. If it doesn't, open
    that URL yourself.
 
-2. **Load an example** from the **Image** tab (left sidebar):
+   Optional flags pre-load files and pick a port:
+   ```bash
+   ./run.sh --port 5010                         # default is 5006
+   ./run.sh --fits path/to/image.fits
+   ./run.sh --jpg path/to/image.jpg --wcs path/to/wcs.fits
+   ./run.sh --catalog targets.csv               # repeat to stack
+   ./run.sh --port 5010 --fits img.fits --catalog a.csv --catalog b.csv
+   ```
+   `--jpg` and `--wcs` must come as a pair; `--fits` is mutually
+   exclusive with them.
+
+2. **Load an example** from the **Input** tab (left sidebar):
    - **"Load Abell 370 example"** — a 42 MB three-band FITS at
      `example_a370/a370_f182m_f200w_f210m.fits` (JWST/NIRCam F182M +
      F200W + F210M). Includes a target catalog and an APT MPT plan
@@ -108,19 +119,32 @@ The repo ships with two example fields you can load with one click.
    needed). A full-page spinner overlays the canvas during loads so
    you know the app is busy.
 
-3. **Aim the MSA** in the **Aim** tab:
+   Tabs in the left sidebar:
+   - **Input** — image + catalog loading.
+   - **Pointing** — RA/Dec/V3 PA, disperser/filter, visibility window,
+     and the MSA pointing optimizer.
+   - **Setting** — layers, slitlet size, snap-to-operable, overlay
+     appearance, undo/clear.
+   - **MPT** — import/export APT plans + session save/load.
+
+3. **Aim the MSA** in the **Pointing** tab:
    - The pointing center auto-fills to the image center (unless a
      plan was loaded first — in that case the plan's RA/Dec is kept).
    - Drag the **V3 PA** slider or type into the **APA** box. The
      spinner appears during recomputation.
+   - Pick a **disperser / filter** from the dropdown (e.g. PRISM /
+     CLEAR or G395H / F290LP). The wavelength endpoints + NRS1/NRS2
+     detector-gap on each open shutter come from a per-shutter table
+     pre-computed via msaviz (see *Wavelength accuracy* below).
    - Optional: enter a date and click **"Compute allowed V3 PA"** —
      queries `jwst_gtvt` and reports the valid V3 PA window for that
      date.
+   - Optional: **MSA pointing optimizer** at the bottom of the tab.
+     See the next section.
 
-4. **Pick shutters** in the **Pick** tab + on the image:
+4. **Pick shutters** in the **Setting** tab + on the image:
    - **Click on the image** → opens an **N-shutter slitlet** at the
-     nearest operable shutter. Choose N in the **N-shutter slitlet**
-     dropdown:
+     nearest operable shutter. Choose N in the **Slitlet** dropdown:
        - `N=1` → only the clicked shutter
        - `N=2` → click + one row lower (lower y on the detector)
        - `N=3` → centred 3-shutter slitlet (the standard for MOS)
@@ -148,6 +172,83 @@ The repo ships with two example fields you can load with one click.
 
 ---
 
+## MSA pointing optimizer
+
+Bottom of the **Pointing** tab. Searches for an (RA, Dec, V3 PA) that
+maximises the number — or weighted flux — of catalog sources placed in
+operable, well-centred MSA shutters.
+
+The algorithm is re-implemented in vMPT style from
+[**hMPT**](https://github.com/zihaowu-astro/hMPT) (Zihao Wu, Daniel Eisenstein,
+Samuel McCarty; CfA/Harvard), itself derived from ESA's
+eMPT. See `app/optimizer.py` for the module-level docstring with
+attribution + algorithm notes.
+
+### Method
+
+Three modes, picked from the **Method** dropdown:
+
+- **Democracy** — every source counts the same. Maximises the raw
+  number of sources placed. Works on any catalog, no extra columns
+  required. (This was the previous default behaviour.)
+- **Meritocracy** — sum of `weight` of placed sources. A weight-3
+  source equals 1.5 weight-2 sources; the optimizer freely trades
+  one for the other. Requires a populated `weight` column.
+- **Hierarchy** — strict priority tiers (eMPT-style). First maximises
+  the count of highest-priority (smallest `p`) sources placed; among
+  pointings that tie on that, maximises the next tier; and so on. A
+  higher-priority source is NEVER traded for any number of lower-
+  priority sources. Requires a populated `priority` column.
+
+The catalog editor's **Compute w from p** and **Compute p from w**
+buttons let you derive one column from the other so you can switch
+modes without re-annotating.
+
+### Inputs
+
+- **ΔRA / ΔDec / ΔPA** — search box around the current pointing.
+  Setting any of them to **0 freezes that axis** (e.g. ΔPA = 0 to
+  search only RA/Dec at the current roll).
+- **Refine top N** — how many of the best grid candidates get a
+  scipy `differential_evolution` polish.
+- **Source centering** — APT-style buffer (UNCONSTRAINED, ENTIRE_OPEN,
+  MIDPOINT, CONSTRAINED, TIGHTLY_CONSTRAINED).
+- **Priority cutoff ≤** — restrict the optimizer to catalog rows with
+  `priority ≤ X` (e.g. P0/P1 first; do fillers by hand later).
+- **Advanced settings…** — pop-up with: grid resolution (n_RA, n_Dec,
+  n_PA), DE max iterations, objective (`number` vs `flux`-weighted),
+  source σ (PSF size), APT DVA θ. The Method dropdown supersedes the
+  Objective for normal use; Objective stays for back-compat.
+
+### Running
+
+Click **Run optimization**. A pop-up appears with:
+
+1. **Live progress** — an animated striped bar + a spinning ring +
+   a text line:
+   `Grid: 5,200 / 20,000 pointings evaluated · 4.2s elapsed · ~12s left`.
+   For Democracy/Meritocracy, the bar covers 0 % → 85 % grid, 85 % →
+   100 % DE polish. For Hierarchy, the bar splits into Grid (0 →
+   75 %), tier-by-tier filtering (75 → 85 %), and DE polish (85 →
+   100 %); the text shows the current tier (e.g. "Hierarchy filter:
+   tier 2 / 4 (p=1) — survivors: 18").
+2. **Results table** — the top-10 distinct solutions (near-duplicates
+   are de-duplicated). Each row shows rank, score, and the
+   (ΔRA, ΔDec, ΔPA) offset from the search centre, paired with an
+   **Apply #N** button. Clicking Apply does two things:
+   - sets RA/Dec/V3 PA to that solution; AND
+   - opens an N-shutter slitlet (N from the **Setting → Slitlet**
+     dropdown; default 3) at every observable target's shutter,
+     auto-tagged with the source's catalog ID.
+
+   The whole apply is a single Undo step in the **Setting → Undo
+   last** history, so reverting goes back to your previous picks.
+
+A typical 20³ = 8 000 pointing grid + 10 DE refinements finishes in
+~5–15 seconds for a few hundred sources.
+
+---
+
 ## Color legend
 
 What each color means on the figure:
@@ -157,12 +258,12 @@ What each color means on the figure:
 | **Dodgerblue rectangles** | The four MSA quadrant outlines |
 | **Gold polygons** | The 5 NIRSpec fixed slits (always visible) |
 | **Lime cross** | Current pointing center (shift-click to move) |
-| **Silver-edge boxes** (α=0.2) | Operable, **unaffected**, ready-to-pick shutters (toggle "Show operable shutters" in Pick → Layers) |
+| **Silver-edge boxes** (α=0.2) | Operable, **unaffected**, ready-to-pick shutters (toggle "Show operable shutters" in Setting → Layers) |
 | **Dark-red thick outline** | Stuck-open shutter (always visible) |
 | **Red-filled (#ff8888)** | User-opened shutter |
 | **Cyan edge** | Highlighted shutter (double-click marker) |
-| **Orange fill** (α=0.10, stackable) | Spectral-conflict warning — operable shutters whose spectra would overlap on the detector with an open or stuck-open shutter's. Darker orange = multiple opens contribute. ±1 row from each dispersion source; cross-quadrant via NRS1 (Q1↔Q3) and NRS2 (Q2↔Q4) detector pairing. |
-| **Coloured circles** | Catalog targets — yellow by default, cycling through magenta / pale green / coral / lavender / sky-blue / white / salmon when multiple catalogs are loaded (toggle "Show catalog targets" in Pick → Layers; the colour matches the chip beside each catalog in the **Image** tab's catalog list) |
+| **Orange fill** (α=0.20, stackable) | Spectral-conflict warning — operable shutters whose spectra would overlap on the detector with an open or stuck-open shutter's. Darker orange = multiple opens contribute. ±1 row from each dispersion source; cross-quadrant via NRS1 (Q1↔Q3) and NRS2 (Q2↔Q4) detector pairing. |
+| **Coloured circles** | Catalog targets — yellow by default, cycling through magenta / pale green / coral / lavender / sky-blue / white / salmon when multiple catalogs are loaded (toggle "Show catalog targets" in Setting → Layers; the colour matches the chip beside each catalog in the **Input** tab's catalog list). Earlier-loaded catalogs draw on top of later ones; deeper layers fade slightly via line_alpha. |
 
 Failed-closed shutters are not drawn at all — they don't exist for
 the user's purposes.
@@ -173,9 +274,15 @@ the user's purposes.
 
 ### Image: FITS
 
-In the **Image** tab, paste the absolute path into "FITS path (local)"
+In the **Input** tab, paste the absolute path into "FITS path (local)"
 and hit Enter (or use the **Browse…** button). First HDU with image
 data is auto-selected; the WCS comes from that HDU's header.
+
+The figure has a fixed pixel aspect — the canvas is sized to the
+image's pixel W:H exactly, so 1 image pixel always renders as N×N
+screen pixels with N consistent in X and Y. Resizing the browser
+window doesn't distort the image; it only changes how much black
+space surrounds it.
 
 ### Image: JPG + sidecar FITS
 
@@ -193,7 +300,7 @@ on the longest edge and rescales the WCS accordingly.
 CSV, whitespace-ASCII, or FITS table. **Required**: an RA column and
 a Dec column. **Optional but used if present**: `priority`/`Pr`,
 `mag`/`mag_F444W`/`F444W_mag`, `z`/`zspec`/`zphot`, `label`/`name`.
-The **Pick** tab has compact text inputs to filter by priority class
+The **Input** tab has compact text inputs to filter by priority class
 or magnitude.
 
 #### Column-name matching is loose
@@ -223,12 +330,38 @@ in real catalogs.
 
 #### Multi-catalog
 
-Click **Add** in the Image tab to layer multiple catalogs at once.
+Click **Add** in the Input tab to layer multiple catalogs at once.
 Each loaded catalog gets a coloured chip in the catalog list — its
 markers on the canvas use the same colour, so it's clear which
 catalog a target came from. Per-row checkbox toggles visibility;
-**×** removes the catalog. Catalogs persist across sessions
-(workspace JSON records each path + enabled flag).
+**×** removes the catalog; **▲ / ▼** reorder the visual stack.
+Catalogs persist across sessions (workspace JSON records each path,
+enabled flag, and order).
+
+#### Edit catalog
+
+**Edit catalog…** in the Input tab opens a sortable spreadsheet
+modal. You can:
+
+- **Single-click any cell** to edit it in place. Tab/Enter commits;
+  Esc cancels. Empty cells are allowed (NaN). Drag inside a cell to
+  highlight text; Cmd/Ctrl-C copies the selected substring.
+- **Sort** by clicking a column header.
+- **Toggle which columns are visible** via the **Show columns** picker
+  — standard columns (ID, RA, Dec, Priority, Weight, Mag, z, Label)
+  plus any extras the loader preserved from the file.
+- **Add a custom column** (e.g. `reference` to mark reference stars).
+- **Compute w from p** / **Compute p from w** — derive one column
+  from the other. Weight increases with priority (smaller p →
+  larger w) so that any higher tier strictly outweighs the sum of
+  all lower tiers (`w(p) > w(p+1)` AND `N(p)·w(p) > N(p+1)·w(p+1)`).
+- **Delete a row** by clicking 🗑️ at the end.
+- **↶ Undo / ↷ Redo** every edit (cell change, row delete, column
+  derivation, custom column add).
+- **Save as CSV** writes a standalone copy (header preserves all
+  visible + invisible columns). **Apply changes & close** commits
+  edits back to the in-memory catalog so the eMPT bundle export
+  picks them up.
 
 #### Auto-tagging
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 from astropy.io import ascii as ioascii
@@ -35,6 +35,21 @@ class Catalog:
     z: np.ndarray
     label: np.ndarray
     source_path: str
+    # `weight` is a sibling of `priority`: float64 with NaN for missing.
+    # Used by the optimizer's Meritocracy mode (sum of placed weights),
+    # and by the Hierarchy mode internally to break ties within a
+    # priority tier.
+    weight: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=float)
+    )
+    # Original-column → values for every column the loader did NOT
+    # claim as one of the canonical fields above. Stored as object
+    # arrays so we don't lose mixed-type information (e.g., priority-
+    # class strings, free-text notes). The catalog editor exposes
+    # these via the column picker; we never mutate them algorithmically
+    # so they round-trip back into Save-as-CSV unchanged unless the
+    # user edits them.
+    extras: dict = field(default_factory=dict)
 
 
 # Lookup tables for the loose column-matcher (`_find_col`). Each
@@ -61,7 +76,8 @@ _DEC_KEYS = (
     # convention working.
     "de",
 )
-_PRI_KEYS = ("priority", "pr", "pri", "prio", "priorityclass", "weight")
+_PRI_KEYS = ("priority", "pr", "pri", "prio", "priorityclass")
+_WEIGHT_KEYS = ("weight", "w", "wt", "weights")
 _MAG_KEYS = (
     "mag", "magnitude", "f444wmag", "magf444w", "f356wmag", "magf356w",
     "f200wmag", "magf200w",
@@ -180,13 +196,19 @@ def _as_float(table: Table, name: str | None) -> np.ndarray:
     # Numeric column with astropy masks → fill masked entries with NaN.
     # (np.asarray on a MaskedArray drops the mask and exposes the
     # underlying buffer, which usually has 0 in the masked slots — not
-    # what we want for empty `mag` / `z` cells.)
-    if np.issubdtype(getattr(col, "dtype", np.dtype("O")), np.floating):
+    # what we want for empty `mag` / `z` cells.) Apply this for any
+    # numeric dtype, not just floats — empty cells in an int column
+    # also need NaN handling.
+    if np.issubdtype(getattr(col, "dtype", np.dtype("O")), np.number):
         try:
-            return np.ma.filled(np.ma.asarray(col), np.nan).astype(float)
+            arr = np.ma.asarray(col)
+            # Cast to float FIRST so the NaN fill is representable,
+            # then fill. Otherwise filling an int-typed masked array
+            # with `np.nan` silently coerces to 0.
+            return np.ma.filled(arr.astype(float), np.nan)
         except (ValueError, TypeError):
             pass
-    # Numeric (int) column → straight cast is fine.
+    # Non-numeric column — fall through to row-by-row parse below.
     try:
         return np.asarray(col, dtype=float)
     except (ValueError, TypeError):
@@ -252,6 +274,7 @@ def load_catalog(path: str) -> Catalog:
         ids = _coerce_int_ids(table[id_col], len(table))
 
     pri_col = _find_col(table, _PRI_KEYS)
+    weight_col = _find_col(table, _WEIGHT_KEYS)
     mag_col = _find_col(table, _MAG_KEYS)
     z_col = _find_col(table, _Z_KEYS)
     # If `name`/`label` was used as the ID fallback, don't ALSO claim it
@@ -263,15 +286,40 @@ def load_catalog(path: str) -> Catalog:
         )
     label_col = _find_col(table, label_candidates)
 
+    # Every column the loader didn't claim above survives in `extras`
+    # so the catalog editor can show it. Stored as object arrays so we
+    # don't lose mixed-type information.
+    claimed = {c for c in (id_col, ra_col, dec_col, pri_col, weight_col,
+                           mag_col, z_col, label_col) if c}
+    extras: dict = {}
+    for col_name in table.colnames:
+        if col_name in claimed:
+            continue
+        col = table[col_name]
+        try:
+            extras[col_name] = np.asarray([
+                ("" if v is None else str(v))
+                for v in (np.ma.filled(col, "") if hasattr(col, "mask") else col)
+            ], dtype=object)
+        except (TypeError, ValueError):
+            # Fall back to a plain object copy; if even that fails we
+            # silently drop the column rather than crashing the loader.
+            try:
+                extras[col_name] = np.asarray(list(col), dtype=object)
+            except Exception:  # noqa: BLE001
+                pass
+
     return Catalog(
         ids=ids,
         ra_deg=np.asarray(table[ra_col], dtype=float),
         dec_deg=np.asarray(table[dec_col], dtype=float),
         priority=_as_float(table, pri_col),
+        weight=_as_float(table, weight_col),
         mag=_as_float(table, mag_col),
         z=_as_float(table, z_col),
         label=_as_str(table, label_col),
         source_path=path,
+        extras=extras,
     )
 
 

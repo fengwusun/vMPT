@@ -2,6 +2,9 @@ __pycache__/
 *.pyc
 .ipynb_checkpoints/
 .DS_Store
+# Stray personal files that occasionally land in the repo root.
+HotelBill_*.pdf
+*.private.*
 # MSA shutter V2/V3 grid is *required* to run vMPT; keep it tracked.
 # Operability JSON is fetched from CRDS; not redistributed.
 data/jwst_nirspec_msaoper_*.json
