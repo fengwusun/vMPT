@@ -959,11 +959,17 @@ class PointingEvaluator:
         idx = np.where(in_grid)[0]
 
         for i in idx:
-            req = self._required_lam[i] if self._required_lam is not None else []
-            need_no_gap = self._no_gap[i]
-            need_blue = self._extend_blue[i]
-            need_red = self._extend_red[i]
-            if not (req or need_no_gap or need_blue or need_red):
+            req = (self._required_lam[i]
+                   if self._required_lam is not None else [])
+            # `req` is a python list of (lo, hi) tuples; bool(list)
+            # is safe. The bool fields are numpy scalars — cast
+            # explicitly so future NumPy "ambiguous truthiness"
+            # rules don't bite us.
+            need_no_gap = bool(self._no_gap[i])
+            need_blue = bool(self._extend_blue[i])
+            need_red = bool(self._extend_red[i])
+            has_req = bool(req) and len(req) > 0
+            if not (has_req or need_no_gap or need_blue or need_red):
                 continue
 
             q = int(quad[i])
@@ -983,7 +989,7 @@ class PointingEvaluator:
                 kept[i] = False
                 # Attribute the drop to the first flagged reason in a
                 # stable order.
-                if req:
+                if has_req:
                     reasons[DROP_REQUIRED_LAM] += 1
                 elif need_no_gap:
                     reasons[DROP_NO_GAP] += 1
@@ -1006,7 +1012,7 @@ class PointingEvaluator:
             dropped_reason = None
             # Required wavelength ranges — every interval must be
             # covered (with the gap excluded). First failure wins.
-            if req:
+            if has_req:
                 for (lo, hi) in req:
                     if not interval_covered(lo, hi, blue, gap_lo, gap_hi, red):
                         dropped_reason = DROP_REQUIRED_LAM

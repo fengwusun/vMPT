@@ -67,8 +67,62 @@ Click `Edit catalog…` in the Input tab. The pop-up table lets you:
 - Add custom columns via the input + `Add column` button.
 - Compute one of weight/priority from the other (`Compute w from p` /
   `Compute p from w`).
+- Edit per-target spectral constraints via the **Constraints…**
+  button at the end of each row (v1.3.0+, see below).
 - Save as CSV (standalone copy) or `Apply changes & close` (commit
   to the in-memory catalog).
+
+### Per-target spectral constraints (v1.3.0+)
+
+Every row has a `Constraints` button at the right edge of the
+editor table. It's **gray** when no constraints are set, **primary
+blue** when at least one is. Clicking it opens a popover with four
+independent toggles that govern how the optimizer treats that
+specific source:
+
+`Required λ ranges`
+: Text input with the format `"1.0-1.3; 1.5-1.8"` (μm,
+  semicolon-separated). At every candidate pointing the optimizer
+  drops the source unless **every** listed interval lands fully on
+  the detector (the NRS1/NRS2 detector gap is excluded — a range
+  bisected by the gap fails). A yellow inline warning surfaces if
+  any range falls outside the current Disperser/Filter — the save
+  is still accepted in case you're pre-staging for a future
+  disperser.
+
+`Forbid detector gap inside spectrum`
+: Drops the source if the centre shutter's spectrum has the
+  NRS1/NRS2 gap inside `[λ_blue, λ_red]`. For PRISM at non-central
+  shutters there's typically no gap → kept. For the H gratings the
+  gap is always present → fails.
+
+`Extend to bluest λ of disperser`
+: Drops the source if its shutter's `λ_blue` is more than 20 nm
+  above the disperser's MSA-wide best blue. Useful when you need
+  the full blue end of the bandpass (it forces the optimizer to
+  pick a V2 position where the spectrum isn't truncated on the
+  blue side).
+
+`Extend to reddest λ of disperser`
+: Same logic, red side.
+
+`Protect this source from spectral collision`
+: Same as the v1.2.0 catalog-wide "collision protection" cutoff,
+  but applied per-row. Either source (the per-target flag OR a
+  matching row from the catalog-wide cutoff in the optimizer
+  modal) makes a target collision-protected.
+
+When you click **Apply** the popover's values get written into the
+editor's working copy and a single undo entry is pushed. The Edit…
+button colour flips to blue for that row.
+
+**Persistence**: per-target constraints survive `Save as CSV`
+(extra columns `lam_req`, `no_gap`, `extend_blue`, `extend_red`,
+`protect` are emitted when at least one row has a constraint set —
+otherwise the CSV stays unchanged for backward compatibility). To
+preserve constraints across `Save session` / `Load session`,
+**Save as CSV first** so the workspace JSON's catalog-path
+reference points at a CSV that includes the constraints.
 
 ## The optimizer's view
 

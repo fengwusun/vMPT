@@ -111,10 +111,24 @@ Two sources "collide on the same detector row" iff:
 
 ### Score display
 
-When protection is on, the results table's Score cell appends `−K`
-where K = number of sources dropped at that pointing to keep the
-protected spectra clean. Hover the cell to see the top 10 placed
-sources; protected ones are prefixed with **🛡**.
+When protection or any per-target constraint is active, the results
+table's Score cell appends `−K` where K = total sources dropped at
+that pointing. Hover the cell to see:
+
+- The top 10 placed sources, with **🛡** prefixing rows in the
+  protected set.
+- A breakdown of the K drops by reason (v1.3.0+):
+
+```text
+−6 dropped:
+   3× spectral collision
+   2× required λ-range missing
+   1× detector gap inside spectrum
+```
+
+The five reason codes match the constants in
+{py:data}`vmpt.optimizer.DROP_REASONS`:
+`collision`, `required_lam`, `no_gap`, `extend_blue`, `extend_red`.
 
 ### A caveat for H gratings
 
@@ -123,6 +137,29 @@ than the MSA itself — so even one protected target eliminates a
 large fraction of co-observable sources. That's the truthful
 answer; the modal shows a lower kept count so expectations match
 reality.
+
+## Per-target spectral constraints (v1.3.0+)
+
+In addition to the catalog-wide "Protect spectra from collision"
+toggle, each catalog row can carry its own per-target spectral
+constraints via the **Constraints…** button in the catalog editor.
+The four constraint types are documented in [Catalogs ›
+Per-target spectral constraints](catalogs.md#per-target-spectral-constraints-v130).
+Briefly:
+
+- **Required λ ranges** — list of `(λ_lo, λ_hi)` ranges in μm that
+  must land on the detector (gap-excluded).
+- **No detector gap** — the NRS1/NRS2 gap may not fall inside the
+  spectrum.
+- **Extend to bluest / reddest** — the centre-shutter spectrum must
+  reach the disperser/filter's MSA-wide best blue / red wavelength.
+- **Protect** — per-target equivalent of the v1.2.0 catalog-wide
+  cutoff. Either makes a row collision-protected.
+
+The optimizer evaluates all per-target constraints **after** the
+v1.2.0 collision rules, so a source can only be dropped once. The
+results modal's `−K` breakdown reports which constraint type
+caused the drop.
 
 ## Performance
 

@@ -4,6 +4,118 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.0] — unreleased
+
+Feature: **per-target spectral constraints**.
+
+The catalog editor gains a per-row **Constraints…** button (gray
+when unset, primary-blue when ≥1 field is set). Clicking it opens a
+popover that captures four independent spectral requirements for
+that source. At every candidate pointing the optimizer fetches the
+source's centre-shutter wavelength endpoints via
+`vmpt.wavelengths.cutoffs` and drops the source if any constraint
+fails — same machinery as the v1.2.0 collision drop, just with new
+reason codes.
+
+### Per-target constraints
+
+`required_lam`
+: List of `(λ_lo, λ_hi)` ranges in μm that **must** land on the
+  detector for this source (the gap is excluded, so a range that
+  straddles the NRS1/NRS2 detector gap fails). Empty list = no
+  constraint. Editor input format: `"1.0-1.3; 1.5-1.8"`.
+
+`no_gap`
+: Boolean. When True, the NRS detector gap must not fall inside
+  the source's spectrum. PRISM at non-central shutters has no gap
+  → passes. H gratings have a gap inside every shutter's spectrum
+  → fails.
+
+`extend_blue`
+: Boolean. When True, the shutter must reach the disperser/filter's
+  MSA-wide best blue wavelength (within a 20 nm tolerance to absorb
+  per-shutter wavelength-solution variation). Useful for science
+  that needs the full blue end of the bandpass.
+
+`extend_red`
+: Boolean. Same on the red side.
+
+`protect`
+: Boolean. Per-target equivalent of the v1.2.0 catalog-wide
+  "collision protection" cutoff. Either source making a row
+  protected enables the v1.2 collision rules for that row (logical
+  OR).
+
+### Optimizer
+
+`PointingEvaluator.__init__` accepts the five new arrays. A new
+method `evaluate_with_reasons(...)` returns the per-pointing
+drop-reason dict keyed by the constants in
+`vmpt.optimizer.DROP_REASONS` (`collision`, `required_lam`,
+`no_gap`, `extend_blue`, `extend_red`). `evaluate_with_stats(...)`
+keeps its v1.2 4-tuple shape — the int it returns is now the sum of
+those per-reason counts.
+
+### Catalog loader
+
+The CSV / FITS / ASCII loader recognises five new column aliases:
+`lam_req` (or `lambda_required`, `wavelength_required`, …),
+`no_gap` / `gapless`, `extend_blue` / `bluest`, `extend_red` /
+`reddest`, `protect` / `protected`. Boolean values accept any of
+`{1, true, yes, ✓, ✔, on}` (case-insensitive). The wavelength-range
+column stores as the same `"1.0-1.3; 1.5-1.8"` string the editor
+uses, parsed at load.
+
+### Results modal
+
+The Score-cell hover tooltip now breaks `−K` down by reason:
+
+```
+Top 10 placed sources at this pointing:
+  …
+−6 dropped:
+   3× spectral collision
+   2× required λ-range missing
+   1× detector gap inside spectrum
+```
+
+The hover top-10 keeps the 🛡 prefix for protected sources from
+v1.2.0.
+
+### Persistence
+
+The Constraints… popover's edits stay scoped to the catalog
+editor's working copy. Clicking **Apply changes & close** writes
+the five new fields back to the in-memory `Catalog`. **Save as
+CSV** emits the new columns *only* when at least one row has a
+constraint set, so v1.2.x users who never touch the popover get
+the same CSV format they had before.
+
+Session save/load via `vMPT_workspace.json` is unchanged — the
+workspace JSON references catalog **paths**, not contents. To
+persist constraints across sessions, the user must **Save as CSV**
+before **Save session**; the saved CSV becomes the canonical
+catalog file for that session bundle.
+
+### Tests
+
+`tests/test_optimizer_constraints.py` — 30 new tests:
+
+  - Parse-string helpers (8 parametrised cases for `lam_req` text
+    format).
+  - `disperser_range` / `disperser_min_lambda` / `disperser_max_lambda`.
+  - 7 `interval_covered` semantics cases.
+  - `Catalog` dataclass defaults.
+  - Optimizer keys + size-mismatch validation (5 cases).
+  - Required-λ in/out of range (2 cases).
+  - `no_gap` under H gratings.
+  - `total_dropped == sum(per_reason_counts)` invariant.
+  - Per-target `protect` alone enables collision rules.
+
+**169 passed, 5 skipped** total (up from 139/4 in v1.2.2). The
+skips are synthetic-geometry cases where no source happens to land
+in the MSA at the test pointing.
+
 ## [1.2.2] — 2026-06-03
 
 Packaging release: vMPT is now **pip-installable** from PyPI as

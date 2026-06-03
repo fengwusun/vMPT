@@ -529,11 +529,22 @@ cat_edit_select = Select(
 # delete. Maintained on every populate / delete / undo.
 _cat_edit_source = ColumnDataSource(data=dict(
     id=[], ra=[], dec=[], priority=[], mag=[], z=[], label=[], _idx=[],
+    # Per-target spectral constraints (v1.3.0+). All optional; the
+    # initial state for any newly-loaded catalog is "no constraint
+    # set". `_has_constraint` is a derived 0/1 flag used by the
+    # Constraints-column HTMLTemplateFormatter to pick the button's
+    # colour (gray = unset, blue = at least one field set).
+    lam_req=[], no_gap=[], extend_blue=[], extend_red=[], protect=[],
+    _has_constraint=[],
 ))
 # Tiny sink the JS-side delete handler writes into when the user
 # clicks a 🗑️ icon. Python's `_on_cat_edit_delete_signal` listens for
 # changes and removes the matching row from the working copy.
 _cat_edit_delete_signal = ColumnDataSource(data=dict(idx=[-1], stamp=[0]))
+# Same pattern for the per-row Constraints… button. The JS-side
+# onclick writes the row index here; the Python handler opens the
+# constraints popover pre-filled with that row's current values.
+_cat_edit_constraint_signal = ColumnDataSource(data=dict(idx=[-1], stamp=[0]))
 
 _NUM_FMT = NumberFormatter(format="0.[000000]")
 # Trash icon column — Underscore.js template renders a clickable span
@@ -544,6 +555,22 @@ _TRASH_TEMPLATE = (
     "      title='Delete this row' "
     "      onclick='window.__vmpt_delete_row(<%= _idx %>)'>"
     "🗑️</span>"
+)
+# Per-row Constraints… button. The button's background flips between
+# gray (no constraint set) and the vMPT primary blue (≥1 constraint
+# set) based on the `_has_constraint` flag carried per-row in
+# `_cat_edit_source`. Clicking writes the row index into
+# `_cat_edit_constraint_signal` via the global JS function installed
+# below, and the Python listener opens the popover pre-filled.
+_CONSTRAINT_TEMPLATE = (
+    "<span style=\"cursor:pointer; padding:1px 8px; border-radius:4px; "
+    "font-size:11px; user-select:none; "
+    "background:<%= _has_constraint ? '#1f6fc0' : '#e8eaef' %>; "
+    "color:<%= _has_constraint ? 'white' : '#5a6b85' %>; "
+    "border:1px solid <%= _has_constraint ? '#155a9b' : '#c8d0de' %>;\" "
+    "title='Edit per-target spectral constraints for this row' "
+    "onclick='window.__vmpt_open_constraints(<%= _idx %>)'>"
+    "Edit…</span>"
 )
 cat_edit_table = DataTable(
     source=_cat_edit_source,
@@ -562,6 +589,14 @@ cat_edit_table = DataTable(
         TableColumn(field="mag",      title="Mag",      editor=StringEditor(), width=80),
         TableColumn(field="z",        title="z",        editor=StringEditor(), width=80),
         TableColumn(field="label",    title="Label",    editor=StringEditor(), width=150),
+        # Per-row Constraints button. Always visible — the column
+        # picker doesn't hide this one because users can't see the
+        # constraints any other way. Same `field=_idx` trick as the
+        # trash icon: HTMLTemplateFormatter reads `_has_constraint`
+        # for the colour and `_idx` for the onclick row index.
+        TableColumn(field="_idx",     title="Constraints", width=82,
+                    formatter=HTMLTemplateFormatter(template=_CONSTRAINT_TEMPLATE),
+                    sortable=False),
         TableColumn(field="_idx",     title="🗑", width=34,
                     formatter=HTMLTemplateFormatter(template=_TRASH_TEMPLATE),
                     sortable=False),
@@ -746,6 +781,105 @@ cat_edit_modal_card = column(
         "overflow-y": "auto",
     },
 )
+
+# ── Per-target Constraints… popover (v1.3.0+) ───────────────────────────
+# Opens from inside the catalog editor when the user clicks the
+# "Edit…" button in a row's Constraints column. Lets the user set
+# `lam_req`, `no_gap`, `extend_blue`, `extend_red`, and `protect`
+# for the row whose index is stored in the constraint-click signal.
+# All edits stay scoped to the editor's working source until the
+# user clicks Apply (writes back into the catalog), matching the
+# rest of the editor's "stage then commit" workflow.
+
+# Index of the row currently being edited. Updated by
+# `_on_cat_edit_constraint_signal` when the user clicks Edit… on a
+# row; reset to -1 when the popover closes.
+_cat_constraints_row_idx: int = -1
+
+cat_constraints_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+    styles={
+        "position": "absolute",
+        "top": "6px", "right": "8px",
+        "z-index": "5",
+    },
+)
+cat_constraints_title_div = Div(
+    text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
+         "Per-target spectral constraints</h3>"
+         "<div style='font-size:12px; color:#5a6b85'>"
+         "These constraints apply only when the optimizer evaluates "
+         "this source. Empty / unchecked = no constraint.</div>",
+    width=420,
+)
+cat_constraints_row_label = Div(
+    text="<small style='color:#5a6b85'>Editing row —</small>",
+    width=420,
+)
+cat_constraints_lam_input = TextInput(
+    title="Required λ ranges (μm; semicolon-separated)",
+    placeholder="e.g. 1.0-1.3; 1.5-1.8",
+    value="",
+    width=420,
+)
+cat_constraints_lam_warn = Div(
+    text="", width=420,
+)
+cat_constraints_checks = CheckboxGroup(
+    labels=[
+        "Forbid detector gap inside spectrum (no_gap)",
+        "Extend to bluest λ of disperser",
+        "Extend to reddest λ of disperser",
+        "Protect this source from spectral collision",
+    ],
+    active=[],
+    width=420,
+)
+cat_constraints_apply_btn = Button(
+    label="Apply", button_type="primary", width=80,
+)
+cat_constraints_cancel_btn = Button(
+    label="Cancel", button_type="default", width=80,
+)
+cat_constraints_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        # Stacks above the catalog editor's own backdrop (z-index 999)
+        # so the popover doesn't sit behind it.
+        "z-index": "1010",
+    },
+)
+cat_constraints_modal_card = column(
+    cat_constraints_top_close_btn,
+    cat_constraints_title_div,
+    cat_constraints_row_label,
+    cat_constraints_lam_input,
+    cat_constraints_lam_warn,
+    cat_constraints_checks,
+    row(cat_constraints_apply_btn, cat_constraints_cancel_btn, spacing=10),
+    spacing=10,
+    width=460,
+    visible=False,
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 18px",
+        "z-index": "1011",
+        "max-height": "85vh",
+        "overflow-y": "auto",
+    },
+)
+
 
 opt_run_btn = Button(label="Run optimization",
                     button_type="primary", width=SIDEBAR_W - 20)
@@ -2489,6 +2623,35 @@ def _rebuild_merged_catalog() -> None:
         else np.array([""] * len(c.ra_deg), dtype=object)
         for c in cats
     ])
+    # Per-target spectral constraints (v1.3.0+). Backfill defaults
+    # when a catalog was loaded before these fields existed (e.g.
+    # older session round-trips) so the merged arrays always match
+    # the row count.
+    def _pad_bool_per_cat(name: str) -> np.ndarray:
+        chunks = []
+        for c in cats:
+            arr = getattr(c, name, None)
+            arr = np.asarray(arr if arr is not None else [], dtype=bool)
+            if arr.size != len(c.ra_deg):
+                arr = np.zeros(len(c.ra_deg), dtype=bool)
+            chunks.append(arr)
+        return np.concatenate(chunks) if chunks else np.array([], dtype=bool)
+    def _pad_lam_req() -> np.ndarray:
+        chunks = []
+        for c in cats:
+            arr = getattr(c, "required_lam", None)
+            if arr is None or len(arr) != len(c.ra_deg):
+                arr = np.array([[] for _ in range(len(c.ra_deg))],
+                               dtype=object)
+            else:
+                arr = np.asarray(arr, dtype=object)
+            chunks.append(arr)
+        return np.concatenate(chunks) if chunks else np.array([], dtype=object)
+    required_lam_merged = _pad_lam_req()
+    no_gap_merged = _pad_bool_per_cat("no_gap")
+    extend_blue_merged = _pad_bool_per_cat("extend_blue")
+    extend_red_merged = _pad_bool_per_cat("extend_red")
+    protect_merged = _pad_bool_per_cat("protect")
     colors = np.concatenate([
         np.full(len(e["catalog"].ra_deg), e["color"], dtype=object)
         for e in ordered_for_draw
@@ -2504,6 +2667,11 @@ def _rebuild_merged_catalog() -> None:
     state["catalog"] = Catalog(
         ids=ids, ra_deg=ra, dec_deg=dec, priority=pri, weight=weight,
         mag=mag, z=z, label=label,
+        required_lam=required_lam_merged,
+        no_gap=no_gap_merged,
+        extend_blue=extend_blue_merged,
+        extend_red=extend_red_merged,
+        protect=protect_merged,
         source_path=" + ".join(c.source_path for c in cats),
     )
     state["catalog_colors"] = colors
@@ -4421,6 +4589,8 @@ def _cat_edit_populate_table(idx: int) -> None:
         _cat_edit_set_data_silently(dict(
             id=[], ra=[], dec=[], priority=[], weight=[],
             mag=[], z=[], label=[], _idx=[],
+            lam_req=[], no_gap=[], extend_blue=[], extend_red=[],
+            protect=[], _has_constraint=[],
         ))
         cat_edit_columns_choice.options = []
         cat_edit_columns_choice.value = []
@@ -4434,6 +4604,32 @@ def _cat_edit_populate_table(idx: int) -> None:
         weight_arr = np.asarray(getattr(cat, "weight", []), dtype=float)
         if weight_arr.size != n:
             weight_arr = np.full(n, np.nan, dtype=float)
+        # Per-target constraints (v1.3.0+). All optional — pad with the
+        # zero / empty default when the Catalog dataclass field is
+        # missing or has a mismatched length (older sessions etc.).
+        from vmpt.catalog import _format_lam_req as _fmt_lam_req
+        def _pad_bool(arr_name: str) -> list[int]:
+            arr = np.asarray(getattr(cat, arr_name, []), dtype=bool)
+            if arr.size != n:
+                arr = np.zeros(n, dtype=bool)
+            return [int(bool(v)) for v in arr]
+        no_gap_list = _pad_bool("no_gap")
+        extend_blue_list = _pad_bool("extend_blue")
+        extend_red_list = _pad_bool("extend_red")
+        protect_list = _pad_bool("protect")
+        req_lam_arr = getattr(cat, "required_lam", None)
+        lam_req_list: list[str] = []
+        if req_lam_arr is not None and len(req_lam_arr) == n:
+            for entry in req_lam_arr:
+                lam_req_list.append(_fmt_lam_req(entry))
+        else:
+            lam_req_list = ["" for _ in range(n)]
+        has_constraint_list = [
+            int(bool(lam_req_list[i]) or no_gap_list[i] or
+                extend_blue_list[i] or extend_red_list[i]
+                or protect_list[i])
+            for i in range(n)
+        ]
         # Priority and weight are stored as FLOATS (NaN for missing)
         # — that makes SlickGrid sort them numerically instead of
         # lexicographically ("10" < "2" with string sort). The
@@ -4452,6 +4648,13 @@ def _cat_edit_populate_table(idx: int) -> None:
             label=[str(v) for v in (cat.label if cat.label is not None
                                     else [""] * n)],
             _idx=list(range(n)),
+            # --- per-target constraints ---
+            lam_req=lam_req_list,
+            no_gap=no_gap_list,
+            extend_blue=extend_blue_list,
+            extend_red=extend_red_list,
+            protect=protect_list,
+            _has_constraint=has_constraint_list,
         )
         # Add every extras column verbatim (already object arrays of
         # str values, courtesy of `load_catalog`).
@@ -4496,14 +4699,24 @@ _INT_OR_BLANK_TEMPLATE = (
 
 def _cat_edit_rebuild_columns() -> None:
     """Rebuild `cat_edit_table.columns` according to the picker. The
-    trash column always stays at the end. Priority + Weight use a
-    NaN-safe integer formatter so the sort is numeric, not lexicographic."""
+    Constraints + trash columns always stay at the end. Priority +
+    Weight use a NaN-safe integer formatter so the sort is numeric,
+    not lexicographic."""
     visible_titles = set(cat_edit_columns_choice.value or [])
     title_to_field = {**{_CAT_STD_TITLES[c]: c for c in _CAT_STD_COLS}}
     data = _cat_edit_source.data
-    # Extras: any source-data key not in the standard set + not `_idx`.
+    # Source-data keys that the editor manages internally — never
+    # exposed in the column picker, never rendered as a normal column.
+    _INTERNAL = (
+        "_idx", "_has_constraint",
+        # Constraint values surface via the dedicated Constraints…
+        # popover, not as inline-editable columns.
+        "lam_req", "no_gap", "extend_blue", "extend_red", "protect",
+    )
+    # Extras: any source-data key not in the standard set + not
+    # internal.
     extras = [k for k in data.keys()
-              if k not in _CAT_STD_COLS and k != "_idx"]
+              if k not in _CAT_STD_COLS and k not in _INTERNAL]
     for k in extras:
         title_to_field[k] = k
 
@@ -4525,6 +4738,12 @@ def _cat_edit_rebuild_columns() -> None:
             cols.append(TableColumn(
                 field=k, title=k, editor=StringEditor(), width=120,
             ))
+    # Constraints column: always visible, sits just before the trash.
+    cols.append(TableColumn(
+        field="_idx", title="Constraints", width=82,
+        formatter=HTMLTemplateFormatter(template=_CONSTRAINT_TEMPLATE),
+        sortable=False,
+    ))
     # Trash column always last.
     cols.append(TableColumn(
         field="_idx", title="🗑", width=34,
@@ -4844,8 +5063,15 @@ def _on_cat_edit_apply():
     # new column it lands here for the first time.
     new_extras: dict = {}
     src_keys = set(_cat_edit_source.data.keys())
+    # Editor-internal columns that are NOT extras: standard fields,
+    # the row-index helper, and the per-target constraint fields
+    # (which are first-class Catalog attributes since v1.3.0).
+    _NON_EXTRAS = set(_CAT_STD_COLS) | {
+        "_idx", "_has_constraint",
+        "lam_req", "no_gap", "extend_blue", "extend_red", "protect",
+    }
     for k in src_keys:
-        if k in _CAT_STD_COLS or k == "_idx":
+        if k in _NON_EXTRAS:
             continue
         new_extras[k] = np.asarray(list(data[k]), dtype=object)
     # Carry through any extras that for some reason weren't in source
@@ -4853,6 +5079,28 @@ def _on_cat_edit_apply():
     for k, v in (getattr(cat, "extras", {}) or {}).items():
         new_extras.setdefault(k, np.asarray(list(v), dtype=object))
     weight_in = data.get("weight", ["" for _ in range(n)])
+
+    # Per-target constraint columns. The editor stores them as:
+    #   lam_req      : list[str]   ("1.0-1.3; 1.5-1.8" or "")
+    #   no_gap/etc.  : list[int]   (0 or 1)
+    # We parse the lam_req strings back to list[(lo, hi)] and cast
+    # the bool fields. Missing-from-source = default (False / []).
+    from vmpt.catalog import _parse_lam_req_str
+    lam_strs = list(data.get("lam_req", [""] * n))
+    while len(lam_strs) < n:
+        lam_strs.append("")
+    new_required_lam = np.empty(n, dtype=object)
+    for i, s in enumerate(lam_strs[:n]):
+        new_required_lam[i] = _parse_lam_req_str(s)
+
+    def _bool_col(name: str) -> np.ndarray:
+        col = data.get(name, [0] * n)
+        return np.asarray([bool(int(v)) if str(v).strip() not in ("", "nan",
+                                                                  "none",
+                                                                  "null")
+                           else False
+                           for v in col[:n]], dtype=bool)
+
     new_cat = Catalog(
         ids=np.asarray(ids_out, dtype=object),
         ra_deg=np.asarray([_str_to_float_or_nan(v) for v in data["ra"]],
@@ -4868,6 +5116,11 @@ def _on_cat_edit_apply():
         z=np.asarray([_str_to_float_or_nan(v) for v in data["z"]],
                      dtype=float),
         label=np.asarray([str(v) for v in data["label"]], dtype=object),
+        required_lam=new_required_lam,
+        no_gap=_bool_col("no_gap"),
+        extend_blue=_bool_col("extend_blue"),
+        extend_red=_bool_col("extend_red"),
+        protect=_bool_col("protect"),
         source_path=cat.source_path,
         extras=new_extras,
     )
@@ -4917,14 +5170,28 @@ def _on_cat_edit_save_csv():
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
         import csv as _csv
-        # Column order: the eight standard columns first, then any
-        # extras columns the source carries (in insertion order). Skip
-        # the internal `_idx` column. Priority / weight are stored as
+        # Column order: the eight standard columns first, then the
+        # per-target constraint columns (only when at least one row
+        # has them set — otherwise the CSV stays unchanged from v1.2.x
+        # for users who never touch the Constraints… popover), then
+        # any user-added extras. Skip the internal _idx /
+        # _has_constraint columns. Priority + weight are stored as
         # floats in source.data so we coerce them to int-or-blank.
+        _INTERNAL = {"_idx", "_has_constraint", "lam_req",
+                     "no_gap", "extend_blue", "extend_red", "protect"}
         extras_cols = [k for k in data.keys()
-                       if k not in _CAT_STD_COLS and k != "_idx"]
+                       if k not in _CAT_STD_COLS and k not in _INTERNAL]
+        # Are any per-target constraints set anywhere in the catalog?
+        # If not, omit the constraint columns so v1.2.x users get the
+        # same CSV format they had before.
+        has_constraints = any(
+            int(v) for v in (data.get("_has_constraint") or [])
+        )
+        constraint_cols = (["lam_req", "no_gap", "extend_blue",
+                            "extend_red", "protect"]
+                           if has_constraints else [])
         header = ["ID", "RA", "DEC", "priority", "weight", "mag", "z",
-                  "label", *extras_cols]
+                  "label", *constraint_cols, *extras_cols]
         weights = data.get("weight", [""] * n)
         with open(p, "w", newline="") as f:
             w = _csv.writer(f)
@@ -4937,6 +5204,12 @@ def _on_cat_edit_save_csv():
                     data["mag"][i], data["z"][i],
                     data["label"][i],
                 ]
+                for k in constraint_cols:
+                    val = (data.get(k) or [""])[i]
+                    if k == "lam_req":
+                        row_vals.append("" if not val else str(val))
+                    else:
+                        row_vals.append("1" if int(val or 0) else "")
                 for k in extras_cols:
                     row_vals.append(data[k][i])
                 w.writerow(row_vals)
@@ -4970,6 +5243,151 @@ _cat_edit_source.on_change("data", _on_cat_edit_data_change)
 # JS-side trash icons write to the signal source; Python deletes the row.
 _cat_edit_delete_signal.on_change("data", _on_cat_edit_delete_signal)
 
+
+def _cat_constraints_close(_event=None) -> None:
+    cat_constraints_modal_backdrop.visible = False
+    cat_constraints_modal_card.visible = False
+
+
+def _cat_constraints_warn_for_lam(text: str) -> str:
+    """Return an HTML warning string if any range in `text` falls
+    outside the current (disperser, filter); empty string otherwise.
+
+    Used as both the live-validation hint inside the popover and the
+    save-time check. The warning is informational only — we still
+    accept the save (user might be pre-staging for a future
+    disperser).
+    """
+    from vmpt.catalog import _parse_lam_req_str
+    from vmpt.wavelengths import disperser_range
+    ranges = _parse_lam_req_str(text)
+    if not ranges:
+        return ""
+    disp = (state.get("disperser") or "").upper()
+    filt = (state.get("filter") or "").upper()
+    rng = disperser_range(disp, filt) if disp and filt else None
+    if rng is None:
+        return ""
+    lo_d, hi_d = rng
+    out_of: list[str] = []
+    for lo, hi in ranges:
+        if lo < lo_d - 1e-3 or hi > hi_d + 1e-3:
+            out_of.append(f"{lo:g}-{hi:g}")
+    if not out_of:
+        return ""
+    return (
+        f"<small style='color:#a05a30'>"
+        f"⚠ {', '.join(out_of)} μm "
+        f"is outside {disp} / {filt} ({lo_d:g}–{hi_d:g} μm). The "
+        f"optimizer will never satisfy this constraint under the "
+        f"current Disperser / Filter — change disperser or fix the "
+        f"range. Save is still accepted in case you're pre-staging.</small>"
+    )
+
+
+def _on_cat_constraints_signal(attr, old, new) -> None:
+    """JS-side click on Constraints… writes the row index here.
+
+    Open the popover pre-filled with that row's current values.
+    """
+    global _cat_constraints_row_idx
+    try:
+        idx = int(new["idx"][0])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return
+    data = _cat_edit_source.data
+    n = len(data.get("_idx", []))
+    if not (0 <= idx < n):
+        return
+    _cat_constraints_row_idx = idx
+    # Pre-fill the popover from source.data.
+    id_str = str(data["id"][idx]) if "id" in data else f"row {idx}"
+    cat_constraints_row_label.text = (
+        f"<small style='color:#5a6b85'>Editing row "
+        f"<b>#{idx + 1}</b> · ID <code>{id_str}</code></small>"
+    )
+    lam_val = str((data.get("lam_req") or [""] * n)[idx])
+    cat_constraints_lam_input.value = lam_val
+    cat_constraints_lam_warn.text = _cat_constraints_warn_for_lam(lam_val)
+    active: list[int] = []
+    if int((data.get("no_gap") or [0] * n)[idx]):
+        active.append(0)
+    if int((data.get("extend_blue") or [0] * n)[idx]):
+        active.append(1)
+    if int((data.get("extend_red") or [0] * n)[idx]):
+        active.append(2)
+    if int((data.get("protect") or [0] * n)[idx]):
+        active.append(3)
+    cat_constraints_checks.active = active
+    cat_constraints_modal_backdrop.visible = True
+    cat_constraints_modal_card.visible = True
+
+
+def _on_cat_constraints_lam_change(attr, old, new) -> None:
+    """Live-warn the user if any range falls outside the disperser."""
+    cat_constraints_lam_warn.text = _cat_constraints_warn_for_lam(new or "")
+
+
+def _on_cat_constraints_apply() -> None:
+    """Write the popover values back into the editor's source for the
+    current row, recompute its _has_constraint flag, and close."""
+    global _cat_constraints_row_idx
+    idx = _cat_constraints_row_idx
+    if idx < 0:
+        _cat_constraints_close()
+        return
+    data = dict(_cat_edit_source.data)
+    n = len(data.get("_idx", []))
+    if not (0 <= idx < n):
+        _cat_constraints_close()
+        return
+
+    lam_val = (cat_constraints_lam_input.value or "").strip()
+    active = set(cat_constraints_checks.active)
+    new_no_gap = int(0 in active)
+    new_blue = int(1 in active)
+    new_red = int(2 in active)
+    new_protect = int(3 in active)
+    has_any = int(
+        bool(lam_val) or new_no_gap or new_blue or new_red or new_protect
+    )
+
+    # Bokeh ColumnDataSource needs the WHOLE column replaced — mutating
+    # an existing list in place doesn't fire the change notification.
+    def _replace(field: str, value, default):
+        col = list(data.get(field) or [default] * n)
+        while len(col) < n:
+            col.append(default)
+        col[idx] = value
+        data[field] = col
+
+    _replace("lam_req", lam_val, "")
+    _replace("no_gap", new_no_gap, 0)
+    _replace("extend_blue", new_blue, 0)
+    _replace("extend_red", new_red, 0)
+    _replace("protect", new_protect, 0)
+    _replace("_has_constraint", has_any, 0)
+    # Use the silent setter so this edit doesn't push an extra undo
+    # step on top of whatever the user was already doing.
+    _cat_edit_set_data_silently(data)
+    # But DO add it to the undo stack, manually — single push so undo
+    # reverts the constraint change atomically.
+    _cat_edit_undo_stack.append({k: list(v) for k, v in data.items()})
+    if len(_cat_edit_undo_stack) > _CAT_EDIT_MAX_HISTORY:
+        _cat_edit_undo_stack.pop(0)
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+    _cat_constraints_row_idx = -1
+    _cat_constraints_close()
+
+
+cat_constraints_apply_btn.on_click(_on_cat_constraints_apply)
+cat_constraints_cancel_btn.on_click(_cat_constraints_close)
+cat_constraints_top_close_btn.on_click(_cat_constraints_close)
+cat_constraints_lam_input.on_change("value", _on_cat_constraints_lam_change)
+_cat_edit_constraint_signal.on_change("data", _on_cat_constraints_signal)
+
+
 # Install the JS-side `window.__vmpt_delete_row(idx)` — called from
 # the trash-icon column's `onclick`. The function closes over `sig`
 # (our Python-side signal ColumnDataSource) so it can publish a
@@ -4981,7 +5399,8 @@ _cat_edit_delete_signal.on_change("data", _on_cat_edit_delete_signal)
 #      data is repopulated. The `if (!window.__vmpt_delete_row)` guard
 #      makes re-installation a no-op.
 _cat_edit_install_js = CustomJS(
-    args=dict(sig=_cat_edit_delete_signal),
+    args=dict(sig=_cat_edit_delete_signal,
+              csig=_cat_edit_constraint_signal),
     code="""
     if (!window.__vmpt_delete_row) {
         window.__vmpt_delete_row = function(idx) {
@@ -4991,6 +5410,15 @@ _cat_edit_install_js = CustomJS(
             // even if the same row is deleted twice in a session.
             sig.data = {idx: [n], stamp: [Date.now() + Math.random()]};
             sig.properties.data.change.emit();
+        };
+    }
+    // Mirror installation for the per-row Constraints… button (the
+    // template's onclick calls `window.__vmpt_open_constraints(idx)`).
+    if (!window.__vmpt_open_constraints) {
+        window.__vmpt_open_constraints = function(idx) {
+            const n = parseInt(idx, 10);
+            csig.data = {idx: [n], stamp: [Date.now() + Math.random()]};
+            csig.properties.data.change.emit();
         };
     }
     """,
@@ -5245,6 +5673,7 @@ def _opt_render_results_in_modal(
     sum_weights = results.get("sum_weight")
     top_targets = results.get("top_targets")
     n_dropped = results.get("n_dropped")
+    drop_reasons = results.get("drop_reasons")  # per-pointing dict (v1.3.0+)
     protect_enabled = bool(results.get("protect_enabled"))
     is_hierarchy = breakdowns is not None and len(breakdowns) >= n_show
     is_meritocracy = method == "Meritocracy"
@@ -5387,10 +5816,29 @@ def _opt_render_results_in_modal(
                     )
                 if n_drop_i > 0:
                     tip_lines.append("")
-                    tip_lines.append(
-                        f"(−{n_drop_i} non-protected source(s) dropped "
-                        f"to protect the 🛡 spectra above.)"
-                    )
+                    # Break the drop count down by reason if the
+                    # per-pointing dict was populated (v1.3.0+).
+                    reasons_i = (drop_reasons[i]
+                                 if drop_reasons is not None
+                                 and i < len(drop_reasons) else None)
+                    if reasons_i:
+                        tip_lines.append(f"−{n_drop_i} dropped:")
+                        REASON_LABELS = {
+                            "collision":    "spectral collision",
+                            "required_lam": "required λ-range missing",
+                            "no_gap":       "detector gap inside spectrum",
+                            "extend_blue":  "blue-edge truncated",
+                            "extend_red":   "red-edge truncated",
+                        }
+                        for key, label in REASON_LABELS.items():
+                            count = int(reasons_i.get(key, 0) or 0)
+                            if count > 0:
+                                tip_lines.append(f"   {count}× {label}")
+                    else:
+                        tip_lines.append(
+                            f"(−{n_drop_i} non-protected source(s) dropped "
+                            f"to protect the 🛡 spectra above.)"
+                        )
                 tooltip = "\n".join(tip_lines)
         # `title=` renders as a native browser tooltip on hover.
         # HTML-escape minimally so quotes don't break the attribute.
@@ -6103,6 +6551,32 @@ def on_optimize():
             return
         protect_mask_evaluator = full_mask
 
+    # ---- Per-target spectral constraints (v1.3.0+) ----
+    # Pull the five per-target arrays off the merged catalog, slice
+    # them by the priority-cutoff `keep` mask if set, and pass through
+    # to the evaluator. All optional — defaults preserve v1.2.x
+    # behaviour when the user hasn't set any constraints.
+    n_full = len(cat.ra_deg)
+    def _slice_or_default(arr, default, dtype):
+        a = np.asarray(arr if arr is not None and len(arr) == n_full
+                       else [default] * n_full, dtype=dtype)
+        return a[keep] if keep is not None else a
+
+    cat_required_lam = getattr(cat, "required_lam", None)
+    if cat_required_lam is not None and len(cat_required_lam) == n_full:
+        full_req = np.asarray(cat_required_lam, dtype=object)
+    else:
+        full_req = np.array([[] for _ in range(n_full)], dtype=object)
+    required_lam_arr = (full_req[keep] if keep is not None else full_req)
+    no_gap_arr = _slice_or_default(
+        getattr(cat, "no_gap", None), False, bool)
+    extend_blue_arr = _slice_or_default(
+        getattr(cat, "extend_blue", None), False, bool)
+    extend_red_arr = _slice_or_default(
+        getattr(cat, "extend_red", None), False, bool)
+    cat_protect_arr = _slice_or_default(
+        getattr(cat, "protect", None), False, bool)
+
     # Build the evaluator now so the heavy CloughTocher Delaunay step
     # happens before we show the modal — the user sees the bar start
     # at 0 % and advance, instead of staring at a frozen 0 % for 2 s.
@@ -6114,7 +6588,11 @@ def on_optimize():
     # Load the reason mask alongside operability so the evaluator can
     # apply the "protected target on stuck-open row" rule. Loading is
     # cached by `app/msa.load_operability` after the first call.
-    if protect_mask_evaluator is not None:
+    # Also load when per-target `protect` is set (per-row collision
+    # protection needs the same stuck-open data).
+    need_reason = (protect_mask_evaluator is not None
+                   or bool(cat_protect_arr.any()))
+    if need_reason:
         _op_mask, _op_reason = load_operability()
     else:
         _op_mask, _op_reason = None, None
@@ -6132,6 +6610,14 @@ def on_optimize():
         disperser=state.get("disperser"),
         filt=state.get("filter"),
         reason=_op_reason,
+        # Per-target spectral constraints (v1.3.0+). The evaluator
+        # ORs `protect` with `protect_mask` so either source flagging
+        # a target as protected switches on the v1.2.x collision rules.
+        required_lam=required_lam_arr,
+        no_gap=no_gap_arr,
+        extend_blue=extend_blue_arr,
+        extend_red=extend_red_arr,
+        protect=cat_protect_arr,
     )
 
     _opt_run.clear()
@@ -6402,6 +6888,8 @@ curdoc().add_root(opt_config_modal_backdrop)
 curdoc().add_root(opt_config_modal_card)
 curdoc().add_root(cat_edit_modal_backdrop)
 curdoc().add_root(cat_edit_modal_card)
+curdoc().add_root(cat_constraints_modal_backdrop)
+curdoc().add_root(cat_constraints_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.

@@ -26,7 +26,7 @@ from pathlib import Path
 # runs ``vmpt examples download``. The GitHub release page hosts a
 # tarball asset of the same name; ``v1.2.1`` is set explicitly so
 # upgrading vMPT doesn't invalidate cached example downloads.
-EXAMPLES_RELEASE_TAG = "v1.2.2"
+EXAMPLES_RELEASE_TAG = "v1.3.0"
 EXAMPLES_TARBALL_URL = (
     "https://github.com/fengwusun/vMPT/releases/download/"
     f"{EXAMPLES_RELEASE_TAG}/vmpt-examples.tar.gz"

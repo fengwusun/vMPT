@@ -27,10 +27,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-139%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-169%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.2.2-blueviolet)
+![release](https://img.shields.io/badge/release-v1.3.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
