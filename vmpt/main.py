@@ -5700,14 +5700,16 @@ def _opt_de_step() -> None:
         sum_weights: list[float] = []
         top_targets: list[list[dict]] = []
         n_dropped_list: list[int] = []
+        reasons_list: list[dict] = []
         for k in range(len(refined["score"])):
-            det, _, _, n_dropped = ev.evaluate_with_stats(
+            det, _, _, reasons = ev.evaluate_with_reasons(
                 float(refined["ra"][k]),
                 float(refined["dec"][k]),
                 float(refined["pa"][k]),
             )
             totals.append(int(det.sum()))
-            n_dropped_list.append(int(n_dropped))
+            n_dropped_list.append(int(sum(reasons.values())))
+            reasons_list.append(dict(reasons))
             # Weight sum across detected sources (Meritocracy headline).
             w_finite = np.where(np.isfinite(wt_arr), wt_arr, 0.0)
             sum_weights.append(float(np.sum(det * w_finite)))
@@ -5742,6 +5744,11 @@ def _opt_de_step() -> None:
         refined["sum_weight"] = sum_weights
         refined["top_targets"] = top_targets
         refined["n_dropped"] = n_dropped_list
+        # Per-pointing per-reason drop counts. Dict shape:
+        # {"collision": int, "required_lam": int, "no_gap": int,
+        #  "extend_blue": int, "extend_red": int}.  The results
+        # modal renders the breakdown in the Score-cell tooltip.
+        refined["drop_reasons"] = reasons_list
         refined["protect_enabled"] = bool(_opt_run.get("protect_enabled"))
 
         # Hierarchy mode also wants the per-tier breakdown.

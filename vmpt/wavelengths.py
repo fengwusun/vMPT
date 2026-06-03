@@ -106,6 +106,89 @@ def v2_overlap_distance(disperser: str, filt: str) -> float:
     detector. See module-level comment for the eMPT reference."""
     return SPECTRUM_V2_HALFEXTENT.get(disperser.upper(), 180.0)
 
+
+def disperser_range(disperser: str, filt: str) -> tuple[float, float] | None:
+    """Nominal ``(lam_min, lam_max)`` in μm for a (disperser, filter)
+    combination.
+
+    Returns the wavelength range the chosen mode actually delivers to
+    the detector (the values in :data:`GRATING_RANGES`) — the same
+    numbers shown in the JDox "useful range" docs, except where
+    msaviz / the pipeline reference disagree (we follow the pipeline).
+    Returns ``None`` when the combination isn't supported (e.g.
+    ``G140H`` + ``F290LP``); the optimizer treats that as "no
+    constraint can pass" and drops the affected sources.
+    """
+    if disperser is None or filt is None:
+        return None
+    d = disperser.upper()
+    f = filt.upper()
+    bands = GRATING_RANGES.get(d)
+    if bands is None:
+        return None
+    return bands.get(f)
+
+
+def disperser_min_lambda(disperser: str, filt: str) -> float | None:
+    """Bluest wavelength the (disperser, filter) combo can deliver.
+    ``None`` when the combination isn't recognised."""
+    r = disperser_range(disperser, filt)
+    return None if r is None else r[0]
+
+
+def disperser_max_lambda(disperser: str, filt: str) -> float | None:
+    """Reddest wavelength the (disperser, filter) combo can deliver.
+    ``None`` when the combination isn't recognised."""
+    r = disperser_range(disperser, filt)
+    return None if r is None else r[1]
+
+
+def interval_covered(
+    lo: float, hi: float,
+    blue: float, gap_lo: float, gap_hi: float, red: float,
+) -> bool:
+    """Does the spectrum ``[blue, red]`` (with the detector gap
+    ``[gap_lo, gap_hi]`` excluded) fully cover the requested
+    ``[lo, hi]`` range?
+
+    Used by the per-target "required wavelength range" constraint.
+
+    Parameters
+    ----------
+    lo, hi : float
+        Requested interval, in μm. Must satisfy ``lo <= hi``.
+    blue, red : float
+        Bluest / reddest λ the centre shutter delivers to the
+        detector. Both NaN when the source doesn't reach the
+        detector at all (cutoffs returns NaN for off-grid shutters).
+    gap_lo, gap_hi : float
+        NRS1/NRS2 detector-gap wavelength bounds for this shutter.
+        Both NaN ⇒ no gap (e.g. M-grating modes within their nominal
+        range).
+
+    Returns
+    -------
+    bool
+        True iff every wavelength in ``[lo, hi]`` lands somewhere on
+        the detector (i.e. inside ``[blue, gap_lo] ∪ [gap_hi, red]``,
+        where the gap is skipped iff it has finite bounds).
+    """
+    if not (np.isfinite(lo) and np.isfinite(hi)):
+        return False
+    if not (np.isfinite(blue) and np.isfinite(red)):
+        return False
+    if lo > hi:
+        lo, hi = hi, lo
+    if lo < blue or hi > red:
+        return False
+    has_gap = np.isfinite(gap_lo) and np.isfinite(gap_hi)
+    if not has_gap:
+        return True
+    # Gap is INSIDE [blue, red]; reject if [lo, hi] dips into it.
+    # Strict: any wavelength in [lo, hi] that falls in (gap_lo, gap_hi)
+    # is missing.
+    return not (lo < gap_hi and hi > gap_lo)
+
 # Fallback fractional gap parameters used when neither the per-
 # shutter PRISM table NOR a per-disperser fiducial value is
 # available. Width tightened from the previous 10 % so the gratings

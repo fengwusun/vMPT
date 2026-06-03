@@ -42,6 +42,44 @@ class Catalog:
     weight: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=float)
     )
+    # ---- Per-target spectral constraints (v1.3.0+) ------------------
+    # Each row optionally constrains how its spectrum must fall on the
+    # detector given the current (disperser, filter). At every
+    # candidate pointing the optimizer fetches the source's centre-
+    # shutter wavelength endpoints via `vmpt.wavelengths.cutoffs` and
+    # drops the target if any constraint fails.
+    #
+    # required_lam[i] is a list of (lam_lo, lam_hi) tuples in μm — the
+    # **spectral coverage** the user requires for source i. Empty list
+    # = no requirement. Stored as a dtype=object array so the ragged
+    # per-row list lengths work in NumPy.
+    required_lam: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=object)
+    )
+    # no_gap[i] = True → the NRS1/NRS2 detector gap must NOT fall
+    # inside [lam_blue, lam_red] (i.e. cutoffs() must return NaN for
+    # both gap_lo and gap_hi). Strict interpretation per v1.3.0.
+    no_gap: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool)
+    )
+    # extend_blue[i] = True → the centre shutter's lam_blue must
+    # reach the disperser/filter's nominal blue limit (no left-edge
+    # truncation due to where in V2 the target sits).
+    extend_blue: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool)
+    )
+    # extend_red[i] = True → same, for the red end.
+    extend_red: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool)
+    )
+    # protect[i] = True → this target's spectrum is collision-
+    # protected (same semantics as the v1.2 catalog-wide protect_mask
+    # — the optimizer takes the logical OR of this flag and the v1.2
+    # cutoff-derived mask).
+    protect: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=bool)
+    )
+
     # Original-column → values for every column the loader did NOT
     # claim as one of the canonical fields above. Stored as object
     # arrays so we don't lose mixed-type information (e.g., priority-
@@ -84,6 +122,24 @@ _MAG_KEYS = (
 )
 _Z_KEYS = ("z", "zspec", "zphot", "redshift", "zbest", "zuse")
 _LABEL_KEYS = ("label", "name", "tag")
+# ---- v1.3.0 per-target spectral-constraint columns -------------------
+# Loose-matched the same way as the canonical fields above. `lam_req`
+# stores a string per row ("1.0-1.3; 1.5-1.8") parsed at load via
+# `_parse_lam_req_str` into a list[(float, float)]. The four boolean
+# columns accept any of the truthy-ish text values _BOOL_TRUE_TOKENS.
+_LAM_REQ_KEYS = (
+    "lamreq", "lambdareq", "lambdarequired", "wavelengthrequired",
+    "requiredlam", "reqlam", "requiredwavelength",
+)
+_NO_GAP_KEYS = ("nogap", "gapless", "nodetectorgap")
+_EXT_BLUE_KEYS = ("extendblue", "extendsblue", "blueextends", "bluest")
+_EXT_RED_KEYS = ("extendred", "extendsred", "redextends", "reddest")
+_PROTECT_KEYS = (
+    "protect", "protected", "protectcollision", "collisionprotect",
+)
+_BOOL_TRUE_TOKENS = frozenset(
+    ("1", "true", "yes", "y", "t", "✓", "✔", "on")
+)
 
 # Trailing tokens that look like *units* on an otherwise-clean column
 # name — stripped after lowercasing + alphanumeric collapse so
@@ -249,6 +305,112 @@ def _as_str(table: Table, name: str | None) -> np.ndarray:
     return np.asarray([str(v) for v in table[name]], dtype=object)
 
 
+def _as_bool(table: Table, name: str | None) -> np.ndarray:
+    """Coerce a column to bool, recognising any value in
+    :data:`_BOOL_TRUE_TOKENS` as True. Empty / NaN / 0 / "false" are
+    False. Used to read the per-target boolean constraint columns."""
+    n = len(table)
+    if name is None:
+        return np.zeros(n, dtype=bool)
+    col = table[name]
+    out = np.zeros(n, dtype=bool)
+    mask = getattr(col, "mask", None)
+    for i, v in enumerate(col):
+        if mask is not None and mask is not False:
+            try:
+                if mask[i]:
+                    continue
+            except (TypeError, IndexError):
+                pass
+        if v is None:
+            continue
+        s = str(v).strip().lower()
+        if not s or s in ("nan", "none", "null", "--"):
+            continue
+        out[i] = s in _BOOL_TRUE_TOKENS
+    return out
+
+
+def _parse_lam_req_str(s: str) -> list[tuple[float, float]]:
+    """Parse the user-facing wavelength-range string format.
+
+    Format: zero or more ``"lo-hi"`` ranges in μm, semicolon- or
+    comma-separated. Examples:
+
+      ""                  → []
+      "1.0-1.3"           → [(1.0, 1.3)]
+      "1.0-1.3; 1.5-1.8"  → [(1.0, 1.3), (1.5, 1.8)]
+      "0.9 - 1.0, 2 - 3"  → [(0.9, 1.0), (2.0, 3.0)]
+
+    Invalid fragments are silently dropped — the popover UI shows a
+    yellow warning on save when it spots them; from the loader's
+    perspective they just become missing constraints.
+    """
+    if s is None:
+        return []
+    s = str(s).strip()
+    if not s or s.lower() in ("nan", "none", "null", "--"):
+        return []
+    out: list[tuple[float, float]] = []
+    for chunk in re.split(r"[;,]", s):
+        c = chunk.strip()
+        if not c:
+            continue
+        # "1.0-1.3" or "1.0 — 1.3" or "1.0 to 1.3"
+        m = re.match(
+            r"^\s*([\d.eE+-]+)\s*(?:-|–|—|to)\s*([\d.eE+-]+)\s*$",
+            c,
+        )
+        if not m:
+            continue
+        try:
+            lo, hi = float(m.group(1)), float(m.group(2))
+        except ValueError:
+            continue
+        if lo > hi:
+            lo, hi = hi, lo
+        if np.isfinite(lo) and np.isfinite(hi):
+            out.append((lo, hi))
+    return out
+
+
+def _format_lam_req(ranges) -> str:
+    """Inverse of :func:`_parse_lam_req_str` — serialise back to the
+    string format used in the CSV and in the popover input."""
+    if ranges is None:
+        return ""
+    parts: list[str] = []
+    for r in ranges:
+        try:
+            lo, hi = float(r[0]), float(r[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if np.isfinite(lo) and np.isfinite(hi):
+            parts.append(f"{lo:g}-{hi:g}")
+    return "; ".join(parts)
+
+
+def _as_lam_req(table: Table, name: str | None) -> np.ndarray:
+    """Read a wavelength-required column from the catalog. Each cell is
+    parsed by :func:`_parse_lam_req_str` into a `list[tuple]`; the
+    result is wrapped in a `dtype=object` array (ragged-friendly)."""
+    n = len(table)
+    if name is None:
+        return np.array([[] for _ in range(n)], dtype=object)
+    col = table[name]
+    out = np.empty(n, dtype=object)
+    mask = getattr(col, "mask", None)
+    for i, v in enumerate(col):
+        masked = False
+        if mask is not None and mask is not False:
+            try:
+                masked = bool(mask[i])
+            except (TypeError, IndexError):
+                masked = False
+        out[i] = [] if masked else _parse_lam_req_str(v)
+    return out
+
+
 def load_catalog(path: str) -> Catalog:
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fits", ".fit", ".fz"):
@@ -277,6 +439,13 @@ def load_catalog(path: str) -> Catalog:
     weight_col = _find_col(table, _WEIGHT_KEYS)
     mag_col = _find_col(table, _MAG_KEYS)
     z_col = _find_col(table, _Z_KEYS)
+    # Per-target constraint columns (v1.3.0+). All optional; defaults
+    # leave constraints unset and v1.2.x behaviour is preserved.
+    lam_req_col = _find_col(table, _LAM_REQ_KEYS)
+    no_gap_col = _find_col(table, _NO_GAP_KEYS)
+    extend_blue_col = _find_col(table, _EXT_BLUE_KEYS)
+    extend_red_col = _find_col(table, _EXT_RED_KEYS)
+    protect_col = _find_col(table, _PROTECT_KEYS)
     # If `name`/`label` was used as the ID fallback, don't ALSO claim it
     # as the label column — that would just duplicate the ID.
     label_candidates = _LABEL_KEYS
@@ -290,7 +459,9 @@ def load_catalog(path: str) -> Catalog:
     # so the catalog editor can show it. Stored as object arrays so we
     # don't lose mixed-type information.
     claimed = {c for c in (id_col, ra_col, dec_col, pri_col, weight_col,
-                           mag_col, z_col, label_col) if c}
+                           mag_col, z_col, label_col,
+                           lam_req_col, no_gap_col, extend_blue_col,
+                           extend_red_col, protect_col) if c}
     extras: dict = {}
     for col_name in table.colnames:
         if col_name in claimed:
@@ -318,6 +489,11 @@ def load_catalog(path: str) -> Catalog:
         mag=_as_float(table, mag_col),
         z=_as_float(table, z_col),
         label=_as_str(table, label_col),
+        required_lam=_as_lam_req(table, lam_req_col),
+        no_gap=_as_bool(table, no_gap_col),
+        extend_blue=_as_bool(table, extend_blue_col),
+        extend_red=_as_bool(table, extend_red_col),
+        protect=_as_bool(table, protect_col),
         source_path=path,
         extras=extras,
     )

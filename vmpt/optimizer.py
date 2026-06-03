@@ -42,7 +42,29 @@ from scipy.special import erfc
 
 from .coords import MSA_V2_REF, MSA_V3_REF, V3_IDL_Y_ANGLE
 from .msa import load_msa_grid, load_operability
-from .wavelengths import v2_overlap_distance
+from .wavelengths import (
+    cutoffs as _wavelength_cutoffs,
+    disperser_range,
+    interval_covered,
+    v2_overlap_distance,
+)
+
+
+# Drop-reason codes used by the per-pointing reason tally returned by
+# :meth:`PointingEvaluator.evaluate_with_reasons`. Stable identifiers
+# so downstream callers (results modal, tests) can key off them.
+DROP_COLLISION    = "collision"
+DROP_REQUIRED_LAM = "required_lam"
+DROP_NO_GAP       = "no_gap"
+DROP_EXTEND_BLUE  = "extend_blue"
+DROP_EXTEND_RED   = "extend_red"
+DROP_REASONS = (
+    DROP_COLLISION,
+    DROP_REQUIRED_LAM,
+    DROP_NO_GAP,
+    DROP_EXTEND_BLUE,
+    DROP_EXTEND_RED,
+)
 
 
 # Physical shutter dimensions on the focal plane (arcsec).
@@ -333,6 +355,15 @@ class PointingEvaluator:
         disperser: Optional[str] = None,
         filt: Optional[str] = None,
         reason: Optional[np.ndarray] = None,
+        # Per-target spectral constraints (v1.3.0+). Each is a length-N
+        # array parallel to ra_sources/dec_sources. Defaults preserve
+        # v1.2.x behaviour. See :meth:`_apply_constraint_drops` for the
+        # exact rules.
+        required_lam: Optional[np.ndarray] = None,
+        no_gap: Optional[np.ndarray] = None,
+        extend_blue: Optional[np.ndarray] = None,
+        extend_red: Optional[np.ndarray] = None,
+        protect: Optional[np.ndarray] = None,
     ):
         self.ra = np.asarray(ra_sources, dtype=float)
         self.dec = np.asarray(dec_sources, dtype=float)
@@ -349,14 +380,60 @@ class PointingEvaluator:
                 reason = reason_loaded
         self.operable = np.asarray(operable, dtype=bool)
         self.interpolators = _build_inverse_interpolators()
+        # Effective protect mask = (catalog-wide v1.2 cutoff)
+        #                       ∪ (per-target editor flag).
+        # Either source making a row protected enables the v1.2.x
+        # collision-protection rules for that row.
+        effective_protect = self._merge_protect_masks(protect_mask, protect)
         self._init_protection(
-            protect_mask=protect_mask,
+            protect_mask=effective_protect,
             priorities=priorities,
             weights=weights,
             disperser=disperser,
             filt=filt,
             reason=reason,
         )
+        self._init_spectral_constraints(
+            required_lam=required_lam,
+            no_gap=no_gap,
+            extend_blue=extend_blue,
+            extend_red=extend_red,
+            disperser=disperser,
+            filt=filt,
+        )
+
+    # -- per-target protect helpers ---------------------------------
+
+    def _merge_protect_masks(
+        self,
+        catalog_wide: Optional[np.ndarray],
+        per_target: Optional[np.ndarray],
+    ) -> Optional[np.ndarray]:
+        """Build the effective protect mask = OR of the two inputs.
+
+        Returns None when both inputs are None or all-False — the
+        common case, which skips :meth:`_init_protection`'s heavier
+        setup entirely.
+        """
+        n = len(self.ra)
+        a = (np.zeros(n, dtype=bool) if catalog_wide is None
+             else np.asarray(catalog_wide, dtype=bool))
+        b = (np.zeros(n, dtype=bool) if per_target is None
+             else np.asarray(per_target, dtype=bool))
+        if a.size != n and a.size != 0:
+            raise ValueError(
+                f"protect_mask size {a.size} != ra_sources size {n}"
+            )
+        if b.size != n and b.size != 0:
+            raise ValueError(
+                f"per-target protect size {b.size} != ra_sources size {n}"
+            )
+        if a.size == 0:
+            a = np.zeros(n, dtype=bool)
+        if b.size == 0:
+            b = np.zeros(n, dtype=bool)
+        merged = a | b
+        return merged if merged.any() else None
 
     # -- collision-protection setup ---------------------------------
 
@@ -461,6 +538,132 @@ class PointingEvaluator:
                 self._stuck_open_s = s_idx.astype(np.int32)
                 self._stuck_open_v2 = v2_vals
 
+    # -- spectral-constraint setup ----------------------------------
+
+    def _init_spectral_constraints(
+        self,
+        required_lam: Optional[np.ndarray],
+        no_gap: Optional[np.ndarray],
+        extend_blue: Optional[np.ndarray],
+        extend_red: Optional[np.ndarray],
+        disperser: Optional[str],
+        filt: Optional[str],
+    ) -> None:
+        """Cache per-target spectral constraints.
+
+        Lazily skipped when no target has a constraint set — the
+        common case (and v1.2.x behaviour) pays no construction cost.
+        """
+        n = len(self.ra)
+        self._constraint_enabled = False
+        self._required_lam = None
+        self._no_gap = np.zeros(n, dtype=bool)
+        self._extend_blue = np.zeros(n, dtype=bool)
+        self._extend_red = np.zeros(n, dtype=bool)
+        self._constraint_disperser = None
+        self._constraint_filt = None
+        self._disperser_lam_lo = None
+        self._disperser_lam_hi = None
+
+        # Per-target arrays. NaN-tolerant: a missing array stays as
+        # the all-False default; a mismatched-size array raises.
+        def _bool_array(arr, name):
+            if arr is None:
+                return np.zeros(n, dtype=bool)
+            a = np.asarray(arr, dtype=bool)
+            if a.size != n:
+                raise ValueError(
+                    f"{name} size {a.size} != ra_sources size {n}"
+                )
+            return a
+
+        if no_gap is not None:
+            self._no_gap = _bool_array(no_gap, "no_gap")
+        if extend_blue is not None:
+            self._extend_blue = _bool_array(extend_blue, "extend_blue")
+        if extend_red is not None:
+            self._extend_red = _bool_array(extend_red, "extend_red")
+
+        # required_lam is ragged (list of (lo, hi) tuples per source).
+        if required_lam is not None:
+            rl = np.asarray(required_lam, dtype=object)
+            if rl.size != n:
+                raise ValueError(
+                    f"required_lam size {rl.size} != ra_sources size {n}"
+                )
+            # Coerce each entry to a list of (float, float) tuples for
+            # uniform downstream access; sanitise garbage entries.
+            self._required_lam = np.empty(n, dtype=object)
+            for i in range(n):
+                entry = rl[i]
+                if entry is None or (isinstance(entry, float)
+                                     and np.isnan(entry)):
+                    self._required_lam[i] = []
+                    continue
+                try:
+                    cleaned = [
+                        (float(lo), float(hi)) for lo, hi in entry
+                        if np.isfinite(float(lo)) and np.isfinite(float(hi))
+                    ]
+                except (TypeError, ValueError):
+                    cleaned = []
+                self._required_lam[i] = cleaned
+        else:
+            self._required_lam = np.array([[] for _ in range(n)], dtype=object)
+
+        # Any constraint flagged on at least one target?
+        has_required = any(len(r) > 0 for r in self._required_lam)
+        has_any = (
+            has_required
+            or self._no_gap.any()
+            or self._extend_blue.any()
+            or self._extend_red.any()
+        )
+        if not has_any:
+            return
+        if disperser is None or filt is None:
+            raise ValueError(
+                "per-target spectral constraints are set; disperser "
+                "and filt are required to evaluate them."
+            )
+
+        self._constraint_enabled = True
+        self._constraint_disperser = str(disperser).upper()
+        self._constraint_filt = str(filt).upper()
+        # Cache the disperser/filter nominal range for the extend_blue
+        # and extend_red checks. None when the combo isn't recognised —
+        # extend_* constraints then always fail (which is what the user
+        # would want: "extend to the bluest of an unsupported combo"
+        # has no satisfiable answer).
+        rng = disperser_range(self._constraint_disperser,
+                              self._constraint_filt)
+        if rng is not None:
+            self._disperser_lam_lo, self._disperser_lam_hi = rng
+        # Scan the precomputed per-shutter dispersion table to find
+        # the actual "best" lam_blue and lam_red ACHIEVABLE for this
+        # (disp, filt) across the MSA. extend_blue passes iff the
+        # source's shutter lam_blue is within EDGE_TOL of this
+        # MSA-best value (so per-shutter variation doesn't spuriously
+        # fail every source). Falls back to the nominal range if the
+        # table isn't loadable.
+        self._table_best_lam_blue = self._disperser_lam_lo
+        self._table_best_lam_red = self._disperser_lam_hi
+        if (self._extend_blue.any() or self._extend_red.any()):
+            from .wavelengths import _load_dispersion_table
+            tbl = _load_dispersion_table()
+            if tbl is not None:
+                key_blue = f"{self._constraint_disperser}_{self._constraint_filt}_blue_edge"
+                key_red  = f"{self._constraint_disperser}_{self._constraint_filt}_red_edge"
+                if key_blue in tbl and key_red in tbl:
+                    arr_b = np.asarray(tbl[key_blue], dtype=float)
+                    arr_r = np.asarray(tbl[key_red], dtype=float)
+                    # NaN-aware min/max — np.nanmin handles all-NaN
+                    # by raising; guard with finite check.
+                    if np.isfinite(arr_b).any():
+                        self._table_best_lam_blue = float(np.nanmin(arr_b))
+                    if np.isfinite(arr_r).any():
+                        self._table_best_lam_red = float(np.nanmax(arr_r))
+
     # -- evaluation --------------------------------------------------
 
     def evaluate(
@@ -489,9 +692,34 @@ class PointingEvaluator:
                tuple[np.ndarray, np.ndarray, np.ndarray], int]:
         """Like :meth:`evaluate` plus an ``n_dropped`` count of sources
         that landed in operable, centred shutters but were excluded by
-        the collision-protection rules at this pointing.
+        either the collision-protection rules (v1.2.0+) or the per-
+        target spectral constraints (v1.3.0+) at this pointing.
 
-        ``n_dropped == 0`` when no protection is configured.
+        ``n_dropped == 0`` when neither protection nor constraints are
+        configured. See :meth:`evaluate_with_reasons` for a per-reason
+        breakdown.
+        """
+        kept, tp, idx, reasons = self.evaluate_with_reasons(
+            ra_p, dec_p, pa_v3, theta_deg=theta_deg,
+        )
+        return kept, tp, idx, int(sum(reasons.values()))
+
+    def evaluate_with_reasons(
+        self,
+        ra_p: float, dec_p: float, pa_v3: float,
+        theta_deg: float = 90.0,
+    ) -> tuple[np.ndarray, np.ndarray,
+               tuple[np.ndarray, np.ndarray, np.ndarray], dict]:
+        """Like :meth:`evaluate_with_stats` but returns a dict of
+        per-reason drop counts instead of just a scalar.
+
+        Keys are the constants in :data:`DROP_REASONS`
+        (``collision``, ``required_lam``, ``no_gap``, ``extend_blue``,
+        ``extend_red``). Values sum to the same scalar
+        ``evaluate_with_stats`` returns.
+
+        Empty dict when neither protection nor constraints are
+        configured.
         """
         axy = radec_to_axy(self.ra, self.dec, ra_p, dec_p, pa_v3, theta_deg)
         quad, s_frac, d_frac = axy_to_shutter(axy, self.interpolators)
@@ -501,14 +729,29 @@ class PointingEvaluator:
             tp = _gaussian_through_shutter(s_frac, d_frac, self.sigma)
         tp = np.where(operable_mask & centered, tp, 0.0)
         detected = tp > 0
+        reasons: dict = {r: 0 for r in DROP_REASONS}
 
-        if not self._protect_enabled:
-            return detected, tp, (quad, s_frac, d_frac), 0
+        if not (self._protect_enabled or self._constraint_enabled):
+            return detected, tp, (quad, s_frac, d_frac), reasons
 
-        kept = self._apply_collision_drops(detected, quad, s_frac, d_frac)
-        n_dropped = int(detected.sum() - kept.sum())
+        kept = detected.copy()
+        # Collision rules first (their losers don't get re-checked by
+        # the spectral rules — they're already dropped).
+        if self._protect_enabled:
+            after_collision = self._apply_collision_drops(
+                kept, quad, s_frac, d_frac,
+            )
+            reasons[DROP_COLLISION] = int(kept.sum() - after_collision.sum())
+            kept = after_collision
+        # Spectral constraints (per target).
+        if self._constraint_enabled:
+            kept, spec_reasons = self._apply_constraint_drops(
+                kept, quad, s_frac, d_frac,
+            )
+            for k, v in spec_reasons.items():
+                reasons[k] = reasons.get(k, 0) + int(v)
         tp_kept = np.where(kept, tp, 0.0)
-        return kept, tp_kept, (quad, s_frac, d_frac), n_dropped
+        return kept, tp_kept, (quad, s_frac, d_frac), reasons
 
     # -- collision rules ---------------------------------------------
 
@@ -661,6 +904,137 @@ class PointingEvaluator:
                 kept[unprot_idx[collide.any(axis=1)]] = False
 
         return kept
+
+    # -- spectral-constraint rules ----------------------------------
+
+    def _apply_constraint_drops(
+        self,
+        detected: np.ndarray,
+        quad: np.ndarray,
+        s_frac: np.ndarray,
+        d_frac: np.ndarray,
+    ) -> tuple[np.ndarray, dict]:
+        """Apply the per-target spectral constraints (v1.3.0+).
+
+        For every detected source with at least one of
+        ``required_lam``, ``no_gap``, ``extend_blue``, ``extend_red``
+        set, look up the centre shutter's wavelength endpoints via
+        :func:`vmpt.wavelengths.cutoffs` and drop the source if any
+        flagged constraint fails.
+
+        Returns ``(kept, reasons)`` where ``reasons`` is a dict
+        keyed by the relevant ``DROP_*`` constants. Each source can
+        only be dropped once — the first constraint that fails wins
+        the bookkeeping. (We still check all constraints for one
+        source so a future "explain why this source dropped" UI has
+        access to the full list; that needs the per-source detail
+        which we don't currently expose.)
+        """
+        reasons = {
+            DROP_REQUIRED_LAM: 0,
+            DROP_NO_GAP: 0,
+            DROP_EXTEND_BLUE: 0,
+            DROP_EXTEND_RED: 0,
+        }
+        if not self._constraint_enabled:
+            return detected, reasons
+
+        kept = detected.copy()
+        disp = self._constraint_disperser
+        filt = self._constraint_filt
+        lam_lo = self._disperser_lam_lo
+        lam_hi = self._disperser_lam_hi
+        # Tolerance (μm) for the extend_blue / extend_red comparison.
+        # 20 nm absorbs per-shutter wavelength-solution variation —
+        # for PRISM typical centre shutters land at 0.604 while the
+        # table-wide minimum is 0.600 (a few resolution elements'
+        # spread). Edge truncation pushes lam_blue much further red
+        # than this so the constraint still fires in the case it's
+        # designed to catch.
+        EDGE_TOL = 0.020
+
+        in_grid = (quad > 0) & detected
+        if not in_grid.any():
+            return kept, reasons
+        idx = np.where(in_grid)[0]
+
+        for i in idx:
+            req = self._required_lam[i] if self._required_lam is not None else []
+            need_no_gap = self._no_gap[i]
+            need_blue = self._extend_blue[i]
+            need_red = self._extend_red[i]
+            if not (req or need_no_gap or need_blue or need_red):
+                continue
+
+            q = int(quad[i])
+            s_int = int(round(float(s_frac[i])))
+            d_int = int(round(float(d_frac[i])))
+            # cutoffs() takes 1-based shutter indices.
+            try:
+                bounds = _wavelength_cutoffs(
+                    0.0, 0.0, disp, filt,
+                    q=q, s=s_int + 1, d=d_int + 1,
+                )
+            except Exception:  # noqa: BLE001
+                bounds = None
+            if bounds is None:
+                # Disperser/filter combination not in the per-shutter
+                # table — every spectral constraint fails by default.
+                kept[i] = False
+                # Attribute the drop to the first flagged reason in a
+                # stable order.
+                if req:
+                    reasons[DROP_REQUIRED_LAM] += 1
+                elif need_no_gap:
+                    reasons[DROP_NO_GAP] += 1
+                elif need_blue:
+                    reasons[DROP_EXTEND_BLUE] += 1
+                elif need_red:
+                    reasons[DROP_EXTEND_RED] += 1
+                continue
+            # cutoffs() returns None for values that are NaN OR below
+            # the filter blue cutoff. We treat None as NaN throughout
+            # the constraint checks — interval_covered etc. handle
+            # NaN bounds correctly.
+            def _to_f(v):
+                return float("nan") if v is None else float(v)
+            blue = _to_f(bounds["lam_blue"])
+            gap_lo = _to_f(bounds["lam_gap_lo"])
+            gap_hi = _to_f(bounds["lam_gap_hi"])
+            red = _to_f(bounds["lam_red"])
+
+            dropped_reason = None
+            # Required wavelength ranges — every interval must be
+            # covered (with the gap excluded). First failure wins.
+            if req:
+                for (lo, hi) in req:
+                    if not interval_covered(lo, hi, blue, gap_lo, gap_hi, red):
+                        dropped_reason = DROP_REQUIRED_LAM
+                        break
+            if dropped_reason is None and need_no_gap:
+                if np.isfinite(gap_lo) and np.isfinite(gap_hi):
+                    dropped_reason = DROP_NO_GAP
+            if dropped_reason is None and need_blue:
+                # The "extend to bluest" comparison is against the
+                # MSA-WIDE best lam_blue cached at init time (not the
+                # disperser's nominal range), so per-shutter
+                # dispersion variation doesn't spuriously fail every
+                # source. None / NaN → can't satisfy → drop.
+                ref_blue = self._table_best_lam_blue
+                if (ref_blue is None or not np.isfinite(blue)
+                        or blue > ref_blue + EDGE_TOL):
+                    dropped_reason = DROP_EXTEND_BLUE
+            if dropped_reason is None and need_red:
+                ref_red = self._table_best_lam_red
+                if (ref_red is None or not np.isfinite(red)
+                        or red < ref_red - EDGE_TOL):
+                    dropped_reason = DROP_EXTEND_RED
+
+            if dropped_reason is not None:
+                kept[i] = False
+                reasons[dropped_reason] += 1
+
+        return kept, reasons
 
     # -- internals ---------------------------------------------------
 
