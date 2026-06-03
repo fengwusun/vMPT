@@ -475,7 +475,11 @@ opt_advanced_modal_backdrop = Div(
         "position": "fixed", "top": "0", "left": "0",
         "right": "0", "bottom": "0",
         "background": "rgba(20, 30, 50, 0.40)",
-        "z-index": "999",
+        # Above the optimizer config modal (z-index 1000) — Advanced
+        # settings is opened FROM inside the config modal, so it must
+        # stack on top of it, otherwise the config card covers the
+        # Advanced card. Same reasoning for the card below.
+        "z-index": "1001",
     },
 )
 opt_advanced_modal_card = column(
@@ -502,7 +506,9 @@ opt_advanced_modal_card = column(
         "border-radius": "6px",
         "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
         "padding": "16px 18px",
-        "z-index": "1000",
+        # Sits above the config modal card (z-index 1000) so it
+        # actually overlays it when opened from inside.
+        "z-index": "1002",
         "max-height": "85vh",
         "overflow-y": "auto",
     },
