@@ -3,21 +3,33 @@
   vMPT — visual MSA Planning Tool
 </h1>
 
-Interactive Bokeh app for hand-picking JWST/NIRSpec MSA shutter
-configurations on an image of the target field. Lets you (and your
-collaborators) pick shutters one at a time, see the spectral
-conflicts in real time, and export a bundle that loads into APT
-and/or the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
+Interactive Bokeh app for planning JWST/NIRSpec MSA observations
+**directly on an image of the target field**. vMPT combines:
 
-vMPT mirrors the workflow of MPT and eMPT but **without** the
-automated optimization step — you keep full control. Save the state
-as a JSON file, send it to a collaborator, and they pick up where
-you left off.
+- **Automated MSA pointing optimization** — derived from hMPT
+  (Eisenstein, McCarty, Wu, CfA), itself a Python re-implementation
+  of ESA's eMPT (Bonaventura et al. 2023). Grid + differential-
+  evolution search over (RA, Dec, V3 PA) in three modes: Democracy
+  (count), Meritocracy (Σ weight), Hierarchy (strict priority
+  tiers).
+- **Shutter-collision protection** — mark high-priority targets
+  whose spectra must not overlap any other source on the detector
+  under the current Disperser / Filter. Slitlet-aware row buffer
+  (`v1.2.1+`) reserves one row above and below each protected
+  slitlet, including against stuck-open shutters.
+- **Hand-picking + live conflict feedback** — click any shutter to
+  open an N-shutter slitlet, watch the orange spec-overlap layer
+  light up in real time, undo / redo at will.
+- **APT / eMPT-ready export** — write an MPT_plan.json + .cat
+  bundle that loads straight into APT, plus the three CSVs that
+  feed the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
+- **Sharing** — save the whole session as a JSON file, send it to a
+  collaborator, and they pick up exactly where you left off.
 
-![status](https://img.shields.io/badge/tests-63%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-139%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.0.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.2.1-blueviolet)
 
 ![vMPT interface](docs/interface.jpg)
 
