@@ -60,7 +60,7 @@ Homepage      = "https://github.com/fengwusun/vMPT"
 Source        = "https://github.com/fengwusun/vMPT"
 Issues        = "https://github.com/fengwusun/vMPT/issues"
 Changelog     = "https://github.com/fengwusun/vMPT/blob/main/CHANGELOG.md"
-Documentation = "https://github.com/fengwusun/vMPT#readme"
+Documentation = "https://vmpt.readthedocs.io/"
 
 [tool.setuptools]
 # Explicit package list — `examples/` and `tests/` are NOT included.

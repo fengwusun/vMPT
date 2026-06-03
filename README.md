@@ -26,11 +26,14 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 - **Sharing** — save the whole session as a JSON file, send it to a
   collaborator, and they pick up exactly where you left off.
 
+[![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
 ![status](https://img.shields.io/badge/tests-139%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![release](https://img.shields.io/badge/release-v1.2.2-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
+
+📖 **Full documentation: <https://vmpt.readthedocs.io/>**
 
 ![vMPT interface](docs/interface.jpg)
 
