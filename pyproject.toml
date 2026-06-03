@@ -7,7 +7,14 @@ name = "jwst-vmpt"
 version = "1.2.2"
 description = "Visual MSA Planning Tool — interactive Bokeh app for JWST/NIRSpec MSA shutter configuration, with hMPT-derived pointing optimization and shutter-collision protection."
 readme = "README.md"
-license = { text = "MIT" }
+# PEP 639 SPDX license expression. The OLD table form
+# (`license = { text = "MIT" }`) plus the
+# `License :: OSI Approved :: MIT License` classifier was rejected
+# by TestPyPI / PyPI's Warehouse with a generic 400 Bad Request when
+# Metadata-Version 2.4 is emitted — Warehouse now enforces "SPDX
+# expression OR classifier, not both."
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [
     { name = "Fengwu Sun" },
 ]
@@ -18,7 +25,6 @@ classifiers = [
     "Environment :: Web Environment",
     "Framework :: Bokeh",
     "Intended Audience :: Science/Research",
-    "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.10",
