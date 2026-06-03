@@ -238,16 +238,59 @@ catalog_list_column = column(width=SIDEBAR_W - 20)
 # a native file picker (via a tkinter subprocess) and writes the chosen
 # path into the text input — which triggers the existing on_<path>_path
 # callback. No upload, no WebSocket size limit.
-fits_browse_btn = Button(label="Browse…", button_type="default", width=80)
-jpg_browse_btn = Button(label="Browse…", button_type="default", width=80)
-sidecar_browse_btn = Button(label="Browse…", button_type="default", width=80)
-catalog_browse_btn = Button(label="Browse…", button_type="default", width=80)
-mpt_json_browse_btn = Button(label="Browse…", button_type="default", width=80)
-mpt_csv_browse_btn = Button(label="Browse…", button_type="default", width=80)
-apt_path_browse_btn = Button(label="Browse…", button_type="default", width=80)
-session_save_browse_btn = Button(label="Browse…", button_type="default", width=80)
-session_load_browse_btn = Button(label="Browse…", button_type="default", width=80)
-export_dir_browse_btn = Button(label="Browse…", button_type="default", width=80)
+fits_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+jpg_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+sidecar_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+catalog_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+mpt_json_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+mpt_csv_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+apt_path_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+session_save_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+session_load_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+export_dir_browse_btn = Button(label="Browse…", button_type="primary", width=120)
+
+
+def _wrap_path_picker(text_input, browse_btn, *,
+                      header_html: str = "", edit_label: str = "Edit path"):
+    """Wrap a (path TextInput + Browse button) pair so Browse is the
+    primary affordance and the path TextInput is hidden behind an
+    "Edit path" toggle.
+
+    The TextInput stays hidden when empty but auto-reveals as soon as
+    it has a value (so paths populated by Browse, by autoload, or by
+    direct typing all surface to the user). Clicking the toggle
+    re-hides it. This keeps the Input + MPT tabs tidy by default
+    without forcing power-users to lose visibility of their loaded
+    paths.
+    """
+    visible_now = bool((text_input.value or "").strip())
+    text_input.visible = visible_now
+    edit_btn = Button(
+        label=("Hide path" if visible_now else edit_label),
+        button_type="default", width=80, height=26,
+        css_classes=["vmpt-help-toggle"],
+    )
+
+    def _toggle(_e=None):
+        text_input.visible = not text_input.visible
+        edit_btn.label = "Hide path" if text_input.visible else edit_label
+
+    edit_btn.on_click(_toggle)
+
+    def _on_value(attr, old, new):
+        # Auto-reveal when a path is filled (Browse pick or autoload),
+        # but keep the user's manual toggle state otherwise.
+        if (new or "").strip() and not text_input.visible:
+            text_input.visible = True
+            edit_btn.label = "Hide path"
+    text_input.on_change("value", _on_value)
+
+    parts = []
+    if header_html:
+        parts.append(Div(text=header_html, width=SIDEBAR_W - 20))
+    parts.append(row(browse_btn, edit_btn, spacing=6))
+    parts.append(text_input)
+    return column(*parts, spacing=2)
 
 # Catalog filters — hide-able. Numeric thresholds; leave blank/empty to skip.
 catalog_priority_input = TextInput(
@@ -318,6 +361,11 @@ opt_method_select = Select(
     width=SIDEBAR_W - 20,
 )
 opt_method_help_div = Div(
+    # The full method-comparison blurb. Hidden by default — the
+    # dropdown's option labels ("Democracy — most targets" etc.) are
+    # self-describing, and the inline blurb made the Pointing tab
+    # taller than most laptops' viewport. Toggled by clicking the
+    # ⓘ helper next to the dropdown.
     text=(
         "<small style='color:#5a6b85; line-height:1.4'>"
         "<b>Democracy</b>: maximises raw count, ignores priority/weight.<br>"
@@ -328,7 +376,31 @@ opt_method_help_div = Div(
         "(requires <code>priority</code> column).</small>"
     ),
     width=SIDEBAR_W - 20,
+    visible=False,
 )
+# Inline ⓘ that toggles the blurb on demand. Bokeh has no native
+# tooltip widget, so we fake it with a click-to-expand Div + small
+# button. Keeps the default Pointing-tab layout compact while still
+# letting curious users reveal the method comparison without leaving
+# the page.
+opt_method_help_toggle = Button(
+    label="ⓘ What do these mean?",
+    button_type="default",
+    width=SIDEBAR_W - 20,
+    height=24,
+    css_classes=["vmpt-help-toggle"],
+)
+
+
+def _toggle_method_help() -> None:
+    opt_method_help_div.visible = not opt_method_help_div.visible
+    opt_method_help_toggle.label = (
+        "ⓘ Hide method help" if opt_method_help_div.visible
+        else "ⓘ What do these mean?"
+    )
+
+
+opt_method_help_toggle.on_click(_toggle_method_help)
 opt_centration_select = Select(
     title="Source centering",
     options=["UNCONSTRAINED", "ENTIRE_OPEN", "MIDPOINT",
@@ -543,6 +615,38 @@ _cat_edit_css = Div(text="""
     user-select: text !important;
     -webkit-user-select: text !important;
   }
+  /* Top-right × dismiss buttons on pop-up modals. The Bokeh layout
+     can't position the button absolutely, so we mark it with a CSS
+     class and float it into the corner via CSS. */
+  .vmpt-modal-x button {
+    position: absolute;
+    top: 6px; right: 8px;
+    background: transparent;
+    border: 1px solid transparent;
+    color: #5a6b85;
+    font-size: 20px;
+    line-height: 18px;
+    padding: 2px 8px;
+    cursor: pointer;
+    border-radius: 4px;
+  }
+  .vmpt-modal-x button:hover {
+    color: #1a3b66;
+    background: rgba(20, 30, 50, 0.06);
+    border-color: #c8d0de;
+  }
+  /* The ⓘ help toggle next to the Method dropdown. Subtler than a
+     normal button — looks like a link rather than a button. */
+  .vmpt-help-toggle button {
+    background: transparent;
+    border: 0;
+    color: #5a6b85;
+    text-align: left;
+    padding: 2px 0;
+    font-size: 12px;
+    cursor: pointer;
+  }
+  .vmpt-help-toggle button:hover { color: #1a3b66; }
 </style>
 """, width=0, height=0)
 cat_edit_undo_btn = Button(label="↶ Undo", button_type="default", width=100)
@@ -561,6 +665,25 @@ cat_edit_csv_save_btn = Button(label="Save as CSV",
 cat_edit_apply_btn = Button(label="Apply changes & close",
                             button_type="primary", width=200)
 cat_edit_close_btn = Button(label="Cancel", button_type="default", width=80)
+# Top-right × dismiss button. Functionally identical to "Cancel" —
+# discards any unapplied edits and closes the modal. Mirrors the
+# standard close affordance every user already knows from any
+# dialog. Wired in `_close_cat_edit_modal` to share the existing
+# close handler.
+cat_edit_top_close_btn = Button(
+    label="×",
+    button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+    # Inline styles work even when the modal's stylesheet doesn't
+    # penetrate Bokeh's nested wrappers; pinning the wrapper div to
+    # the corner of the modal card via absolute positioning.
+    styles={
+        "position": "absolute",
+        "top": "6px", "right": "8px",
+        "z-index": "5",
+    },
+)
 
 cat_edit_modal_backdrop = Div(
     text="", width=0, height=0, visible=False,
@@ -572,6 +695,11 @@ cat_edit_modal_backdrop = Div(
     },
 )
 cat_edit_modal_card = column(
+    # Top-right × dismiss. CSS in `_cat_edit_css` floats it into the
+    # corner of the modal card — Bokeh layouts don't support absolute
+    # positioning natively, so the button sits at the top of the
+    # column and CSS does the rest.
+    cat_edit_top_close_btn,
     Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
              "Edit catalog</h3>"
              "<div style='font-size:12px; color:#5a6b85'>"
@@ -615,9 +743,94 @@ cat_edit_modal_card = column(
 
 opt_run_btn = Button(label="Run optimization",
                     button_type="primary", width=SIDEBAR_W - 20)
-opt_status_div = Div(
-    text="<small><i>Load a catalog with priorities, then click Run.</i></small>",
+# The Pointing-tab CTA that opens the optimizer's config modal. The
+# config widgets used to live inline in the Pointing tab; on a 913 px
+# laptop screen they pushed the actual Run button below the fold.
+# Wrapping them in a modal keeps the Pointing tab compact.
+opt_open_btn = Button(
+    label="Open optimizer…",
+    button_type="primary",
     width=SIDEBAR_W - 20,
+)
+opt_status_div = Div(
+    # Updated live by `_refresh_opt_status_div` from the catalog +
+    # method state. Default is a neutral placeholder for when there's
+    # no catalog at all.
+    text=("<small style='color:#5a6b85'>"
+          "Load a catalog (Input tab) before running.</small>"),
+    width=SIDEBAR_W - 20,
+)
+# Config modal: wraps every optimizer input + the Run button so the
+# Pointing tab can stay short. Built later (after all widgets are
+# defined); see `opt_config_modal_card` and `_open_opt_config_modal`.
+opt_config_close_btn = Button(
+    label="Cancel",
+    button_type="default", width=80,
+)
+opt_config_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+    styles={
+        "position": "absolute",
+        "top": "6px", "right": "8px",
+        "z-index": "5",
+    },
+)
+opt_config_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
+)
+
+# The actual config modal body. All the optimizer-config widgets
+# (Method, ΔRA/ΔDec/ΔPA, Refine top N, Source centering, Priority
+# cutoff, Protect-spectra group, Advanced settings…, Run optimization,
+# status) live here. The Pointing tab now just shows a single
+# "Open optimizer…" button that flips this card's `visible`.
+opt_config_modal_card = column(
+    opt_config_top_close_btn,
+    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
+             "MSA pointing optimizer</h3>"
+             "<div style='font-size:12px; color:#5a6b85'>"
+             "Searches (RA, Dec, V3 PA) within the box below for the "
+             "best placement. Adjust the inputs, then <b>Run</b>.</div>",
+        width=SIDEBAR_W + 30),
+    opt_method_select,
+    opt_method_help_toggle,
+    opt_method_help_div,
+    row(opt_dra_input, opt_ddec_input, spacing=12),
+    row(opt_dpa_input, opt_n_top_input, spacing=12),
+    opt_centration_select,
+    opt_priority_input,
+    opt_protect_section_div,
+    opt_protect_enable_cb,
+    opt_protect_mode_radio,
+    opt_protect_threshold_input,
+    opt_protect_status_div,
+    opt_advanced_btn,
+    row(opt_run_btn, opt_config_close_btn, spacing=10),
+    opt_status_div,
+    spacing=10,
+    width=SIDEBAR_W + 70,
+    visible=False,
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 18px",
+        "z-index": "1000",
+        "max-height": "92vh",
+        "overflow-y": "auto",
+    },
 )
 # Results live in a column that's rebuilt after every run. Each row
 # is a Button labelled with the rank + score + delta-pointing.
@@ -781,7 +994,7 @@ loading_banner = Div(
 )
 
 # Quick-help panel rendered on the right side of the figure.
-help_toggle_btn = Button(label="Hide help", button_type="default", width=110)
+help_toggle_btn = Button(label="Show help", button_type="default", width=110)
 
 # ── Rotating tip strip ───────────────────────────────────────────────────────
 # The help panel shows a rotating one-liner tip on top, and the full
@@ -947,15 +1160,28 @@ help_div = Div(
 
 
 def on_help_toggle():
-    help_div.visible = not help_div.visible
-    tip_div.visible = not tip_div.visible
-    help_toggle_btn.label = "Hide help" if help_div.visible else "Show help"
+    showing = not help_div.visible
+    help_div.visible = showing
+    tip_div.visible = showing
+    help_toggle_btn.label = "Hide help" if showing else "Show help"
+    # Resize the column itself so the help panel actually gives back
+    # horizontal real-estate to the figure column when collapsed. The
+    # figure itself has fixed `frame_width`/`frame_height`, so the
+    # canvas pixel aspect doesn't change — only the empty space around
+    # it grows / shrinks.
+    help_panel.width = HELPPANEL_W if showing else 130
 
 
+# Collapsed by default — the Quick guide + rotating tip are useful
+# for first-run users but eat ~340 px of horizontal real estate every
+# session. Returning users get a wider workspace; one click on
+# "Show help" brings the panel back.
+help_div.visible = False
+tip_div.visible = False
 help_toggle_btn.on_click(on_help_toggle)
 help_panel = column(
     help_toggle_btn, tip_div, help_div,
-    width=HELPPANEL_W,
+    width=130,
     # The Quick guide is long. Make the help panel scroll vertically
     # within whatever height it gets in the page layout, so users on
     # smaller screens can still reach the bottom of the guide.
@@ -2206,6 +2432,10 @@ def _rebuild_merged_catalog() -> None:
         state["catalog"] = None
         state["catalog_colors"] = None
         state["catalog_alphas"] = None
+        try:
+            _refresh_opt_status_div()
+        except NameError:
+            pass
         return
 
     # Depth is the catalog's index in state['catalogs'] (NOT the
@@ -2272,6 +2502,15 @@ def _rebuild_merged_catalog() -> None:
     )
     state["catalog_colors"] = colors
     state["catalog_alphas"] = alphas
+    # Keep the optimizer's status line in sync with what the catalog
+    # actually has — was previously a static "Load a catalog with
+    # priorities…" message that confused users with catalogs already
+    # loaded. Defined later in the file; gated on existence so the
+    # initial autoload doesn't hit a forward-reference error.
+    try:
+        _refresh_opt_status_div()
+    except NameError:
+        pass
 
 
 def _assign_catalog_color(index: int) -> str:
@@ -4032,6 +4271,75 @@ opt_advanced_btn.on_click(_open_advanced_modal)
 opt_advanced_modal_close_btn.on_click(_close_advanced_modal)
 
 
+def _refresh_opt_status_div() -> None:
+    """Update the status line under the Run button to match the
+    current catalog + method state.
+
+    Replaces the static "Load a catalog with priorities, then click
+    Run." message that used to show even when a catalog *with*
+    priorities was loaded. Triggers: catalog load / remove, method
+    change, weight/priority computation, protect-mode toggle.
+    """
+    cat = state.get("catalog") if state else None
+    if cat is None or len(cat.ra_deg) == 0:
+        opt_status_div.text = (
+            "<small style='color:#5a6b85'>"
+            "Load a catalog (Input tab) before running.</small>"
+        )
+        return
+    n = len(cat.ra_deg)
+    method = opt_method_select.value or "Democracy"
+    pri = np.asarray(getattr(cat, "priority", []), dtype=float)
+    wgt = np.asarray(getattr(cat, "weight", []), dtype=float)
+    has_pri = pri.size == n and np.isfinite(pri).any()
+    has_wgt = wgt.size == n and np.isfinite(wgt).any()
+    if method == "Meritocracy" and not has_wgt:
+        opt_status_div.text = (
+            "<small style='color:#a05a30'>"
+            "⚠ Meritocracy needs a <code>weight</code> column. "
+            "Use the catalog editor to add weights or "
+            "<b>Compute w from p</b>.</small>"
+        )
+        return
+    if method == "Hierarchy" and not has_pri:
+        opt_status_div.text = (
+            "<small style='color:#a05a30'>"
+            "⚠ Hierarchy needs a <code>priority</code> column. "
+            "Use the catalog editor to add priorities.</small>"
+        )
+        return
+    opt_status_div.text = (
+        f"<small style='color:#1a3b66'>"
+        f"Ready · <b>{n:,}</b> sources · {method}.</small>"
+    )
+
+
+# ── Optimizer config modal handlers ─────────────────────────────────
+def _open_opt_config_modal():
+    # Refresh the status text every time the modal opens so it
+    # reflects the catalog + method state the user is about to see.
+    _refresh_opt_status_div()
+    opt_config_modal_backdrop.visible = True
+    opt_config_modal_card.visible = True
+
+
+def _close_opt_config_modal():
+    opt_config_modal_backdrop.visible = False
+    opt_config_modal_card.visible = False
+
+
+opt_open_btn.on_click(_open_opt_config_modal)
+opt_config_close_btn.on_click(_close_opt_config_modal)
+opt_config_top_close_btn.on_click(_close_opt_config_modal)
+
+# Keep the status line live as the user changes the method or
+# touches the catalog. The catalog-change hook is set up later, in
+# the catalog-load handlers, where state["catalog"] is mutated.
+opt_method_select.on_change(
+    "value", lambda attr, old, new: _refresh_opt_status_div(),
+)
+
+
 # ── Catalog editor handlers ──────────────────────────────────────────────
 
 # Undo / redo stacks hold prior-state snapshots (copies of the
@@ -4640,6 +4948,7 @@ def _fmt_num(v: float) -> str:
 
 catalog_edit_btn.on_click(_cat_edit_open)
 cat_edit_close_btn.on_click(_cat_edit_close)
+cat_edit_top_close_btn.on_click(_cat_edit_close)
 cat_edit_select.on_change("value", _on_cat_edit_select)
 cat_edit_columns_choice.on_change("value", _on_cat_edit_columns_change)
 cat_edit_new_col_btn.on_click(_on_cat_edit_add_column)
@@ -5845,6 +6154,9 @@ def on_optimize():
         "protect_threshold": opt_protect_threshold_input.value,
     })
 
+    # Close the config modal now that we've kicked off the run; the
+    # progress + results modal takes over the screen.
+    _close_opt_config_modal()
     _opt_show_modal()
     _opt_update_progress(
         f"Grid: 0 / {n_total:,} pointings over {n_sources} sources…", 0.0,
@@ -5905,14 +6217,25 @@ slitlet_select.on_change("value", on_slitlet_height)
 image_tab = TabPanel(title="Input", child=column(
     Div(text="<b>Image</b> — try an example:"),
     row(example_a370_btn, example_r0600_btn),
-    Div(text="<small><b>or</b> a local FITS:</small>"),
-    row(fits_path_input, fits_browse_btn),
+    _wrap_path_picker(
+        fits_path_input, fits_browse_btn,
+        header_html="<small><b>or</b> a local FITS:</small>",
+    ),
     Div(text="<small><b>or</b> JPG + sidecar FITS:</small>"),
-    row(sidecar_path_input, sidecar_browse_btn),
-    row(jpg_path_input, jpg_browse_btn),
+    _wrap_path_picker(
+        sidecar_path_input, sidecar_browse_btn,
+        header_html="<small>Sidecar FITS (WCS)</small>",
+    ),
+    _wrap_path_picker(
+        jpg_path_input, jpg_browse_btn,
+        header_html="<small>JPG / PNG</small>",
+    ),
     Div(text="<b>Catalogs</b> <small>(CSV / ASCII / FITS with ID, RA, DEC; "
              "you can load multiple — each can be toggled on/off or removed)</small>"),
-    row(catalog_path_input, catalog_browse_btn),
+    _wrap_path_picker(
+        catalog_path_input, catalog_browse_btn,
+        header_html="",
+    ),
     row(catalog_add_btn),
     catalog_list_column,
     catalog_edit_btn,
@@ -5935,24 +6258,16 @@ aim_tab = TabPanel(title="Pointing", child=column(
     visibility_div,
     Div(text="<b>Optimize MSA pointing</b> "
              "<small>(grid search + refine, hMPT-derived)</small>"),
-    opt_method_select,
-    opt_method_help_div,
-    row(opt_dra_input, opt_ddec_input),
-    row(opt_dpa_input, opt_n_top_input),
-    opt_centration_select,
-    opt_priority_input,
-    opt_protect_section_div,
-    opt_protect_enable_cb,
-    opt_protect_mode_radio,
-    opt_protect_threshold_input,
-    opt_protect_status_div,
-    opt_advanced_btn,
-    opt_run_btn,
-    opt_status_div,
+    Div(text=("<small style='color:#5a6b85; line-height:1.4'>"
+              "Configure the search (method, ΔRA / ΔDec / ΔPA, "
+              "collision protection, …) and run it from a single "
+              "dialog. Results land in the same modal as before.</small>"),
+        width=SIDEBAR_W - 20),
+    opt_open_btn,
     width=SIDEBAR_W - 20,
 ))
 
-pick_tab = TabPanel(title="Setting", child=column(
+pick_tab = TabPanel(title="Settings", child=column(
     Div(text="<b>Layers</b>"),
     layers_box,
     Div(text="<b>Slitlet</b>"),
@@ -5971,26 +6286,51 @@ pick_tab = TabPanel(title="Setting", child=column(
 # shutter CSV, or .aptx archive / program ID), the session save/load
 # round-trip for collaboration, and the eMPT export bundle.
 mpt_tab = TabPanel(title="MPT", child=column(
-    Div(text="<b>Import a plan</b> — from a single MPT JSON:"),
-    row(mpt_json_path_input, mpt_json_browse_btn),
+    Div(text="<b>Import a plan</b>"),
+    _wrap_path_picker(
+        mpt_json_path_input, mpt_json_browse_btn,
+        header_html="<small>From a single MPT JSON</small>",
+    ),
     mpt_plan_select,
     mpt_load_btn,
-    Div(text="<small><i>or</i> a shutter CSV (open mask only):</small>"),
-    row(mpt_csv_path_input, mpt_csv_browse_btn),
+    Div(text="<hr style='border:none; border-top:1px dashed #d8dee8; "
+             "margin:8px 0'/>"),
+    _wrap_path_picker(
+        mpt_csv_path_input, mpt_csv_browse_btn,
+        header_html="<small>Or a shutter CSV (open-mask only)</small>",
+    ),
     mpt_csv_load_btn,
-    Div(text="<small><i>or</i> straight from an .aptx file or program ID:</small>"),
-    row(apt_path_input, apt_path_browse_btn),
+    Div(text="<hr style='border:none; border-top:1px dashed #d8dee8; "
+             "margin:8px 0'/>"),
+    _wrap_path_picker(
+        apt_path_input, apt_path_browse_btn,
+        header_html="<small>Or straight from an APT <code>.aptx</code> file or program ID</small>",
+    ),
     apt_program_input,
     apt_fetch_btn,
     apt_plan_select,
     apt_load_btn,
+    Div(text="<hr style='border:none; border-top:2px solid #d8dee8; "
+             "margin:12px 0 6px 0'/>"),
     Div(text="<b>Save / share session</b>"),
-    row(session_save_path_input, session_save_browse_btn),
+    _wrap_path_picker(
+        session_save_path_input, session_save_browse_btn,
+        header_html="<small>Save destination</small>",
+    ),
     session_save_btn,
-    row(session_load_path_input, session_load_browse_btn),
+    _wrap_path_picker(
+        session_load_path_input, session_load_browse_btn,
+        header_html="<small>Load from session file</small>",
+    ),
     session_load_btn,
-    Div(text=f"<b>Export to APT</b> (eMPT bundle + {MPT_PLAN_FILENAME})"),
-    row(export_dir_input, export_dir_browse_btn),
+    Div(text="<hr style='border:none; border-top:2px solid #d8dee8; "
+             "margin:12px 0 6px 0'/>"),
+    Div(text=f"<b>Export to APT</b> "
+             f"<small>(eMPT bundle + <code>{MPT_PLAN_FILENAME}</code>)</small>"),
+    _wrap_path_picker(
+        export_dir_input, export_dir_browse_btn,
+        header_html="<small>Output directory</small>",
+    ),
     export_btn,
     width=SIDEBAR_W - 20,
 ))
@@ -6045,6 +6385,8 @@ curdoc().add_root(opt_modal_backdrop)
 curdoc().add_root(opt_modal_card)
 curdoc().add_root(opt_advanced_modal_backdrop)
 curdoc().add_root(opt_advanced_modal_card)
+curdoc().add_root(opt_config_modal_backdrop)
+curdoc().add_root(opt_config_modal_card)
 curdoc().add_root(cat_edit_modal_backdrop)
 curdoc().add_root(cat_edit_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
