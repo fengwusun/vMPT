@@ -52,10 +52,19 @@ from .wavelengths import v2_overlap_distance
 SHUTTER_X_ARCSEC = 0.2679
 SHUTTER_Y_ARCSEC = 0.5294
 
-# Maximum |Δs| between two shutters for them to be considered on the
-# same detector y-row (and thus possible spectral collisions). eMPT
-# uses shval ≈ s exactly; we allow ±1 to be on the safe side. Matches
-# `SHVAL_S_TOLERANCE` in `app/main.py` (live-canvas orange overlap).
+# Maximum |Δs| between two individual shutters for them to be
+# considered on the same detector y-row (and thus possible spectral
+# collisions). eMPT uses shval ≈ s exactly; we allow ±1 to be on the
+# safe side. Matches `SHVAL_S_TOLERANCE` in `app/main.py`
+# (live-canvas orange overlap).
+#
+# NOTE: this is the *per-shutter* tolerance. The optimizer's
+# collision protection compares two source positions (each opens an
+# N-shutter slitlet centred on the source row), so it uses a wider
+# slitlet-aware tolerance computed once in
+# `PointingEvaluator._init_protection`: `half + 1` for protected ↔
+# stuck-open and `2·half + 1` for protected ↔ slitlet-source, with
+# `half = slit_length // 2`.
 SHVAL_S_TOLERANCE: int = 1
 
 # Detector-half assignment: Q1+Q3 → NRS1, Q2+Q4 → NRS2. Cross-half
@@ -374,6 +383,24 @@ class PointingEvaluator:
         self._stuck_open_half = np.empty(0, dtype=np.int8)
         self._stuck_open_s = np.empty(0, dtype=np.int32)
         self._stuck_open_v2 = np.empty(0, dtype=float)
+        # Slitlet-aware spatial tolerances. Computed once from
+        # `self.slit_length`. A protected target at row s_p occupies
+        # 2*half+1 shutters; the user wants ALSO the rows s_p±half±1
+        # to be empty so no neighbouring shutter (own- or stuck-open)
+        # disperses onto the same detector row.
+        #
+        #   For protected ↔ stuck-open (single shutter at row s_o):
+        #       collide iff |s_o − s_p| ≤ half + 1
+        #
+        #   For protected ↔ another-source-with-slitlet at row s_q
+        #   (both with the same slit_length, so half_q = half_p):
+        #       collide iff |s_q − s_p| ≤ 2·half + 1
+        #
+        # (Slitlets touching one row outside each other = one row of
+        # mutual buffer; the +1 in each formula encodes that buffer.)
+        self._slit_half = self.slit_length // 2
+        self._sd_tol_ps = self._slit_half + 1
+        self._sd_tol_pp = 2 * self._slit_half + 1
 
         if protect_mask is None:
             return
@@ -494,20 +521,35 @@ class PointingEvaluator:
     ) -> np.ndarray:
         """Apply the three collision-protection rules at one pointing.
 
+        Every "row collision" check is **slitlet-aware**: a protected
+        target with slit_length=N opens N consecutive shutters in the
+        spatial direction (rows ``s_p − N//2 … s_p + N//2``), and the
+        user-requested rule says no other shutter — own-pointing or
+        stuck-open — may occupy a row within ±1 of those opened rows.
+        That gives the per-pair tolerances cached in
+        :meth:`_init_protection`:
+
+        * Protected (slitlet) ↔ stuck-open (single shutter):
+          ``|Δs| ≤ N//2 + 1``
+        * Protected ↔ another slitlet (same slit_length):
+          ``|Δs| ≤ 2·(N//2) + 1``
+
+        Rules:
+
         1. **Protected ↔ stuck-open**: a protected source landing on a
            row that collides with any stuck-open shutter is dropped
            (its spectrum is unavoidably contaminated). Stuck-open is
            treated as a constant dispersion source independent of
            pointing.
         2. **Protected ↔ protected**: when two protected sources fall
-           in the same detector half + same row (|Δs| ≤
-           SHVAL_S_TOLERANCE) + ΔV2 < ``v2_overlap``, the lower-rank
-           one (higher priority number → lower weight → higher index)
-           is dropped. The winner stays and continues to provide
-           collision pressure on the next rule.
+           in the same detector half with overlapping (slitlet ± 1)
+           rows + ΔV2 < ``v2_overlap``, the lower-rank one (higher
+           priority number → lower weight → higher index) is dropped.
+           The winner stays and continues to provide collision
+           pressure on the next rule.
         3. **Protected ↔ unprotected**: any detected unprotected
-           source whose row collides with a still-kept protected
-           source is dropped.
+           source whose slitlet ± 1 collides with a still-kept
+           protected source is dropped.
 
         Returns the kept (post-drop) boolean mask. Dropped protected
         sources do **not** provide collision pressure for steps 2/3 —
@@ -535,6 +577,15 @@ class PointingEvaluator:
         s_row = np.where(np.isfinite(s_frac),
                          np.rint(s_frac), -10_000).astype(np.int32)
 
+        # Slit-aware row tolerances (precomputed in `_init_protection`).
+        # Rule 1 compares a protected slitlet against a single stuck-
+        # open shutter → half_p + 1 rows on each side. Rules 2 / 3
+        # compare two slitlets that share the same slit_length →
+        # 2·half_p + 1 rows on each side. The optimizer uses one
+        # global slit_length, so all sources share `_sd_tol_pp`.
+        s_tol_ps = self._sd_tol_ps
+        s_tol_pp = self._sd_tol_pp
+
         # -------- Rule 1: protected ↔ stuck-open --------
         if self._stuck_open_v2.size > 0:
             prot_idx = np.where(
@@ -550,7 +601,7 @@ class PointingEvaluator:
                 ss = self._stuck_open_s[None, :]
                 sv = self._stuck_open_v2[None, :]
                 collide = ((ph == sh)
-                           & (np.abs(ps - ss) <= SHVAL_S_TOLERANCE)
+                           & (np.abs(ps - ss) <= s_tol_ps)
                            & (np.abs(pv - sv) < self._v2_overlap))
                 kept[prot_idx[collide.any(axis=1)]] = False
 
@@ -579,7 +630,7 @@ class PointingEvaluator:
                 lt = tail[live_tail_idx]
                 collide = (
                     (det_half[lt] == det_half[wi])
-                    & (np.abs(s_row[lt] - s_row[wi]) <= SHVAL_S_TOLERANCE)
+                    & (np.abs(s_row[lt] - s_row[wi]) <= s_tol_pp)
                     & (np.abs(v2_src[lt] - v2_src[wi]) < self._v2_overlap)
                 )
                 if collide.any():
@@ -605,7 +656,7 @@ class PointingEvaluator:
                 sp = s_row[kept_prot_idx][None, :]
                 vp = v2_src[kept_prot_idx][None, :]
                 collide = ((hu == hp)
-                           & (np.abs(su - sp) <= SHVAL_S_TOLERANCE)
+                           & (np.abs(su - sp) <= s_tol_pp)
                            & (np.abs(vu - vp) < self._v2_overlap))
                 kept[unprot_idx[collide.any(axis=1)]] = False
 

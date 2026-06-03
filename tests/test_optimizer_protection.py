@@ -416,3 +416,75 @@ def test_grid_search_score_with_protection_le_baseline():
 def test_shval_s_tolerance_constant_present():
     """The module-level constant the test suite relies on must exist."""
     assert SHVAL_S_TOLERANCE == 1
+
+
+# ---------------------------------------------------------------------
+# Slitlet-aware row tolerance (user-requested fix to v1.2.0)
+# ---------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("slit_length, expected_ps_tol, expected_pp_tol", [
+    (1, 1, 1),   # N=1 → half=0 → |Δs|≤1 vs stuck-open, |Δs|≤1 vs slitlet
+    (3, 2, 3),   # N=3 → half=1 → |Δs|≤2 vs stuck-open, |Δs|≤3 vs slitlet
+    (5, 3, 5),   # N=5 → half=2 → |Δs|≤3 vs stuck-open, |Δs|≤5 vs slitlet
+])
+def test_collision_tolerances_scale_with_slit_length(
+    slit_length, expected_ps_tol, expected_pp_tol,
+):
+    """The tolerances cached on the evaluator must follow the
+    slitlet-aware formula:
+        protected ↔ stuck-open: half + 1
+        protected ↔ slitlet:    2·half + 1
+    where half = slit_length // 2. This is the fix to v1.2.0's
+    hardcoded |Δs| ≤ 1 — for any slitlet wider than 1 shutter the old
+    check was too narrow (e.g. for N=3 it ignored the s_p ± 2 rows
+    the user wants to be empty)."""
+    ra, dec = grid_sources(n=4)
+    ev = PointingEvaluator(
+        ra, dec, slit_length=slit_length,
+        protect_mask=np.ones(len(ra), dtype=bool),
+        priorities=np.arange(len(ra), dtype=float),
+        weights=np.ones(len(ra)),
+        disperser="PRISM", filt="CLEAR",
+    )
+    assert ev._sd_tol_ps == expected_ps_tol, (
+        f"slit_length={slit_length}: stuck-open tol={ev._sd_tol_ps}, "
+        f"expected {expected_ps_tol}"
+    )
+    assert ev._sd_tol_pp == expected_pp_tol, (
+        f"slit_length={slit_length}: slitlet tol={ev._sd_tol_pp}, "
+        f"expected {expected_pp_tol}"
+    )
+
+
+def test_n3_slitlet_drops_unprotected_two_rows_away():
+    """For a 3-shutter slitlet, the user wants rows s_p±2 (the
+    immediate neighbours of the outer slitlet edges) also kept clear.
+    Set up an H grating (wide V2 overlap so the V2 condition is
+    almost certainly satisfied) and verify that adding a slitlet-
+    aware tolerance drops at least as many unprotected sources as the
+    old |Δs|≤1 check would have.
+    """
+    ra, dec = grid_sources(n=80, spread_deg=0.005)
+    protect = np.zeros(len(ra), dtype=bool)
+    protect[0] = True
+    pri = np.arange(len(ra), dtype=float)
+    wgt = np.ones(len(ra))
+
+    ev_n1 = PointingEvaluator(
+        ra, dec, slit_length=1,
+        protect_mask=protect, priorities=pri, weights=wgt,
+        disperser="G140H", filt="F100LP",
+    )
+    ev_n3 = PointingEvaluator(
+        ra, dec, slit_length=3,
+        protect_mask=protect, priorities=pri, weights=wgt,
+        disperser="G140H", filt="F100LP",
+    )
+    _, _, _, drops_n1 = ev_n1.evaluate_with_stats(**FIDUCIAL)
+    _, _, _, drops_n3 = ev_n3.evaluate_with_stats(**FIDUCIAL)
+    # Wider slitlets = wider exclusion zone = at least as many drops.
+    assert drops_n3 >= drops_n1, (
+        f"N=3 dropped {drops_n3}, N=1 dropped {drops_n1} — "
+        f"slitlet-aware tolerance should be >= per-shutter"
+    )
