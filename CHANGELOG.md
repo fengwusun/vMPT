@@ -4,6 +4,99 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.1] — 2026-06-03
+
+Patch release. Two real bug fixes on top of v1.2.0's collision-
+protection feature, plus a substantial UI cleanup that came out of
+a hands-on review.
+
+### Collision-protection fixes
+
+- **Row tolerance is now slitlet-aware.** v1.2.0 hard-coded
+  ``|Δs| ≤ 1`` between source centres, but a 3-shutter slitlet at
+  row ``s_p`` already occupies rows ``{s_p−1, s_p, s_p+1}`` and the
+  user-requested rule is "no other shutter at s_p±2 either." The
+  evaluator now computes two tolerances at construction time:
+    - Protected slitlet ↔ stuck-open (single shutter):
+      ``|Δs| ≤ half + 1``
+    - Protected ↔ another slitlet (same slit_length):
+      ``|Δs| ≤ 2·half + 1``
+  where ``half = slit_length // 2``. So the default ``slit_length=3``
+  now correctly forbids stuck-open or other slitlets at rows
+  ``s_p±2``. For ``slit_length=5`` the buffer scales up to
+  ``s_p±3`` (stuck-open) or ``s_p±5`` (other slitlets).
+  ``SHVAL_S_TOLERANCE = 1`` is preserved as the per-individual-
+  shutter constant for the live-canvas orange overlap glyph (each
+  opened shutter contributes its own ±1 zone, so the visualization
+  already paints the correct envelope around a multi-shutter slitlet).
+- **Advanced settings modal sits above the new config modal.**
+  When the optimizer config dialog was added in this release the
+  Advanced settings card stayed at the same z-index, so opening
+  Advanced from inside Configure showed nothing — the config card
+  drew on top. Bumped Advanced backdrop / card to ``z-index`` 1001 /
+  1002.
+
+### Pointing-tab UI moved into a dialog
+
+The Pointing tab used to stack 10+ optimizer-config widgets, and the
+``Run optimization`` button slid below the fold on any window under
+~1200 px tall. The whole block now lives in a centered modal:
+
+- The Pointing tab shows a single primary ``Open optimizer…`` button.
+- The modal (``opt_config_modal_card``) contains every optimizer-
+  config widget plus ``Run`` / ``Cancel`` and the live status line.
+- The existing progress + results modal flow (``opt_modal_card``) is
+  unchanged after ``Run`` is clicked — the config card just dismisses
+  itself first.
+- Both the optimizer config and the catalog editor modals gained a
+  top-right ``×`` dismiss button.
+
+### Help / status text — context-aware
+
+- The help panel on the right side of the canvas is now **collapsed
+  by default**. The toggle button stays in place; one click on
+  ``Show help`` restores width to its v1.2.0 size with the Quick
+  guide + rotating tip. The figure uses fixed
+  ``frame_width``/``frame_height`` so the canvas pixel aspect doesn't
+  change when the panel collapses / expands.
+- The Method dropdown's three-line Democracy / Meritocracy /
+  Hierarchy blurb is hidden by default; an ``ⓘ What do these mean?``
+  toggle reveals it on demand. The dropdown's own option labels
+  already carry the one-line summary.
+- The status line under ``Run optimization`` was always reading
+  *"Load a catalog with priorities, then click Run."* even when a
+  catalog with priorities was loaded. ``_refresh_opt_status_div()``
+  now updates it based on (catalog presence, method, priority /
+  weight column availability):
+    - no catalog → ``Load a catalog (Input tab) before running.``
+    - catalog + Democracy → ``Ready · N sources.``
+    - catalog + Meritocracy without ``weight`` →
+      ``⚠ Meritocracy needs a weight column.``
+    - catalog + Hierarchy without ``priority`` →
+      ``⚠ Hierarchy needs a priority column.``
+
+### Input / MPT tabs
+
+- All path inputs across the Input + MPT tabs now use a unified
+  ``_wrap_path_picker`` helper: the path ``TextInput`` is hidden
+  behind an ``Edit path`` toggle when empty, and Browse buttons are
+  promoted to primary blue. The path **auto-reveals** as soon as
+  it's populated (by Browse, by autoload, or by typing), so users
+  always see what's loaded — only the empty default is hidden.
+- The MPT tab is grouped into four sections (Import / Save / Load /
+  Export) separated by dashed and solid hr dividers, so the 10+
+  widgets feel like coherent blocks instead of one long column.
+- Renamed the ``Setting`` tab title to ``Settings`` (singular →
+  plural).
+
+### Tests
+
+- ``tests/test_optimizer_protection.py`` gains 4 new tests:
+  parametrize over ``N ∈ {1, 3, 5}`` to pin the cached tolerances,
+  and a regression that an N=3 slitlet drops at least as many
+  unprotected sources as N=1 under an H grating. **139 passed, 4
+  skipped** in total (up from 135 / 4 in v1.2.0).
+
 ## [1.2.0] — 2026-06-03
 
 Feature release: **shutter collision protection in the optimizer**.

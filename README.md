@@ -235,6 +235,13 @@ modes without re-annotating.
     spectrum is unavoidably contaminated). The score is the count
     of *kept* sources, so the optimizer naturally steers protected
     targets into clean rows.
+  - **Slitlet-aware row buffer** (**v1.2.1+**) — for a protected
+    target with an N-shutter slitlet, no other shutter is allowed
+    in the row immediately above or below the slitlet (i.e. for
+    N=3 at row *s* the exclusion zone is *s*±2). Stuck-open and
+    other-source slitlets are both checked with this slitlet-aware
+    tolerance; v1.2.0 used a naive `|Δs|≤1` between centres which
+    was correct only for N=1.
   - Note that for H gratings the V2 overlap is ~500″ — wider than
     the MSA — so protecting many targets dramatically reduces the
     co-observable count. That's the truthful answer, not a bug.
@@ -245,7 +252,12 @@ modes without re-annotating.
 
 ### Running
 
-Click **Run optimization**. A pop-up appears with:
+In the Pointing tab, click **Open optimizer…** (v1.2.1+ — all the
+optimizer-config widgets live in a centered dialog now so the
+Pointing tab itself fits on one screen). Adjust the Method,
+ΔRA / ΔDec / ΔPA, Refine top N, centration, priority cutoff,
+collision-protection — and click **Run optimization** inside the
+dialog. A pop-up appears with:
 
 1. **Live progress** — an animated striped bar + a spinning ring +
    a text line:
@@ -313,9 +325,13 @@ the user's purposes.
 
 ### Image: FITS
 
-In the **Input** tab, paste the absolute path into "FITS path (local)"
-and hit Enter (or use the **Browse…** button). First HDU with image
-data is auto-selected; the WCS comes from that HDU's header.
+In the **Input** tab, click the primary **Browse…** button to pick a
+FITS file from disk. If you prefer to paste a path directly, click
+**Edit path** to reveal the text input; the input also auto-reveals
+itself whenever a path is populated (so paths set by Browse, by
+``--fits`` on the command line, or by typing all stay visible).
+First HDU with image data is auto-selected; the WCS comes from that
+HDU's header.
 
 The figure has a fixed pixel aspect — the canvas is sized to the
 image's pixel W:H exactly, so 1 image pixel always renders as N×N

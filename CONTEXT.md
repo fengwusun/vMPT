@@ -551,8 +551,25 @@ visible on the canvas but invisible to that mode's optimizer.
 `weights`, `disperser`, `filt`, `reason` kwargs. When `protect_mask`
 flags any source, three drop rules apply at every `evaluate()` call,
 reusing the **same** physics as the live canvas's orange spec-overlap
-layer (`SHVAL_S_TOLERANCE = 1`, Q1/Q3 → NRS1 vs Q2/Q4 → NRS2 detector
-halves, V2 separation < `v2_overlap_distance(disperser, filt)`):
+layer (Q1/Q3 → NRS1 vs Q2/Q4 → NRS2 detector halves, V2 separation
+< `v2_overlap_distance(disperser, filt)`). Row tolerance is
+**slitlet-aware** (v1.2.1+) — `SHVAL_S_TOLERANCE = 1` is the
+per-individual-shutter constant used by the live-canvas glyph, but
+the optimizer's evaluator pre-computes two slitlet-aware tolerances
+in `_init_protection`:
+
+  - `_sd_tol_ps = slit_length // 2 + 1` — protected slitlet against
+    a single stuck-open shutter (rule 1).
+  - `_sd_tol_pp = 2 * (slit_length // 2) + 1` — protected slitlet
+    against another slitlet, both using the optimizer's global
+    `slit_length` (rules 2 + 3).
+
+For the default `slit_length=3` (`half=1`) these are 2 and 3 — i.e.
+no other shutter at rows `s_p±2`, no other slitlet centered closer
+than `s_q − s_p > 3`. v1.2.0 used a flat `|Δs|≤1` between centres
+which under-counted collisions for any `slit_length > 1`.
+
+Rules:
 
 1. **Protected ↔ stuck-open** — a protected source on a row colliding
    with any REASON==2 shutter is dropped (unavoidably contaminated).
@@ -635,10 +652,29 @@ Two-state pop-up (`opt_modal_card`, with `opt_modal_backdrop`):
    chooses how to fill shutters.
 
 Advanced settings (grid resolution, DE max-iter, objective, σ, θ)
-live in a separate pop-up (`opt_advanced_modal_card`) opened by
-the "Advanced settings…" button in the Pointing tab. The widgets
+live in a separate pop-up (`opt_advanced_modal_card`). The widgets
 retain their values regardless of modal visibility; the optimizer
 reads them when Run is clicked.
+
+**v1.2.1 layout** — the Pointing tab no longer holds the optimizer
+inputs inline. A single primary `Open optimizer…` button
+(`opt_open_btn`) opens `opt_config_modal_card`, which holds the
+Method dropdown, ΔRA/ΔDec/ΔPA / N inputs, centration, priority
+cutoff, the Protect-spectra group, the Advanced settings opener,
+and the actual `Run optimization` button + status line. Both the
+config and advanced modals stack above the results modal:
+
+  - results card / backdrop  → `z-index` 1000 / 999
+  - optimizer config card / backdrop → `z-index` 1000 / 999
+  - advanced settings card / backdrop → `z-index` 1002 / 1001
+
+The advanced bump is so opening `Advanced settings…` *from inside*
+the config modal actually draws above it; v1.2.0 had a tie that
+left the advanced card hidden behind the (newer-in-DOM) config
+modal. Both pop-up cards (catalog editor and config) carry a
+top-right `×` dismiss button positioned via inline
+`position: absolute` styles (the Bokeh nested wrapper layout
+defeats outer-page CSS for that one corner).
 
 ### Performance
 
