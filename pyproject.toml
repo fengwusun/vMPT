@@ -21,9 +21,11 @@ authors = [
 keywords = ["JWST", "NIRSpec", "MSA", "MPT", "eMPT", "astronomy", "spectroscopy"]
 requires-python = ">=3.10"
 classifiers = [
+    # NB: PyPI enforces a strict whitelist of classifiers (see
+    # https://pypi.org/classifiers/). `Framework :: Bokeh` is NOT on
+    # it — Warehouse rejects the upload with a 400 if it's present.
     "Development Status :: 4 - Beta",
     "Environment :: Web Environment",
-    "Framework :: Bokeh",
     "Intended Audience :: Science/Research",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
@@ -31,6 +33,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Astronomy",
+    "Topic :: Scientific/Engineering :: Visualization",
 ]
 dependencies = [
     "astropy>=5.0",
