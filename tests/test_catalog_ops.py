@@ -1,4 +1,4 @@
-"""Tests for app.catalog_ops — the weight ↔ priority helpers used by
+"""Tests for vmpt.catalog_ops — the weight ↔ priority helpers used by
 the catalog editor."""
 
 from __future__ import annotations
@@ -6,7 +6,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.catalog_ops import (
+from vmpt.catalog_ops import (
     compute_priorities_from_weights,
     compute_weights_from_priorities,
 )

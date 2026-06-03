@@ -1,4 +1,4 @@
-"""Tests for app.coords: shutter polygon construction and V2/V3 -> RA/Dec."""
+"""Tests for vmpt.coords: shutter polygon construction and V2/V3 -> RA/Dec."""
 
 import sys
 from pathlib import Path
@@ -10,14 +10,14 @@ from astropy.coordinates import SkyCoord
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.coords import (
+from vmpt.coords import (
     MSA_V2_REF,
     MSA_V3_REF,
     rot_matrix,
     shutter_corners_v2v3,
     v2v3_to_radec,
 )
-from app.msa import load_msa_grid
+from vmpt.msa import load_msa_grid
 
 
 def test_rot_matrix_identity():

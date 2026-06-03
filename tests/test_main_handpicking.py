@@ -1,6 +1,6 @@
 """Unit tests for the hand-picking helpers in app/main.py.
 
-Importing app.main attaches widgets to curdoc() — harmless during tests.
+Importing vmpt.main attaches widgets to curdoc() — harmless during tests.
 """
 from __future__ import annotations
 
@@ -16,13 +16,13 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.coords import v2v3_to_radec  # noqa: E402
-from app.msa import load_msa_grid  # noqa: E402
+from vmpt.coords import v2v3_to_radec  # noqa: E402
+from vmpt.msa import load_msa_grid  # noqa: E402
 
 
 def _import_main():
     """Lazy import so any import-time side effects don't pollute other tests."""
-    import app.main as m
+    import vmpt.main as m
     return m
 
 

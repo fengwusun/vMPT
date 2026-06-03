@@ -1,4 +1,4 @@
-"""Tests for app.wavelengths: per-grating dispersion model."""
+"""Tests for vmpt.wavelengths: per-grating dispersion model."""
 
 import sys
 from pathlib import Path
@@ -7,8 +7,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.coords import MSA_V2_REF, MSA_V3_REF
-from app.wavelengths import GRATING_RANGES, V2_DISP_EXTENT, cutoffs
+from vmpt.coords import MSA_V2_REF, MSA_V3_REF
+from vmpt.wavelengths import GRATING_RANGES, V2_DISP_EXTENT, cutoffs
 
 
 CASES = [
@@ -96,7 +96,8 @@ def test_grating_gap_still_shifts_linearly():
 
 
 _TABLE_PATH = (
-    Path(__file__).resolve().parent.parent / "data" / "dispersion_cutoffs.npz"
+    Path(__file__).resolve().parent.parent / "vmpt" / "data"
+    / "dispersion_cutoffs.npz"
 )
 
 

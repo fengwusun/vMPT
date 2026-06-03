@@ -20,7 +20,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from app.optimizer import (
+from vmpt.optimizer import (
     PointingEvaluator,
     SHVAL_S_TOLERANCE,
     grid_search,

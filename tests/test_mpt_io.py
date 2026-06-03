@@ -13,7 +13,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT))
 
-from app.mpt_io import (
+from vmpt.mpt_io import (
     list_mpt_plans_in_aptx,
     parse_mpt_json,
     parse_mpt_json_in_aptx,
@@ -120,7 +120,7 @@ def test_aptx_list_and_parse(tmp_path):
 def test_download_apt_program_live():
     """Live network test. Downloads APT 1208 from STScI and confirms the
     archive contains MPT-format JSON files. Skipped by default."""
-    from app.mpt_io import download_apt_program
+    from vmpt.mpt_io import download_apt_program
     aptx = download_apt_program("1208")
     plans = list_mpt_plans_in_aptx(aptx)
     assert plans  # APT 1208 has 40+ embedded plans

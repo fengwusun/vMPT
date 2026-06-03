@@ -1,6 +1,6 @@
 """vMPT — visual MSA Planning Tool. Bokeh server entry point.
 
-Run:  bokeh serve app/ --show
+Run:  bokeh serve vmpt/ --show   (or `vmpt` after `pip install jwst-vmpt`)
 """
 from __future__ import annotations
 
@@ -53,8 +53,8 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure
 
-from app.catalog import Catalog, catalog_in_view, load_catalog
-from app.coords import (
+from vmpt.catalog import Catalog, catalog_in_view, load_catalog
+from vmpt.coords import (
     MSA_V2_REF,
     MSA_V3_REF,
     V3_IDL_Y_ANGLE,
@@ -63,7 +63,7 @@ from app.coords import (
     shutter_corners_v2v3,
     v2v3_to_radec,
 )
-from app.empt_io import (
+from vmpt.empt_io import (
     OpenShutter,
     Pointing,
     write_mpt_catalog,
@@ -71,9 +71,9 @@ from app.empt_io import (
     write_pointing_summary_txt,
     write_shutter_mask_csv,
 )
-from app.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
-from app.msa import load_msa_grid, load_operability
-from app.mpt_io import (
+from vmpt.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
+from vmpt.msa import load_msa_grid, load_operability
+from vmpt.mpt_io import (
     MPTPlan,
     download_apt_program,
     list_mpt_plans_in_aptx,
@@ -81,7 +81,7 @@ from app.mpt_io import (
     parse_mpt_json_in_aptx,
     parse_shutter_csv,
 )
-from app.session_io import (
+from vmpt.session_io import (
     EMPT_OBSERVED_FILENAME,
     EMPT_POINTING_FILENAME,
     EMPT_SHUTTER_MASK_FILENAME,
@@ -92,7 +92,7 @@ from app.session_io import (
     export_session_json,
     import_session_json,
 )
-from app.wavelengths import (
+from vmpt.wavelengths import (
     FILTER_BLUE_CUTOFF,
     GRATING_RANGES,
     cutoffs,
@@ -4587,7 +4587,7 @@ def _on_cat_edit_add_column():
     cat_edit_new_col_input.value = ""
 
 
-from app.catalog_ops import (
+from vmpt.catalog_ops import (
     compute_priorities_from_weights as _compute_priorities_from_weights,
     compute_weights_from_priorities as _compute_weights_from_priorities,
 )
@@ -5642,7 +5642,7 @@ def _opt_hierarchy_step() -> None:
 
 def _opt_de_step() -> None:
     """Refine one (or a few) top grid candidates via DE."""
-    from app.optimizer import refine_top
+    from vmpt.optimizer import refine_top
     de_idx = _opt_run["de_idx"]
     de_total = _opt_run["de_total"]
     if de_idx >= de_total:
@@ -5908,7 +5908,7 @@ def _update_protect_status_div() -> None:
     disp = (state.get("disperser") or "?").upper()
     filt = (state.get("filter") or "?").upper()
     try:
-        from app.wavelengths import v2_overlap_distance as _v2od
+        from vmpt.wavelengths import v2_overlap_distance as _v2od
         overlap = _v2od(disp, filt)
     except Exception:
         overlap = None
@@ -6099,7 +6099,7 @@ def on_optimize():
     # Build the evaluator now so the heavy CloughTocher Delaunay step
     # happens before we show the modal — the user sees the bar start
     # at 0 % and advance, instead of staring at a frozen 0 % for 2 s.
-    from app.optimizer import PointingEvaluator
+    from vmpt.optimizer import PointingEvaluator
     _set_status(
         "Building MSA inverse map (first time only)…",
         "info", clear_after=0,

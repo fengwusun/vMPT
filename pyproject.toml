@@ -1,0 +1,68 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jwst-vmpt"
+version = "1.2.2"
+description = "Visual MSA Planning Tool — interactive Bokeh app for JWST/NIRSpec MSA shutter configuration, with hMPT-derived pointing optimization and shutter-collision protection."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+    { name = "Fengwu Sun" },
+]
+keywords = ["JWST", "NIRSpec", "MSA", "MPT", "eMPT", "astronomy", "spectroscopy"]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Web Environment",
+    "Framework :: Bokeh",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Astronomy",
+]
+dependencies = [
+    "astropy>=5.0",
+    "bokeh>=3.7",
+    "jwst>=1.18",
+    "jwst_gtvt>=1.0",
+    "numpy>=1.24",
+    "pandas>=2.0",
+    "Pillow>=9.0",
+    "pysiaf>=0.20",
+    "scipy>=1.10",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0"]
+
+[project.scripts]
+# `vmpt` opens the Bokeh app in a browser.
+# `vmpt examples download` fetches the optional example datasets.
+vmpt = "vmpt.cli:main"
+
+[project.urls]
+Homepage      = "https://github.com/fengwusun/vMPT"
+Source        = "https://github.com/fengwusun/vMPT"
+Issues        = "https://github.com/fengwusun/vMPT/issues"
+Changelog     = "https://github.com/fengwusun/vMPT/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/fengwusun/vMPT#readme"
+
+[tool.setuptools]
+# Explicit package list — `examples/` and `tests/` are NOT included.
+# The two .npz files in vmpt/data/ are required at runtime.
+packages = ["vmpt"]
+
+[tool.setuptools.package-data]
+# Ship the MSA grid + per-shutter dispersion table alongside the
+# Python modules. Without these vMPT can't render the MSA overlay.
+vmpt = ["data/*.npz", "static/**/*", "templates/**/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

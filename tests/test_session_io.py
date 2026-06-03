@@ -6,8 +6,8 @@ import json
 
 import pytest
 
-from app.empt_io import OpenShutter
-from app.session_io import Session, export_session_json, import_session_json
+from vmpt.empt_io import OpenShutter
+from vmpt.session_io import Session, export_session_json, import_session_json
 
 
 def _sample_session() -> Session:
@@ -227,7 +227,7 @@ def test_new_session_loads_via_parse_mpt_json(tmp_path):
     """A session.json written by the new exporter must be loadable through
     the MPT-side path (Load plan from JSON), since it is now valid MPT
     plan JSON with vMPT extras."""
-    from app.mpt_io import parse_mpt_json
+    from vmpt.mpt_io import parse_mpt_json
     s = _sample_session()
     p = tmp_path / "session.json"
     export_session_json(s, str(p))

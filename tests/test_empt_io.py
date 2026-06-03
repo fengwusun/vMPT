@@ -1,4 +1,4 @@
-"""Tests for app.empt_io (eMPT-compatible exporters)."""
+"""Tests for vmpt.empt_io (eMPT-compatible exporters)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from app.empt_io import (
+from vmpt.empt_io import (
     OpenShutter,
     Pointing,
     parse_pointing_summary_txt,
@@ -135,7 +135,7 @@ def test_pointing_summary_roundtrip(tmp_path):
 
 
 def test_write_mpt_catalog_header_and_data(tmp_path):
-    from app.empt_io import write_mpt_catalog
+    from vmpt.empt_io import write_mpt_catalog
     out = tmp_path / "MPT_catalog.cat"
     write_mpt_catalog(str(out), [
         {"No_cat": 1, "Pr": 1, "ra_deg": 39.9826125,   "dec_deg": -1.5916444},
@@ -174,7 +174,7 @@ def test_write_mpt_catalog_rejects_non_integer_ids(tmp_path):
     must REFUSE to write a row whose No_cat can't be coerced. Callers
     (notably on_export) are responsible for deriving an int via the
     `_to_int_id` helper, e.g. "RJ0600-10274-P0" → 10274."""
-    from app.empt_io import write_mpt_catalog
+    from vmpt.empt_io import write_mpt_catalog
     out = tmp_path / "bad.cat"
     with pytest.raises(ValueError, match="must be an integer"):
         write_mpt_catalog(str(out), [
@@ -184,7 +184,7 @@ def test_write_mpt_catalog_rejects_non_integer_ids(tmp_path):
 
 def test_write_mpt_catalog_accepts_int_and_int_string(tmp_path):
     """Both bare int and a string of digits are accepted as No_cat."""
-    from app.empt_io import write_mpt_catalog
+    from vmpt.empt_io import write_mpt_catalog
     out = tmp_path / "ok.cat"
     write_mpt_catalog(str(out), [
         {"No_cat": 10274, "ra_deg": 90.039845, "dec_deg": -20.136384,
@@ -201,7 +201,7 @@ def test_write_mpt_catalog_distinguishes_real_vs_synth(tmp_path):
     """The output catalog must let downstream tools tell which rows came
     from the user's input catalog and which were synthesized by vMPT
     for unmatched slitlets."""
-    from app.empt_io import write_mpt_catalog
+    from vmpt.empt_io import write_mpt_catalog
     out = tmp_path / "MPT_catalog.cat"
     write_mpt_catalog(str(out), [
         {"No_cat": 100, "ra_deg": 53.16, "dec_deg": -27.77, "label": "real"},
@@ -217,7 +217,7 @@ def test_write_mpt_catalog_uses_only_jdox_column_names(tmp_path):
     """Guard against accidentally reintroducing unit-suffixed column
     names like `RA[deg]` — APT's column-detection matches the bare
     labels listed on the JDox MPT Catalogs page."""
-    from app.empt_io import write_mpt_catalog
+    from vmpt.empt_io import write_mpt_catalog
     out = tmp_path / "MPT_catalog.cat"
     write_mpt_catalog(str(out), [{"No_cat": 1, "ra_deg": 0.0, "dec_deg": 0.0}])
     text = out.read_text()

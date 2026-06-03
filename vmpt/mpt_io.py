@@ -12,8 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from app.coords import V3_IDL_Y_ANGLE
-from app.empt_io import OpenShutter
+from vmpt.coords import V3_IDL_Y_ANGLE
+from vmpt.empt_io import OpenShutter
 
 # STScI public APT downloader URL pattern. e.g. .../apt/1208/ → 1208.aptx.
 APT_URL_TEMPLATE = "https://www.stsci.edu/jwst-program-info/download/jwst/apt/{program_id}/"

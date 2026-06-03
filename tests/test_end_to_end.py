@@ -14,17 +14,17 @@ _ROOT = Path(__file__).resolve().parent.parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
-from app.coords import shutter_corners_v2v3, v2v3_to_radec  # noqa: E402
-from app.empt_io import (  # noqa: E402
+from vmpt.coords import shutter_corners_v2v3, v2v3_to_radec  # noqa: E402
+from vmpt.empt_io import (  # noqa: E402
     OpenShutter,
     Pointing,
     write_observed_targets_cat,
     write_pointing_summary_txt,
     write_shutter_mask_csv,
 )
-from app.image_io import load_fits, load_jpg_with_sidecar  # noqa: E402
-from app.msa import load_msa_grid, load_operability  # noqa: E402
-from app.wavelengths import cutoffs  # noqa: E402
+from vmpt.image_io import load_fits, load_jpg_with_sidecar  # noqa: E402
+from vmpt.msa import load_msa_grid, load_operability  # noqa: E402
+from vmpt.wavelengths import cutoffs  # noqa: E402
 
 EX_A370 = _ROOT / "example_a370" / "a370_f182m_f200w_f210m.fits"
 EX_R0600_JPG = _ROOT / "example_r0600" / "JWST_F090W_F200W_F444W.jpg"

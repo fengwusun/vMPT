@@ -1,4 +1,4 @@
-"""Tests for app.image_io."""
+"""Tests for vmpt.image_io."""
 
 import os
 import sys
@@ -8,7 +8,7 @@ import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.image_io import load_fits, load_jpg_with_sidecar, stretch_for_display
+from vmpt.image_io import load_fits, load_jpg_with_sidecar, stretch_for_display
 
 A370 = "/Users/sunfengwu/nirspec/example_a370/a370_f182m_f200w_f210m.fits"
 R0600_JPG = "/Users/sunfengwu/nirspec/example_r0600/JWST_F090W_F200W_F444W.jpg"

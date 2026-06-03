@@ -6,8 +6,8 @@
 Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 **directly on an image of the target field**. vMPT combines:
 
-- **Automated MSA pointing optimization** — derived from hMPT
-  (Eisenstein, McCarty, Wu, CfA), itself a Python re-implementation
+- **Automated MSA pointing optimization** — derived from [hMPT](https://github.com/zihaowu-astro/hMPT)
+  (Zihao Wu et al., CfA|Harvard), itself a Python re-implementation
   of ESA's eMPT (Bonaventura et al. 2023). Grid + differential-
   evolution search over (RA, Dec, V3 PA) in three modes: Democracy
   (count), Meritocracy (Σ weight), Hierarchy (strict priority
@@ -29,7 +29,8 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 ![status](https://img.shields.io/badge/tests-139%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.2.1-blueviolet)
+![release](https://img.shields.io/badge/release-v1.2.2-blueviolet)
+![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 ![vMPT interface](docs/interface.jpg)
 
@@ -44,26 +45,47 @@ tabs. Right panel: rotating tip card + quick-reference legend.*
 ## Installation
 
 vMPT is a local-only tool: it runs on your machine, files stay on
-your disk, computation uses your local Python. There are three
-install paths — pick whichever matches your environment.
+your disk, computation uses your local Python.
 
-### Option A — STScI's `stenv` (recommended for JWST users)
+### Option A — pip install (recommended, **v1.2.2+**)
+
+```bash
+pip install jwst-vmpt                                            # PyPI
+# or, while we're on TestPyPI:
+pip install -i https://test.pypi.org/simple/ jwst-vmpt
+vmpt                                                             # opens the app
+```
+
+The console script `vmpt` accepts the same flags as `run.sh`:
+
+```bash
+vmpt --port 5010                                                 # different port
+vmpt --fits img.fits --catalog a.csv --catalog b.csv             # stack catalogs
+vmpt --jpg img.jpg --wcs wcs.fits --catalog targets.csv          # JPG + WCS pair
+vmpt examples download                                           # fetch example_a370 + example_r0600
+```
+
+The wheel itself is ~20 MB (just the MSA grid + dispersion table).
+The two example datasets (~64 MB combined) are fetched on demand
+via `vmpt examples download`, dropping `example_a370/` and
+`example_r0600/` into the current directory.
+
+### Option B — STScI's `stenv` from source (for JWST pipeline users)
 
 If you already use the [STScI JWST/HST pipeline environment](https://stenv.readthedocs.io/),
-most dependencies are already present and you only need to add Bokeh
-and `jwst_gtvt`.
+most dependencies are already present:
 
 ```bash
 git clone https://github.com/fengwusun/vMPT.git
 cd vMPT
 conda activate stenv
 pip install bokeh jwst_gtvt
-./run.sh
+./run.sh                  # bokeh serve vmpt/ under the hood
 ```
 
 The browser should open at `http://localhost:5006/app`.
 
-### Option B — fresh conda env
+### Option C — fresh conda env from source
 
 ```bash
 git clone https://github.com/fengwusun/vMPT.git
@@ -74,7 +96,7 @@ pip install -r requirements.txt
 ./run.sh
 ```
 
-### Option C — plain pip (no conda)
+### Option D — plain pip + venv from source
 
 ```bash
 git clone https://github.com/fengwusun/vMPT.git
@@ -88,7 +110,7 @@ pip install -r requirements.txt
 ### Verify the install
 
 ```bash
-pytest tests/    # 60+/60 should pass; ~7 seconds
+pytest tests/    # 139 passed, 4 skipped; ~15 seconds
 ```
 
 If everything's green, the tool is ready. If `pytest` complains about

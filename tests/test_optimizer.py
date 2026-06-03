@@ -1,11 +1,11 @@
-"""Tests for app.optimizer (MSA pointing search; hMPT-derived)."""
+"""Tests for vmpt.optimizer (MSA pointing search; hMPT-derived)."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from app.optimizer import (
+from vmpt.optimizer import (
     CENTRATION_BUFFERS,
     PointingEvaluator,
     axy_to_shutter,

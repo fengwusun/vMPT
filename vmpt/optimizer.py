@@ -10,7 +10,7 @@ of ESA's eMPT (Bonaventura et al. 2023, A&A 672, A40):
 
 vMPT does NOT depend on hMPT — this module re-implements the core
 algorithm in vMPT's style with attribution, so it composes cleanly
-with our existing MSA grid (`data/nirspec_msa_v2v3.npz`), CRDS
+with our existing MSA grid (`vmpt/data/nirspec_msa_v2v3.npz`), CRDS
 operability loader, and Bokeh UI.
 
 Algorithm summary
@@ -55,7 +55,7 @@ SHUTTER_Y_ARCSEC = 0.5294
 # Maximum |Δs| between two individual shutters for them to be
 # considered on the same detector y-row (and thus possible spectral
 # collisions). eMPT uses shval ≈ s exactly; we allow ±1 to be on the
-# safe side. Matches `SHVAL_S_TOLERANCE` in `app/main.py`
+# safe side. Matches `SHVAL_S_TOLERANCE` in `vmpt/main.py`
 # (live-canvas orange overlap).
 #
 # NOTE: this is the *per-shutter* tolerance. The optimizer's
@@ -309,7 +309,7 @@ class PointingEvaluator:
         spectrum is looked up from :func:`v2_overlap_distance`.
     reason : ndarray, optional
         (4, 171, 365) operability-reason array from
-        :func:`app.msa.load_operability`. Cells equal to 2 are
+        :func:`vmpt.msa.load_operability`. Cells equal to 2 are
         stuck-open shutters, which act as always-on dispersion sources
         even when no slitlet is opened there. When provided AND
         protection is enabled, a protected source landing on a row

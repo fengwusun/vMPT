@@ -1,4 +1,4 @@
-"""Tests for app.catalog."""
+"""Tests for vmpt.catalog."""
 
 import os
 import sys
@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from app.catalog import Catalog, catalog_in_view, load_catalog
+from vmpt.catalog import Catalog, catalog_in_view, load_catalog
 
 
 def test_load_csv(tmp_path):

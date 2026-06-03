@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-_DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+_DATA_DIR = Path(__file__).resolve().parent / "data"
 _GRID_PATH = _DATA_DIR / "nirspec_msa_v2v3.npz"
 
 _grid_cache: dict = {}

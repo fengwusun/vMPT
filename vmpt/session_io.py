@@ -20,8 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from app.coords import V3_IDL_Y_ANGLE
-from app.empt_io import OpenShutter
+from vmpt.coords import V3_IDL_Y_ANGLE
+from vmpt.empt_io import OpenShutter
 
 
 SESSION_TOOL_VERSION = "1.4"

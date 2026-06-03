@@ -107,7 +107,7 @@ for c in "${CATALOG_PATHS[@]:-}"; do
 done
 
 # Build the `--args` list for Bokeh. Each --args value lands in
-# `sys.argv` inside app/main.py at startup.
+# `sys.argv` inside vmpt/main.py at startup.
 APP_ARGS=()
 [[ -n "$FITS_PATH" ]]   && APP_ARGS+=(--fits "$FITS_PATH")
 [[ -n "$JPG_PATH" ]]    && APP_ARGS+=(--jpg "$JPG_PATH")
@@ -116,7 +116,7 @@ for c in "${RESOLVED_CATALOGS[@]:-}"; do
     APP_ARGS+=(--catalog "$c")
 done
 
-CMD=(bokeh serve app/
+CMD=(bokeh serve vmpt/
      --port "$PORT"
      --websocket-max-message-size 524288000
      --show)

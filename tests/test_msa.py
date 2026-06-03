@@ -1,4 +1,4 @@
-"""Tests for app.msa: shutter grid loader and operability parser."""
+"""Tests for vmpt.msa: shutter grid loader and operability parser."""
 
 import sys
 from pathlib import Path
@@ -7,7 +7,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.msa import (
+from vmpt.msa import (
     load_msa_grid,
     load_operability,
     shutter_center_v2v3,

@@ -1,0 +1,14 @@
+include README.md
+include LICENSE
+include CHANGELOG.md
+include CONTEXT.md
+include requirements.txt
+recursive-include vmpt/data *.npz
+recursive-include vmpt/static *
+recursive-include vmpt/templates *
+# Examples are NOT in the wheel; users grab them with
+# `vmpt examples download`.
+exclude example_a370
+exclude example_r0600
+recursive-exclude tests *
+recursive-exclude refs *

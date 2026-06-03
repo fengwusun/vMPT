@@ -4,6 +4,49 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.2] — 2026-06-03
+
+Packaging release: vMPT is now **pip-installable** as `jwst-vmpt`
+on TestPyPI / PyPI.
+
+### `pip install`
+
+```bash
+pip install jwst-vmpt              # PyPI (when promoted)
+pip install -i https://test.pypi.org/simple/ jwst-vmpt  # TestPyPI
+vmpt                               # opens at http://localhost:5006/app
+```
+
+The console script `vmpt` accepts the same flags as `run.sh`:
+`--port`, `--fits`, `--jpg`, `--wcs`, `--catalog` (repeatable). A
+new `vmpt examples download [DIR]` subcommand pulls the two example
+datasets (`example_a370`, `example_r0600` — together ~64 MB) from a
+GitHub release asset on demand, so the pip wheel itself stays at
+~20 MB (only the required MSA grid + per-shutter dispersion table
+are bundled).
+
+### Repo restructuring
+
+- The Bokeh app directory renamed from `app/` to `vmpt/` so it
+  doubles as the Python import package. All `from app.X` imports
+  rewritten to `from vmpt.X` (17 files, ~56 references).
+- `data/*.npz` moved to `vmpt/data/*.npz` so the wheel ships them
+  alongside the modules. Path lookups in `vmpt/msa.py` and
+  `vmpt/wavelengths.py` adjusted (one fewer `parent`).
+- `run.sh` updated to `bokeh serve vmpt/` for source-tree users; no
+  behavioural change.
+- New top-level files: `pyproject.toml` (PEP 517/518 metadata + the
+  `vmpt` console script), `MANIFEST.in` (sdist completeness),
+  `vmpt/cli.py` (entry point).
+- `.gitignore` gains `build/`, `dist/`, `.eggs/` for the pip build
+  flow.
+
+### No behavioural changes
+
+Tests still pass at **139 / 4 skipped**. The Bokeh app behaves
+identically to v1.2.1; only the install path / directory name
+changed.
+
 ## [1.2.1] — 2026-06-03
 
 Patch release. Two real bug fixes on top of v1.2.0's collision-
