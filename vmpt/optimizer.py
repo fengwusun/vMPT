@@ -609,7 +609,13 @@ class PointingEvaluator:
                     cleaned = []
                 self._required_lam[i] = cleaned
         else:
-            self._required_lam = np.array([[] for _ in range(n)], dtype=object)
+            # `np.array([[] for ...], dtype=object)` produces a 2D
+            # array of shape (n, 0) — element access then returns an
+            # empty 1D numpy array, and `bool()` of an empty numpy
+            # array warns. Build a true 1D object array explicitly.
+            self._required_lam = np.empty(n, dtype=object)
+            for i in range(n):
+                self._required_lam[i] = []
 
         # Any constraint flagged on at least one target?
         has_required = any(len(r) > 0 for r in self._required_lam)
@@ -764,35 +770,47 @@ class PointingEvaluator:
     ) -> np.ndarray:
         """Apply the three collision-protection rules at one pointing.
 
-        Every "row collision" check is **slitlet-aware**: a protected
-        target with slit_length=N opens N consecutive shutters in the
-        spatial direction (rows ``s_p − N//2 … s_p + N//2``), and the
-        user-requested rule says no other shutter — own-pointing or
-        stuck-open — may occupy a row within ±1 of those opened rows.
-        That gives the per-pair tolerances cached in
-        :meth:`_init_protection`:
+        Every check is **explicitly per-shutter**: each protected
+        source's slitlet is expanded into its N constituent shutters
+        and every one of them is checked against the other party. Two
+        individual shutters collide on the detector when all three of
+        the following hold:
 
-        * Protected (slitlet) ↔ stuck-open (single shutter):
-          ``|Δs| ≤ N//2 + 1``
-        * Protected ↔ another slitlet (same slit_length):
-          ``|Δs| ≤ 2·(N//2) + 1``
+        - Same detector half (Q1+Q3 → NRS1; Q2+Q4 → NRS2; cross-half
+          pairs image onto different detectors).
+        - Same row to within ``SHVAL_S_TOLERANCE = 1`` (the
+          per-individual-shutter eMPT convention).
+        - V2 separation < :func:`v2_overlap_distance` for the current
+          (disperser, filter) — i.e. their dispersed spectra share
+          some detector x-pixel range.
+
+        For a protected target with slit_length=N, the slitlet covers
+        rows ``{s_p − half, …, s_p + half}`` (``half = N // 2``). The
+        slitlet has a collision iff **any one** of its N shutters
+        collides with **any one** of the other side's shutters
+        (a single shutter for stuck-open, a slitlet for another
+        source). This drops the historical "widened tolerance"
+        shortcut from v1.2.1 — same math for column-aligned slitlets
+        (intra-slitlet V2 variation ≲ 0.4″ ≪ V2-overlap, so the
+        shortcut was numerically equivalent), but the explicit form
+        uses the actual per-shutter V2 from the MSA grid and reads
+        directly as "every slitlet member is checked".
 
         Rules:
 
-        1. **Protected ↔ stuck-open**: a protected source landing on a
-           row that collides with any stuck-open shutter is dropped
-           (its spectrum is unavoidably contaminated). Stuck-open is
-           treated as a constant dispersion source independent of
-           pointing.
-        2. **Protected ↔ protected**: when two protected sources fall
-           in the same detector half with overlapping (slitlet ± 1)
-           rows + ΔV2 < ``v2_overlap``, the lower-rank one (higher
-           priority number → lower weight → higher index) is dropped.
-           The winner stays and continues to provide collision
-           pressure on the next rule.
+        1. **Protected ↔ stuck-open**: a protected source whose
+           slitlet has any shutter colliding with any stuck-open
+           shutter is dropped (its spectrum is unavoidably
+           contaminated). Stuck-open is a single-shutter dispersion
+           source independent of pointing.
+        2. **Protected ↔ protected**: when two protected sources'
+           slitlets collide, the lower-rank one (higher priority
+           number → lower weight → higher index) is dropped. The
+           winner stays and continues to provide collision pressure
+           on rule 3.
         3. **Protected ↔ unprotected**: any detected unprotected
-           source whose slitlet ± 1 collides with a still-kept
-           protected source is dropped.
+           source whose slitlet collides with a still-kept protected
+           source's slitlet is dropped.
 
         Returns the kept (post-drop) boolean mask. Dropped protected
         sources do **not** provide collision pressure for steps 2/3 —
@@ -809,54 +827,71 @@ class PointingEvaluator:
         det_half[is_q1q3] = 1
         det_half[is_q2q4] = 2
 
-        # V2 of each detected source from its nearest-shutter (q, s, d).
-        v2_src = np.full(len(kept), np.nan)
-        in_grid = (quad > 0) & detected
-        if in_grid.any():
-            qi = quad[in_grid] - 1
-            si = np.clip(np.rint(s_frac[in_grid]).astype(int), 0, 170)
-            di = np.clip(np.rint(d_frac[in_grid]).astype(int), 0, 364)
-            v2_src[in_grid] = self._v2_lut[qi, si, di]
-        s_row = np.where(np.isfinite(s_frac),
-                         np.rint(s_frac), -10_000).astype(np.int32)
+        # ── Build per-source slitlet arrays (rows + V2) ─────────────
+        # Each detected source occupies N=2*half+1 shutters at rows
+        # s_int + k for k in [-half, +half]. We fetch the V2 of each
+        # of those shutters individually — they differ by ~0.4″ across
+        # the N rows (MSA is rotated relative to V2/V3). Out-of-MSA
+        # slitlet members (s_offset < 0 or ≥ 171) carry NaN, which
+        # makes any subsequent V2 comparison return False (NumPy NaN
+        # semantics) — i.e. they're treated as "no shutter exists
+        # there to collide with", which is correct.
+        half = self._slit_half
+        n_slit = 2 * half + 1
+        n_sources = len(kept)
+        slit_rows = np.full((n_sources, n_slit), -10_000, dtype=np.int32)
+        slit_v2 = np.full((n_sources, n_slit), np.nan, dtype=float)
 
-        # Slit-aware row tolerances (precomputed in `_init_protection`).
-        # Rule 1 compares a protected slitlet against a single stuck-
-        # open shutter → half_p + 1 rows on each side. Rules 2 / 3
-        # compare two slitlets that share the same slit_length →
-        # 2·half_p + 1 rows on each side. The optimizer uses one
-        # global slit_length, so all sources share `_sd_tol_pp`.
-        s_tol_ps = self._sd_tol_ps
-        s_tol_pp = self._sd_tol_pp
+        in_grid_full = (quad > 0) & detected
+        active_idx = np.where(in_grid_full)[0]
+        if active_idx.size > 0:
+            qi = quad[active_idx] - 1  # 0-based, (n_active,)
+            si = np.rint(s_frac[active_idx]).astype(int)
+            di = np.rint(d_frac[active_idx]).astype(int)
+            # Reject sources whose centre column is off-grid; their
+            # slitlet rows still need bounds-checked below.
+            di_ok = (di >= 0) & (di < 365)
+            for k, ds in enumerate(range(-half, half + 1)):
+                s_off = si + ds
+                row_ok = di_ok & (s_off >= 0) & (s_off < 171)
+                # Where the slitlet shutter exists on the MSA, record
+                # its row and V2; else leave the (−10_000, NaN)
+                # sentinels in place.
+                good = active_idx[row_ok]
+                if good.size > 0:
+                    slit_rows[good, k] = s_off[row_ok]
+                    slit_v2[good, k] = self._v2_lut[qi[row_ok],
+                                                    s_off[row_ok],
+                                                    di[row_ok]]
 
-        # -------- Rule 1: protected ↔ stuck-open --------
+        # -------- Rule 1: protected slitlet ↔ stuck-open --------
         if self._stuck_open_v2.size > 0:
-            prot_idx = np.where(
-                kept & self._protect_mask & (det_half > 0)
-                & np.isfinite(v2_src)
-            )[0]
+            prot_idx = np.where(kept & self._protect_mask & (det_half > 0))[0]
             if prot_idx.size > 0:
-                # Vectorised broadcast: (n_prot, n_stuck).
-                ph = det_half[prot_idx][:, None]
-                ps = s_row[prot_idx][:, None]
-                pv = v2_src[prot_idx][:, None]
-                sh = self._stuck_open_half[None, :]
-                ss = self._stuck_open_s[None, :]
-                sv = self._stuck_open_v2[None, :]
-                collide = ((ph == sh)
-                           & (np.abs(ps - ss) <= s_tol_ps)
-                           & (np.abs(pv - sv) < self._v2_overlap))
-                kept[prot_idx[collide.any(axis=1)]] = False
+                # Broadcast shape: (n_prot, n_slit, n_stuck)
+                #   ph        : (n_prot, 1, 1)
+                #   slit_rows : (n_prot, n_slit, 1)
+                #   slit_v2   : (n_prot, n_slit, 1)
+                #   so_h      : (1, 1, n_stuck)
+                #   so_s      : (1, 1, n_stuck)
+                #   so_v2     : (1, 1, n_stuck)
+                ph = det_half[prot_idx][:, None, None]
+                rows_p = slit_rows[prot_idx][:, :, None]
+                v2_p = slit_v2[prot_idx][:, :, None]
+                so_h = self._stuck_open_half[None, None, :]
+                so_s = self._stuck_open_s[None, None, :]
+                so_v2 = self._stuck_open_v2[None, None, :]
+                collide = (
+                    (ph == so_h)
+                    & (np.abs(rows_p - so_s) <= SHVAL_S_TOLERANCE)
+                    & (np.abs(v2_p - so_v2) < self._v2_overlap)
+                )
+                # Drop if ANY (slit shutter, stuck shutter) pair collides.
+                kept[prot_idx[collide.any(axis=(1, 2))]] = False
 
-        # -------- Rule 2: protected ↔ protected --------
-        kept_prot_idx = np.where(
-            kept & self._protect_mask & (det_half > 0)
-            & np.isfinite(v2_src)
-        )[0]
+        # -------- Rule 2: protected slitlet ↔ protected slitlet --------
+        kept_prot_idx = np.where(kept & self._protect_mask & (det_half > 0))[0]
         if kept_prot_idx.size >= 2:
-            # Iterate in winner order (smallest collision_rank first);
-            # any later peer that collides with the current winner is
-            # dropped.
             rank = self._collision_rank[kept_prot_idx]
             order = np.argsort(rank)
             ordered = kept_prot_idx[order]
@@ -871,37 +906,48 @@ class PointingEvaluator:
                     continue
                 live_tail_idx = np.where(tail_alive)[0]
                 lt = tail[live_tail_idx]
+                # Broadcast: (n_lt, n_slit_l, n_slit_w)
+                w_rows = slit_rows[wi]            # (n_slit,)
+                w_v2 = slit_v2[wi]                # (n_slit,)
+                w_half = det_half[wi]             # scalar
+                l_rows = slit_rows[lt][:, :, None]  # (n_lt, n_slit_l, 1)
+                l_v2 = slit_v2[lt][:, :, None]    # (n_lt, n_slit_l, 1)
+                l_half = det_half[lt][:, None, None]  # (n_lt, 1, 1)
                 collide = (
-                    (det_half[lt] == det_half[wi])
-                    & (np.abs(s_row[lt] - s_row[wi]) <= s_tol_pp)
-                    & (np.abs(v2_src[lt] - v2_src[wi]) < self._v2_overlap)
+                    (l_half == w_half)
+                    & (np.abs(l_rows - w_rows[None, None, :])
+                       <= SHVAL_S_TOLERANCE)
+                    & (np.abs(l_v2 - w_v2[None, None, :])
+                       < self._v2_overlap)
                 )
-                if collide.any():
-                    losers = lt[collide]
+                drops = collide.any(axis=(1, 2))
+                if drops.any():
+                    losers = lt[drops]
                     kept[losers] = False
-                    alive[k + 1 + live_tail_idx[collide]] = False
+                    alive[k + 1 + live_tail_idx[drops]] = False
 
-        # -------- Rule 3: protected (still kept) ↔ unprotected --------
-        kept_prot_idx = np.where(
-            kept & self._protect_mask & (det_half > 0)
-            & np.isfinite(v2_src)
-        )[0]
+        # -------- Rule 3: protected slitlet ↔ unprotected slitlet --------
+        kept_prot_idx = np.where(kept & self._protect_mask & (det_half > 0))[0]
         if kept_prot_idx.size > 0:
             unprot_idx = np.where(
                 kept & ~self._protect_mask & (det_half > 0)
-                & np.isfinite(v2_src)
             )[0]
             if unprot_idx.size > 0:
-                hu = det_half[unprot_idx][:, None]
-                su = s_row[unprot_idx][:, None]
-                vu = v2_src[unprot_idx][:, None]
-                hp = det_half[kept_prot_idx][None, :]
-                sp = s_row[kept_prot_idx][None, :]
-                vp = v2_src[kept_prot_idx][None, :]
-                collide = ((hu == hp)
-                           & (np.abs(su - sp) <= s_tol_pp)
-                           & (np.abs(vu - vp) < self._v2_overlap))
-                kept[unprot_idx[collide.any(axis=1)]] = False
+                # Broadcast: (n_u, n_slit_u, n_p, n_slit_p)
+                u_rows = slit_rows[unprot_idx][:, :, None, None]
+                u_v2 = slit_v2[unprot_idx][:, :, None, None]
+                u_half = det_half[unprot_idx][:, None, None, None]
+                p_rows = slit_rows[kept_prot_idx][None, None, :, :]
+                p_v2 = slit_v2[kept_prot_idx][None, None, :, :]
+                p_half = det_half[kept_prot_idx][None, None, :, None]
+                collide = (
+                    (u_half == p_half)
+                    & (np.abs(u_rows - p_rows) <= SHVAL_S_TOLERANCE)
+                    & (np.abs(u_v2 - p_v2) < self._v2_overlap)
+                )
+                # Drop unprot if any (its shutter, prot's shutter)
+                # pair collides for any prot source.
+                kept[unprot_idx[collide.any(axis=(1, 2, 3))]] = False
 
         return kept
 
@@ -968,7 +1014,10 @@ class PointingEvaluator:
             need_no_gap = bool(self._no_gap[i])
             need_blue = bool(self._extend_blue[i])
             need_red = bool(self._extend_red[i])
-            has_req = bool(req) and len(req) > 0
+            # `len()` is safe on both Python lists and NumPy arrays;
+            # avoids `bool(arr)`'s ambiguous-truthiness deprecation.
+            has_req = (req is not None
+                       and hasattr(req, "__len__") and len(req) > 0)
             if not (has_req or need_no_gap or need_blue or need_red):
                 continue
 

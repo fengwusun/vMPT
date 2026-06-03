@@ -2641,8 +2641,13 @@ def _rebuild_merged_catalog() -> None:
         for c in cats:
             arr = getattr(c, "required_lam", None)
             if arr is None or len(arr) != len(c.ra_deg):
-                arr = np.array([[] for _ in range(len(c.ra_deg))],
-                               dtype=object)
+                # 1D object array of [] — `np.array([[]…], dtype=O)`
+                # would build a 2D shape=(n, 0) array instead, which
+                # then trips bool() ambiguity downstream.
+                tmp = np.empty(len(c.ra_deg), dtype=object)
+                for i in range(len(c.ra_deg)):
+                    tmp[i] = []
+                arr = tmp
             else:
                 arr = np.asarray(arr, dtype=object)
             chunks.append(arr)
@@ -6566,7 +6571,11 @@ def on_optimize():
     if cat_required_lam is not None and len(cat_required_lam) == n_full:
         full_req = np.asarray(cat_required_lam, dtype=object)
     else:
-        full_req = np.array([[] for _ in range(n_full)], dtype=object)
+        # Build a true 1D object array of [] (not the 2D
+        # shape=(n,0) array that np.array([[],[],…]) yields).
+        full_req = np.empty(n_full, dtype=object)
+        for _i in range(n_full):
+            full_req[_i] = []
     required_lam_arr = (full_req[keep] if keep is not None else full_req)
     no_gap_arr = _slice_or_default(
         getattr(cat, "no_gap", None), False, bool)
