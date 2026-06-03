@@ -12,8 +12,15 @@ on TestPyPI / PyPI.
 ### `pip install`
 
 ```bash
-pip install jwst-vmpt              # PyPI (when promoted)
-pip install -i https://test.pypi.org/simple/ jwst-vmpt  # TestPyPI
+# Real PyPI (once promoted):
+pip install jwst-vmpt
+
+# TestPyPI today — install deps from real PyPI first so the resolver
+# doesn't pick up TestPyPI typosquats with bogus version numbers,
+# then pull jwst-vmpt itself from TestPyPI with --no-deps.
+pip install astropy bokeh jwst jwst_gtvt numpy pandas Pillow pysiaf scipy
+pip install --index-url https://test.pypi.org/simple/ --no-deps jwst-vmpt
+
 vmpt                               # opens at http://localhost:5006/app
 ```
 

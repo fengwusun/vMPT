@@ -49,11 +49,29 @@ your disk, computation uses your local Python.
 
 ### Option A — pip install (recommended, **v1.2.2+**)
 
+Once vMPT is on real PyPI, the install is one line:
+
 ```bash
-pip install jwst-vmpt                                            # PyPI
-# or, while we're on TestPyPI:
-pip install -i https://test.pypi.org/simple/ jwst-vmpt
+pip install jwst-vmpt
 vmpt                                                             # opens the app
+```
+
+While the package is still on **TestPyPI**, install dependencies
+from real PyPI first and pull only `jwst-vmpt` from TestPyPI with
+`--no-deps`. This avoids the well-known TestPyPI typosquat hazard
+(any TestPyPI account can upload a package with version 99.99.99
+under a real package's name; pip's resolver picks the higher
+version and may try to phone home during the build):
+
+```bash
+# 1. all real dependencies from real PyPI
+pip install astropy bokeh jwst jwst_gtvt numpy pandas Pillow pysiaf scipy
+
+# 2. jwst-vmpt itself from TestPyPI, --no-deps so transitive
+#    packages aren't re-resolved against TestPyPI
+pip install --index-url https://test.pypi.org/simple/ --no-deps jwst-vmpt
+
+vmpt --help
 ```
 
 The console script `vmpt` accepts the same flags as `run.sh`:
