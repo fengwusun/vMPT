@@ -215,6 +215,29 @@ modes without re-annotating.
   MIDPOINT, CONSTRAINED, TIGHTLY_CONSTRAINED).
 - **Priority cutoff ≤** — restrict the optimizer to catalog rows with
   `priority ≤ X` (e.g. P0/P1 first; do fillers by hand later).
+- **Protect spectra from collision** (optional, **v1.2.0+**) — mark
+  a subset of catalog sources whose spectra must not overlap any
+  other source's spectrum on the detector under the current
+  Disperser / Filter.
+  - **Enable collision protection** — toggle the rule on/off.
+  - **Mode** — *By priority ≤ X* or *By weight ≥ Y* (mutually
+    exclusive).
+  - **Threshold** — numeric value matching the chosen mode.
+  - The live status line shows how many sources are protected at
+    the current threshold and the V2 overlap half-extent for the
+    current Disperser / Filter (e.g. *"12 protected · 240 other
+    (G140H / F100LP · V2 overlap ≈ 500″)"*).
+  - Effect: at every candidate pointing the optimizer drops (a)
+    any non-protected source whose row collides with a protected
+    one, (b) lower-priority protected sources from
+    protected-vs-protected collisions, and (c) protected sources
+    landing on a row colliding with any stuck-open shutter (their
+    spectrum is unavoidably contaminated). The score is the count
+    of *kept* sources, so the optimizer naturally steers protected
+    targets into clean rows.
+  - Note that for H gratings the V2 overlap is ~500″ — wider than
+    the MSA — so protecting many targets dramatically reduces the
+    co-observable count. That's the truthful answer, not a bug.
 - **Advanced settings…** — pop-up with: grid resolution (n_RA, n_Dec,
   n_PA), DE max iterations, objective (`number` vs `flux`-weighted),
   source σ (PSF size), APT DVA θ. The Method dropdown supersedes the
@@ -244,6 +267,12 @@ Click **Run optimization**. A pop-up appears with:
    **Hover any Score cell** to see the top 10 placed sources at that
    pointing, sorted by priority ascending then weight descending
    (`1. ID=12345  P=0  W=5`, …).
+
+   When **collision protection** is on, the Score cell appends
+   `−K` where K is the number of sources dropped at this pointing
+   to keep protected spectra clean; the hover top-10 prefixes
+   protected sources with **🛡** so you can see which sources are
+   doing the protecting.
 
    Clicking **Apply #N** asks for confirmation (it clears all
    previously open shutters), then sets RA/Dec/V3 PA to the chosen

@@ -545,6 +545,48 @@ The **Method** dropdown determines how source counts are weighted:
 Sources with NaN in the required column contribute weight 0 — they're
 visible on the canvas but invisible to that mode's optimizer.
 
+### Collision protection (v1.2.0+)
+
+`PointingEvaluator` accepts optional `protect_mask`, `priorities`,
+`weights`, `disperser`, `filt`, `reason` kwargs. When `protect_mask`
+flags any source, three drop rules apply at every `evaluate()` call,
+reusing the **same** physics as the live canvas's orange spec-overlap
+layer (`SHVAL_S_TOLERANCE = 1`, Q1/Q3 → NRS1 vs Q2/Q4 → NRS2 detector
+halves, V2 separation < `v2_overlap_distance(disperser, filt)`):
+
+1. **Protected ↔ stuck-open** — a protected source on a row colliding
+   with any REASON==2 shutter is dropped (unavoidably contaminated).
+2. **Protected ↔ protected** — within each colliding cluster, the
+   lowest-priority-number source wins. Ties on priority break on
+   higher weight; ties on weight break on lower source index
+   (stable). Encoded as a per-source `_collision_rank` precomputed in
+   `_init_protection`.
+3. **Protected (still kept) ↔ unprotected** — every unprotected
+   source colliding with any still-kept protected one is dropped.
+
+Dropped protected sources do **not** propagate collision pressure to
+rules 2/3 — losing one high-priority spectrum doesn't justify
+compounding the loss by also dropping unprotected sources from the
+same row. `evaluate_with_stats(ra, dec, pa)` returns the
+3-tuple-plus-drop-count; `evaluate(...)` still returns the 3-tuple
+but its `detected` is now the kept (post-drop) mask, so existing
+scoring code (`np.sum(det * weights)` etc.) automatically reflects
+the protection without changes.
+
+The UI builds the `protect_mask` in `_protect_mask_for_catalog`:
+priority cutoff `pri ≤ X` OR weight cutoff `wgt ≥ Y` (mutually
+exclusive — `opt_protect_mode_radio.active` is 0 or 1).
+`opt_protect_status_div` updates live via `_update_protect_status_div`
+hooked to the checkbox / radio / threshold input. The results modal
+appends `−K` to each Score cell and prefixes 🛡 on protected IDs in
+the hover top-10; `n_dropped[i]` is computed in `_opt_de_step` by
+calling `evaluate_with_stats` for each refined candidate.
+
+Important: `_rebuild_merged_catalog` had to be extended to propagate
+`weight` for the multi-catalog case (was only carrying it through
+the single-catalog fast path); without this fix the "By weight ≥"
+rule would silently select zero sources in multi-catalog mode.
+
 ### Catalog editor (`app/catalog_ops.py`)
 
 The editor's **Compute w from p** and **Compute p from w** buttons

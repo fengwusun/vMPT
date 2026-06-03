@@ -42,6 +42,7 @@ from scipy.special import erfc
 
 from .coords import MSA_V2_REF, MSA_V3_REF, V3_IDL_Y_ANGLE
 from .msa import load_msa_grid, load_operability
+from .wavelengths import v2_overlap_distance
 
 
 # Physical shutter dimensions on the focal plane (arcsec).
@@ -50,6 +51,17 @@ from .msa import load_msa_grid, load_operability
 # matches APT's MSA model.
 SHUTTER_X_ARCSEC = 0.2679
 SHUTTER_Y_ARCSEC = 0.5294
+
+# Maximum |Δs| between two shutters for them to be considered on the
+# same detector y-row (and thus possible spectral collisions). eMPT
+# uses shval ≈ s exactly; we allow ±1 to be on the safe side. Matches
+# `SHVAL_S_TOLERANCE` in `app/main.py` (live-canvas orange overlap).
+SHVAL_S_TOLERANCE: int = 1
+
+# Detector-half assignment: Q1+Q3 → NRS1, Q2+Q4 → NRS2. Cross-half
+# pairs image onto different detectors and therefore never overlap.
+NRS1_QUADS = frozenset({1, 3})
+NRS2_QUADS = frozenset({2, 4})
 
 # Centration buffer classes (inset from shutter edge, arcsec).
 # Mirrors APT's source-centering modes; values from hMPT.
@@ -271,6 +283,29 @@ class PointingEvaluator:
         shutter in the slitlet must be operable for the source to count.
     operable : ndarray, optional
         Pre-loaded (4, 171, 365) operability mask. Loaded lazily if None.
+    protect_mask : ndarray of bool, optional
+        Parallel to ``ra_sources``; True marks a source whose spectrum
+        must be protected from same-row collisions under the current
+        (disperser, filter). Requires ``disperser`` + ``filt`` to be
+        meaningful. When None or all-False, no protection is applied
+        and ``evaluate`` behaves exactly as before.
+    priorities, weights : ndarray, optional
+        Per-source priority / weight, used only to break ties when two
+        protected sources collide (lower priority number wins; on tie,
+        higher weight wins). NaN-tolerant. Falls back to source index
+        order if neither is provided.
+    disperser, filt : str, optional
+        e.g. ``"PRISM"`` and ``"CLEAR"``. Only consulted when
+        ``protect_mask`` flags any source. The V2 half-extent of the
+        spectrum is looked up from :func:`v2_overlap_distance`.
+    reason : ndarray, optional
+        (4, 171, 365) operability-reason array from
+        :func:`app.msa.load_operability`. Cells equal to 2 are
+        stuck-open shutters, which act as always-on dispersion sources
+        even when no slitlet is opened there. When provided AND
+        protection is enabled, a protected source landing on a row
+        colliding with any stuck-open shutter is dropped (its spectrum
+        is unavoidably contaminated).
     """
 
     def __init__(
@@ -282,6 +317,13 @@ class PointingEvaluator:
         centration: str = "UNCONSTRAINED",
         slit_length: int = 3,
         operable: Optional[np.ndarray] = None,
+        *,
+        protect_mask: Optional[np.ndarray] = None,
+        priorities: Optional[np.ndarray] = None,
+        weights: Optional[np.ndarray] = None,
+        disperser: Optional[str] = None,
+        filt: Optional[str] = None,
+        reason: Optional[np.ndarray] = None,
     ):
         self.ra = np.asarray(ra_sources, dtype=float)
         self.dec = np.asarray(dec_sources, dtype=float)
@@ -292,16 +334,138 @@ class PointingEvaluator:
             centration.upper(), CENTRATION_BUFFERS["UNCONSTRAINED"])
         self.slit_length = int(slit_length)
         if operable is None:
-            operable, _ = load_operability()
+            operable_loaded, reason_loaded = load_operability()
+            operable = operable_loaded
+            if reason is None:
+                reason = reason_loaded
         self.operable = np.asarray(operable, dtype=bool)
         self.interpolators = _build_inverse_interpolators()
+        self._init_protection(
+            protect_mask=protect_mask,
+            priorities=priorities,
+            weights=weights,
+            disperser=disperser,
+            filt=filt,
+            reason=reason,
+        )
+
+    # -- collision-protection setup ---------------------------------
+
+    def _init_protection(
+        self,
+        protect_mask: Optional[np.ndarray],
+        priorities: Optional[np.ndarray],
+        weights: Optional[np.ndarray],
+        disperser: Optional[str],
+        filt: Optional[str],
+        reason: Optional[np.ndarray],
+    ) -> None:
+        """Cache everything the per-pointing collision check needs.
+
+        Lazily skipped when ``protect_mask`` is None or all-False — the
+        common case (no protection) pays no construction cost beyond
+        a couple of cheap None assignments.
+        """
+        self._protect_enabled = False
+        self._protect_mask = None
+        self._collision_rank = None
+        self._v2_lut = None
+        self._v2_overlap = 0.0
+        self._stuck_open_half = np.empty(0, dtype=np.int8)
+        self._stuck_open_s = np.empty(0, dtype=np.int32)
+        self._stuck_open_v2 = np.empty(0, dtype=float)
+
+        if protect_mask is None:
+            return
+        pm = np.asarray(protect_mask, dtype=bool)
+        if pm.size != len(self.ra):
+            raise ValueError(
+                "protect_mask size must match ra_sources "
+                f"({pm.size} vs {len(self.ra)})"
+            )
+        if not pm.any():
+            return
+        if disperser is None or filt is None:
+            raise ValueError(
+                "protect_mask is set; disperser and filt are required "
+                "to look up the spectral-collision V2 half-extent."
+            )
+
+        self._protect_enabled = True
+        self._protect_mask = pm
+
+        # Build a tie-break rank: smaller = wins. Primary key is
+        # priority (NaN sinks to the back), secondary is -weight (so
+        # higher weight wins), tertiary is index (stable).
+        n = len(self.ra)
+        pri = (np.asarray(priorities, dtype=float) if priorities is not None
+               else np.full(n, np.nan))
+        wgt = (np.asarray(weights, dtype=float) if weights is not None
+               else np.full(n, np.nan))
+        pri = np.where(np.isnan(pri), np.inf, pri)
+        wgt = np.where(np.isnan(wgt), -np.inf, wgt)
+        order = np.lexsort((np.arange(n), -wgt, pri))
+        self._collision_rank = np.empty(n, dtype=np.int64)
+        self._collision_rank[order] = np.arange(n, dtype=np.int64)
+
+        # V2 lookup per (q, s, d). (4, 171, 365) array of floats.
+        v2_grid, _ = load_msa_grid()
+        self._v2_lut = np.asarray(v2_grid, dtype=float)
+
+        # Spectral overlap half-extent for the requested (disperser,
+        # filter). Falls back to a conservative default inside
+        # `v2_overlap_distance` for unknown configs.
+        self._v2_overlap = float(v2_overlap_distance(disperser, filt))
+
+        # Stuck-open shutters (REASON == 2). Cache their (det_half, s,
+        # V2). When `reason` isn't provided we leave the arrays empty;
+        # collision protection then ignores stuck-opens.
+        if reason is not None:
+            r_arr = np.asarray(reason, dtype=np.int8)
+            stuck = np.argwhere(r_arr == 2)
+            if stuck.size > 0:
+                q_idx = stuck[:, 0]  # 0..3
+                s_idx = stuck[:, 1]  # 0..170
+                d_idx = stuck[:, 2]  # 0..364
+                # NRS1 = quads 1,3 → q_idx 0,2; NRS2 = quads 2,4 → 1,3.
+                half = np.where(np.isin(q_idx, [0, 2]), 1, 2).astype(np.int8)
+                v2_vals = self._v2_lut[q_idx, s_idx, d_idx].astype(float)
+                self._stuck_open_half = half
+                self._stuck_open_s = s_idx.astype(np.int32)
+                self._stuck_open_v2 = v2_vals
+
+    # -- evaluation --------------------------------------------------
 
     def evaluate(
         self,
         ra_p: float, dec_p: float, pa_v3: float,
         theta_deg: float = 90.0,
     ) -> tuple[np.ndarray, np.ndarray, tuple[np.ndarray, np.ndarray, np.ndarray]]:
-        """Return ``(detected_bool, throughput, (quad, s, d))`` per source."""
+        """Return ``(detected_bool, throughput, (quad, s, d))`` per source.
+
+        When collision protection was configured at construction time,
+        ``detected`` is the **kept** mask — sources dropped by the
+        protection rules are zeroed in both ``detected`` and
+        ``throughput``. The raw pre-drop mask is not returned; use
+        :meth:`evaluate_with_stats` if you also need the drop count.
+        """
+        kept, tp, idx, _ = self.evaluate_with_stats(
+            ra_p, dec_p, pa_v3, theta_deg=theta_deg,
+        )
+        return kept, tp, idx
+
+    def evaluate_with_stats(
+        self,
+        ra_p: float, dec_p: float, pa_v3: float,
+        theta_deg: float = 90.0,
+    ) -> tuple[np.ndarray, np.ndarray,
+               tuple[np.ndarray, np.ndarray, np.ndarray], int]:
+        """Like :meth:`evaluate` plus an ``n_dropped`` count of sources
+        that landed in operable, centred shutters but were excluded by
+        the collision-protection rules at this pointing.
+
+        ``n_dropped == 0`` when no protection is configured.
+        """
         axy = radec_to_axy(self.ra, self.dec, ra_p, dec_p, pa_v3, theta_deg)
         quad, s_frac, d_frac = axy_to_shutter(axy, self.interpolators)
         operable_mask = self._check_operable(quad, s_frac, d_frac)
@@ -310,7 +474,142 @@ class PointingEvaluator:
             tp = _gaussian_through_shutter(s_frac, d_frac, self.sigma)
         tp = np.where(operable_mask & centered, tp, 0.0)
         detected = tp > 0
-        return detected, tp, (quad, s_frac, d_frac)
+
+        if not self._protect_enabled:
+            return detected, tp, (quad, s_frac, d_frac), 0
+
+        kept = self._apply_collision_drops(detected, quad, s_frac, d_frac)
+        n_dropped = int(detected.sum() - kept.sum())
+        tp_kept = np.where(kept, tp, 0.0)
+        return kept, tp_kept, (quad, s_frac, d_frac), n_dropped
+
+    # -- collision rules ---------------------------------------------
+
+    def _apply_collision_drops(
+        self,
+        detected: np.ndarray,
+        quad: np.ndarray,
+        s_frac: np.ndarray,
+        d_frac: np.ndarray,
+    ) -> np.ndarray:
+        """Apply the three collision-protection rules at one pointing.
+
+        1. **Protected ↔ stuck-open**: a protected source landing on a
+           row that collides with any stuck-open shutter is dropped
+           (its spectrum is unavoidably contaminated). Stuck-open is
+           treated as a constant dispersion source independent of
+           pointing.
+        2. **Protected ↔ protected**: when two protected sources fall
+           in the same detector half + same row (|Δs| ≤
+           SHVAL_S_TOLERANCE) + ΔV2 < ``v2_overlap``, the lower-rank
+           one (higher priority number → lower weight → higher index)
+           is dropped. The winner stays and continues to provide
+           collision pressure on the next rule.
+        3. **Protected ↔ unprotected**: any detected unprotected
+           source whose row collides with a still-kept protected
+           source is dropped.
+
+        Returns the kept (post-drop) boolean mask. Dropped protected
+        sources do **not** provide collision pressure for steps 2/3 —
+        if a high-priority spectrum is already contaminated we won't
+        compound the loss by also blocking the unprotected sources.
+        """
+        kept = detected.copy()
+        if not kept.any():
+            return kept
+
+        det_half = np.zeros(len(kept), dtype=np.int8)
+        is_q1q3 = (quad == 1) | (quad == 3)
+        is_q2q4 = (quad == 2) | (quad == 4)
+        det_half[is_q1q3] = 1
+        det_half[is_q2q4] = 2
+
+        # V2 of each detected source from its nearest-shutter (q, s, d).
+        v2_src = np.full(len(kept), np.nan)
+        in_grid = (quad > 0) & detected
+        if in_grid.any():
+            qi = quad[in_grid] - 1
+            si = np.clip(np.rint(s_frac[in_grid]).astype(int), 0, 170)
+            di = np.clip(np.rint(d_frac[in_grid]).astype(int), 0, 364)
+            v2_src[in_grid] = self._v2_lut[qi, si, di]
+        s_row = np.where(np.isfinite(s_frac),
+                         np.rint(s_frac), -10_000).astype(np.int32)
+
+        # -------- Rule 1: protected ↔ stuck-open --------
+        if self._stuck_open_v2.size > 0:
+            prot_idx = np.where(
+                kept & self._protect_mask & (det_half > 0)
+                & np.isfinite(v2_src)
+            )[0]
+            if prot_idx.size > 0:
+                # Vectorised broadcast: (n_prot, n_stuck).
+                ph = det_half[prot_idx][:, None]
+                ps = s_row[prot_idx][:, None]
+                pv = v2_src[prot_idx][:, None]
+                sh = self._stuck_open_half[None, :]
+                ss = self._stuck_open_s[None, :]
+                sv = self._stuck_open_v2[None, :]
+                collide = ((ph == sh)
+                           & (np.abs(ps - ss) <= SHVAL_S_TOLERANCE)
+                           & (np.abs(pv - sv) < self._v2_overlap))
+                kept[prot_idx[collide.any(axis=1)]] = False
+
+        # -------- Rule 2: protected ↔ protected --------
+        kept_prot_idx = np.where(
+            kept & self._protect_mask & (det_half > 0)
+            & np.isfinite(v2_src)
+        )[0]
+        if kept_prot_idx.size >= 2:
+            # Iterate in winner order (smallest collision_rank first);
+            # any later peer that collides with the current winner is
+            # dropped.
+            rank = self._collision_rank[kept_prot_idx]
+            order = np.argsort(rank)
+            ordered = kept_prot_idx[order]
+            alive = np.ones(ordered.size, dtype=bool)
+            for k in range(ordered.size):
+                if not alive[k]:
+                    continue
+                wi = ordered[k]
+                tail = ordered[k + 1:]
+                tail_alive = alive[k + 1:]
+                if tail.size == 0 or not tail_alive.any():
+                    continue
+                live_tail_idx = np.where(tail_alive)[0]
+                lt = tail[live_tail_idx]
+                collide = (
+                    (det_half[lt] == det_half[wi])
+                    & (np.abs(s_row[lt] - s_row[wi]) <= SHVAL_S_TOLERANCE)
+                    & (np.abs(v2_src[lt] - v2_src[wi]) < self._v2_overlap)
+                )
+                if collide.any():
+                    losers = lt[collide]
+                    kept[losers] = False
+                    alive[k + 1 + live_tail_idx[collide]] = False
+
+        # -------- Rule 3: protected (still kept) ↔ unprotected --------
+        kept_prot_idx = np.where(
+            kept & self._protect_mask & (det_half > 0)
+            & np.isfinite(v2_src)
+        )[0]
+        if kept_prot_idx.size > 0:
+            unprot_idx = np.where(
+                kept & ~self._protect_mask & (det_half > 0)
+                & np.isfinite(v2_src)
+            )[0]
+            if unprot_idx.size > 0:
+                hu = det_half[unprot_idx][:, None]
+                su = s_row[unprot_idx][:, None]
+                vu = v2_src[unprot_idx][:, None]
+                hp = det_half[kept_prot_idx][None, :]
+                sp = s_row[kept_prot_idx][None, :]
+                vp = v2_src[kept_prot_idx][None, :]
+                collide = ((hu == hp)
+                           & (np.abs(su - sp) <= SHVAL_S_TOLERANCE)
+                           & (np.abs(vu - vp) < self._v2_overlap))
+                kept[unprot_idx[collide.any(axis=1)]] = False
+
+        return kept
 
     # -- internals ---------------------------------------------------
 

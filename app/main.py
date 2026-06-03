@@ -40,6 +40,7 @@ from bokeh.models import (
     NumberEditor,
     NumberFormatter,
     Range1d,
+    RadioGroup,
     Select,
     Slider,
     StringEditor,
@@ -337,6 +338,36 @@ opt_centration_select = Select(
 )
 opt_priority_input = TextInput(
     title="Priority cutoff ≤ (blank = all)", value="", placeholder="e.g. 1",
+    width=SIDEBAR_W - 20,
+)
+
+# Collision-protection group — opt-in. When enabled, sources matching
+# the priority/weight rule are marked as "protected" and the optimizer
+# drops other sources whose spectra would collide with theirs on the
+# detector under the current Disperser / Filter (live-canvas orange
+# rule, applied per pointing).
+opt_protect_section_div = Div(
+    text=("<div style='margin:6px 0 -2px 0; font-weight:600; "
+          "color:#1a3b66'>Protect spectra from collision</div>"
+          "<div style='font-size:11px; color:#5a6b85; line-height:1.35'>"
+          "Drop targets whose spectra would overlap the protected set "
+          "on the detector under the current Disperser / Filter.</div>"),
+    width=SIDEBAR_W - 20,
+)
+opt_protect_enable_cb = CheckboxGroup(
+    labels=["Enable collision protection"], active=[],
+    width=SIDEBAR_W - 20,
+)
+opt_protect_mode_radio = RadioGroup(
+    labels=["By priority ≤", "By weight ≥"], active=0,
+    inline=True, width=SIDEBAR_W - 20,
+)
+opt_protect_threshold_input = TextInput(
+    title="Threshold", value="1", placeholder="e.g. 1",
+    width=SIDEBAR_W - 20,
+)
+opt_protect_status_div = Div(
+    text="<small style='color:#5a6b85'>—</small>",
     width=SIDEBAR_W - 20,
 )
 
@@ -2206,6 +2237,15 @@ def _rebuild_merged_catalog() -> None:
     ra = np.concatenate([c.ra_deg for c in cats])
     dec = np.concatenate([c.dec_deg for c in cats])
     pri = np.concatenate([c.priority for c in cats])
+    # Weight: backfill NaN for catalogs without a weight column so the
+    # merged array is always length-aligned to ra. Needed by Meritocracy
+    # mode and by the collision-protection "By weight ≥" rule.
+    weight = np.concatenate([
+        (np.asarray(c.weight, dtype=float) if getattr(c, "weight", None)
+         is not None and len(c.weight) == len(c.ra_deg)
+         else np.full(len(c.ra_deg), np.nan, dtype=float))
+        for c in cats
+    ])
     mag = np.concatenate([c.mag for c in cats])
     z = np.concatenate([c.z for c in cats])
     label = np.concatenate([
@@ -2226,7 +2266,7 @@ def _rebuild_merged_catalog() -> None:
         for e in ordered_for_draw
     ])
     state["catalog"] = Catalog(
-        ids=ids, ra_deg=ra, dec_deg=dec, priority=pri,
+        ids=ids, ra_deg=ra, dec_deg=dec, priority=pri, weight=weight,
         mag=mag, z=z, label=label,
         source_path=" + ".join(c.source_path for c in cats),
     )
@@ -4889,6 +4929,8 @@ def _opt_render_results_in_modal(
     totals = results.get("total_count")
     sum_weights = results.get("sum_weight")
     top_targets = results.get("top_targets")
+    n_dropped = results.get("n_dropped")
+    protect_enabled = bool(results.get("protect_enabled"))
     is_hierarchy = breakdowns is not None and len(breakdowns) >= n_show
     is_meritocracy = method == "Meritocracy"
 
@@ -4899,11 +4941,18 @@ def _opt_render_results_in_modal(
         "Hierarchy":   ("ranked lexicographically by priority tier; "
                         "<b>P<sub>i</sub>:n</b> = sources placed at tier i."),
     }.get(method, "")
+    protect_blurb = ""
+    if protect_enabled:
+        protect_blurb = (
+            " · <b>🛡 collision protection</b> ON — "
+            "<code>−K</code> counts targets dropped to protect "
+            "high-priority spectra."
+        )
     opt_modal_results_summary.text = (
         f"<div style='font-size:12px; margin-bottom:4px'>"
         f"<b>Top {n_show}</b> distinct solutions of {n} total · "
         f"{n_sources} candidate sources · "
-        f"<b>Method:</b> {method} — {method_blurb} "
+        f"<b>Method:</b> {method} — {method_blurb}{protect_blurb} "
         f"Hover a Score cell to see the top-10 placed sources. "
         f"Offsets are from the search centre.</div>"
     )
@@ -4944,13 +4993,17 @@ def _opt_render_results_in_modal(
     # single integer ("46"), Meritocracy a weight sum + count
     # ("Σw 287.0 (46)"), Hierarchy a per-tier breakdown +
     # count ("P0:4 · P1:12 · P2:30 (46)"). Narrow widths caused
-    # the label to wrap below the row.
+    # the label to wrap below the row. When collision protection is
+    # on, the label gains a " −K" suffix so the column needs to be
+    # wider by ~30 px to keep the ellipsis from kicking in.
     if is_hierarchy:
         score_w = 200
     elif is_meritocracy:
         score_w = 140
     else:
         score_w = 80
+    if protect_enabled:
+        score_w += 36
     COL_WIDTHS = (32, score_w, 90, 90, 100, 168)
     total_w = sum(COL_WIDTHS)
     header_row = row(
@@ -4995,6 +5048,12 @@ def _opt_render_results_in_modal(
         else:
             score_label = (str(total_i) if total_i is not None
                            else f"{s:.1f}")
+        # Append "−K" when the collision-protection rules dropped any
+        # detected sources at this pointing. Hover tooltip explains.
+        n_drop_i = (int(n_dropped[i]) if n_dropped is not None
+                    and i < len(n_dropped) else 0)
+        if n_drop_i > 0:
+            score_label = f"{score_label} −{n_drop_i}"
 
         # Hover tooltip — top-10 placed sources in priority order.
         tooltip = ""
@@ -5005,7 +5064,18 @@ def _opt_render_results_in_modal(
                 for r, t in enumerate(tt, 1):
                     pid = "—" if t["p"] is None else f"{int(t['p'])}"
                     wid = "—" if t["w"] is None else f"{int(t['w'])}"
-                    tip_lines.append(f"{r}. ID={t['id']}  P={pid}  W={wid}")
+                    # 🛡 prefix marks sources in the protected set
+                    # (collision-protection mode). Plain row otherwise.
+                    prot_mark = "🛡 " if t.get("prot") else "   "
+                    tip_lines.append(
+                        f"{r}. {prot_mark}ID={t['id']}  P={pid}  W={wid}"
+                    )
+                if n_drop_i > 0:
+                    tip_lines.append("")
+                    tip_lines.append(
+                        f"(−{n_drop_i} non-protected source(s) dropped "
+                        f"to protect the 🛡 spectra above.)"
+                    )
                 tooltip = "\n".join(tip_lines)
         # `title=` renders as a native browser tooltip on hover.
         # HTML-escape minimally so quotes don't break the attribute.
@@ -5310,16 +5380,19 @@ def _opt_de_step() -> None:
             np.full(len(pri_arr), np.nan, dtype=float),
         )
         ids_arr = _opt_run.get("source_ids", [])
+        protect_mask = _opt_run.get("protect_mask")
         totals: list[int] = []
         sum_weights: list[float] = []
         top_targets: list[list[dict]] = []
+        n_dropped_list: list[int] = []
         for k in range(len(refined["score"])):
-            det, _, _ = ev.evaluate(
+            det, _, _, n_dropped = ev.evaluate_with_stats(
                 float(refined["ra"][k]),
                 float(refined["dec"][k]),
                 float(refined["pa"][k]),
             )
             totals.append(int(det.sum()))
+            n_dropped_list.append(int(n_dropped))
             # Weight sum across detected sources (Meritocracy headline).
             w_finite = np.where(np.isfinite(wt_arr), wt_arr, 0.0)
             sum_weights.append(float(np.sum(det * w_finite)))
@@ -5342,6 +5415,9 @@ def _opt_de_step() -> None:
                               if np.isfinite(pri_arr[i]) else None),
                         "w": (float(wt_arr[i])
                               if np.isfinite(wt_arr[i]) else None),
+                        "prot": (bool(protect_mask[i])
+                                 if protect_mask is not None
+                                 and i < len(protect_mask) else False),
                     }
                     for i in top_idx
                 ])
@@ -5350,6 +5426,8 @@ def _opt_de_step() -> None:
         refined["total_count"] = totals
         refined["sum_weight"] = sum_weights
         refined["top_targets"] = top_targets
+        refined["n_dropped"] = n_dropped_list
+        refined["protect_enabled"] = bool(_opt_run.get("protect_enabled"))
 
         # Hierarchy mode also wants the per-tier breakdown.
         breakdowns: list[list[tuple[float, int]]] | None = None
@@ -5427,6 +5505,118 @@ def _opt_de_step() -> None:
         frac,
     )
     curdoc().add_next_tick_callback(_opt_drive)
+
+
+# ---------------------------------------------------------------------
+# Collision protection — helpers
+# ---------------------------------------------------------------------
+
+
+def _protect_mask_for_catalog(
+    cat,
+    enabled: bool,
+    mode_idx: int,
+    threshold_text: str,
+) -> tuple[np.ndarray | None, str | None]:
+    """Build a per-source boolean mask of "protected" sources.
+
+    Parameters mirror the UI controls. ``mode_idx`` is the RadioGroup's
+    ``active`` index: 0 → "By priority ≤", 1 → "By weight ≥". Returns
+    ``(mask, error_msg)``. When protection is disabled or impossible
+    (no catalog, blank threshold, …), returns ``(None, None)``. When
+    the user's threshold cannot be parsed or the requested column is
+    missing, returns ``(None, error_msg)`` so the caller can surface a
+    friendly status line.
+    """
+    if not enabled:
+        return None, None
+    if cat is None or len(cat.ra_deg) == 0:
+        return None, "Load a catalog first."
+    text = (threshold_text or "").strip()
+    if not text:
+        return None, "Enter a threshold."
+    try:
+        threshold = float(text)
+    except ValueError:
+        return None, "Threshold must be numeric."
+    if mode_idx == 0:
+        pri = np.asarray(cat.priority, dtype=float)
+        if not np.isfinite(pri).any():
+            return None, "Catalog has no priority values."
+        mask = np.isfinite(pri) & (pri <= threshold)
+    else:
+        wgt = np.asarray(getattr(cat, "weight", []), dtype=float)
+        if wgt.size != len(cat.ra_deg) or not np.isfinite(wgt).any():
+            return None, "Catalog has no weight values."
+        mask = np.isfinite(wgt) & (wgt >= threshold)
+    return mask, None
+
+
+def _update_protect_status_div() -> None:
+    """Refresh the protect-status Div based on the current widget state.
+
+    Shows the count of sources that would be marked protected at the
+    current threshold, or a small warning when the configuration is
+    invalid (missing column, blank threshold, etc.). Wired to the
+    relevant widgets' on_change events and to catalog-change events
+    via the Tabs container so it updates live."""
+    enabled = bool(opt_protect_enable_cb.active)
+    if not enabled:
+        opt_protect_status_div.text = (
+            "<small style='color:#5a6b85'>"
+            "Disabled — all detected targets count toward the score."
+            "</small>"
+        )
+        return
+    cat = state.get("catalog")
+    mode_idx = int(opt_protect_mode_radio.active or 0)
+    mask, err = _protect_mask_for_catalog(
+        cat, enabled, mode_idx, opt_protect_threshold_input.value,
+    )
+    if err is not None:
+        opt_protect_status_div.text = (
+            f"<small style='color:#a05a30'>⚠ {err}</small>"
+        )
+        return
+    n_prot = int(mask.sum())
+    n_total = int(mask.size)
+    n_other = n_total - n_prot
+    if n_prot == 0:
+        opt_protect_status_div.text = (
+            "<small style='color:#a05a30'>"
+            "⚠ Threshold matches no catalog source.</small>"
+        )
+        return
+    # Add a one-line hint about the current Disperser / Filter — H
+    # gratings span ~500″ in V2 and therefore drop nearly every
+    # co-observable source; PRISM's ~35″ is benign.
+    disp = (state.get("disperser") or "?").upper()
+    filt = (state.get("filter") or "?").upper()
+    try:
+        from app.wavelengths import v2_overlap_distance as _v2od
+        overlap = _v2od(disp, filt)
+    except Exception:
+        overlap = None
+    overlap_txt = (f" · V2 overlap ≈ {overlap:.0f}″"
+                   if overlap is not None else "")
+    opt_protect_status_div.text = (
+        f"<small style='color:#1a3b66'>"
+        f"<b>{n_prot}</b> protected · {n_other} other "
+        f"<span style='color:#5a6b85'>"
+        f"({disp} / {filt}{overlap_txt})</span></small>"
+    )
+
+
+# Wire the live-update.
+opt_protect_enable_cb.on_change(
+    "active", lambda attr, old, new: _update_protect_status_div(),
+)
+opt_protect_mode_radio.on_change(
+    "active", lambda attr, old, new: _update_protect_status_div(),
+)
+opt_protect_threshold_input.on_change(
+    "value", lambda attr, old, new: _update_protect_status_div(),
+)
 
 
 def _now() -> float:
@@ -5564,6 +5754,33 @@ def on_optimize():
     dec_cube = D.ravel()
     pa_cube = P.ravel()
 
+    # ---- Collision-protection mask (post-priority-cutoff slice) ----
+    protect_enabled = bool(opt_protect_enable_cb.active)
+    protect_mask_evaluator = None
+    protect_mode_idx = int(opt_protect_mode_radio.active or 0)
+    if protect_enabled:
+        # Build over the FULL catalog first, then slice with `keep` so
+        # indices align with `ra_arr / dec_arr / weight_arr_full`.
+        full_mask, err = _protect_mask_for_catalog(
+            cat, True, protect_mode_idx,
+            opt_protect_threshold_input.value,
+        )
+        if err is not None or full_mask is None:
+            _set_status(
+                f"Collision protection: {err or 'invalid configuration'}.",
+                "err",
+            )
+            return
+        if keep is not None:
+            full_mask = full_mask[keep]
+        if not full_mask.any():
+            _set_status(
+                "Collision protection: threshold matches no participating "
+                "source (after priority cutoff).", "warn",
+            )
+            return
+        protect_mask_evaluator = full_mask
+
     # Build the evaluator now so the heavy CloughTocher Delaunay step
     # happens before we show the modal — the user sees the bar start
     # at 0 % and advance, instead of staring at a frozen 0 % for 2 s.
@@ -5572,6 +5789,13 @@ def on_optimize():
         "Building MSA inverse map (first time only)…",
         "info", clear_after=0,
     )
+    # Load the reason mask alongside operability so the evaluator can
+    # apply the "protected target on stuck-open row" rule. Loading is
+    # cached by `app/msa.load_operability` after the first call.
+    if protect_mask_evaluator is not None:
+        _op_mask, _op_reason = load_operability()
+    else:
+        _op_mask, _op_reason = None, None
     ev = PointingEvaluator(
         ra_arr, dec_arr, flux_sources=flux_arr,
         sigma_arcsec=sigma, centration=centration,
@@ -5579,6 +5803,13 @@ def on_optimize():
         # Operability is loaded fresh by PointingEvaluator from
         # `app/msa.load_operability()` — the same CRDS file the main
         # canvas uses. No state-side caching to drift between them.
+        operable=_op_mask,
+        protect_mask=protect_mask_evaluator,
+        priorities=pri,
+        weights=weight_arr_full,
+        disperser=state.get("disperser"),
+        filt=state.get("filter"),
+        reason=_op_reason,
     )
 
     _opt_run.clear()
@@ -5606,6 +5837,12 @@ def on_optimize():
         "de_ddec_arcsec": max(2.0, d_dec / 10.0) if d_dec > 0 else 0.0,
         "de_dpa_deg": max(0.5, d_pa / 10.0) if d_pa > 0 else 0.0,
         "started": _now(),
+        # Collision-protection bookkeeping for the results modal +
+        # _apply_optimizer_result. None when protection is disabled.
+        "protect_enabled": protect_mask_evaluator is not None,
+        "protect_mask": protect_mask_evaluator,
+        "protect_mode_idx": protect_mode_idx,
+        "protect_threshold": opt_protect_threshold_input.value,
     })
 
     _opt_show_modal()
@@ -5704,6 +5941,11 @@ aim_tab = TabPanel(title="Pointing", child=column(
     row(opt_dpa_input, opt_n_top_input),
     opt_centration_select,
     opt_priority_input,
+    opt_protect_section_div,
+    opt_protect_enable_cb,
+    opt_protect_mode_radio,
+    opt_protect_threshold_input,
+    opt_protect_status_div,
     opt_advanced_btn,
     opt_run_btn,
     opt_status_div,

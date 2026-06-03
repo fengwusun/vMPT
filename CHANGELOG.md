@@ -4,6 +4,106 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.2.0] — 2026-06-03
+
+Feature release: **shutter collision protection in the optimizer**.
+
+Same-row sources on the same NIRSpec detector half (Q1/Q3 → NRS1,
+Q2/Q4 → NRS2) disperse onto overlapping detector pixels when their
+V2 separation is smaller than the spectrum's V2 half-extent
+(`app.wavelengths.v2_overlap_distance` — 35″ for PRISM, ~500″ for
+the H gratings). Until now the optimizer counted both members of
+every such pair as observable; the live canvas already painted the
+loser orange, but the score didn't reflect that downstream
+penalty. v1.2.0 wires the same collision check into the optimizer's
+per-pointing scoring so the user can mark high-priority targets as
+**protected** and have the optimizer steer them into rows free of
+collisions.
+
+### Optimizer core (`app/optimizer.py`)
+
+- `PointingEvaluator` accepts new keyword args: `protect_mask`,
+  `priorities`, `weights`, `disperser`, `filt`, `reason`. When
+  `protect_mask` is None (the default), behaviour is identical to
+  v1.1.1 — the existing 16 optimizer tests are unchanged.
+- A new method `evaluate_with_stats(...)` returns the existing
+  3-tuple plus the count of sources dropped by the collision rules
+  at this pointing. `evaluate(...)` still returns the 3-tuple but
+  its `detected` mask is now the **kept** mask (post-drop) when
+  protection is configured, so callers that score via `det.sum()`
+  pick up collision filtering for free.
+- Three rules, applied in order at every pointing:
+  1. **Protected ↔ stuck-open** — a protected source landing on a
+     row colliding with any shutter flagged as stuck-open (REASON
+     == 2 in the CRDS `msaoper` file) is dropped. Stuck-opens
+     always disperse light onto the detector regardless of which
+     slitlets the user opens, so the protected target's spectrum is
+     unavoidably contaminated.
+  2. **Protected ↔ protected** — within each colliding cluster the
+     lowest-priority-number source wins. Ties on priority break on
+     higher weight; ties on weight break on lower index (stable).
+     Losers are dropped; winners continue to provide collision
+     pressure on the next rule.
+  3. **Protected ↔ unprotected** — every unprotected source whose
+     row collides with any still-kept protected source is dropped.
+- Dropped protected sources do **not** propagate collision pressure
+  to rules 2/3 — if a high-priority spectrum is already
+  contaminated we won't compound the loss by also blocking
+  unprotected sources in the same row.
+
+### Pointing-tab UI (`app/main.py`)
+
+- New **"Protect spectra from collision"** group in the optimizer
+  sidebar (just below the existing Priority cutoff input):
+  - Checkbox: **Enable collision protection**.
+  - Radio: **By priority ≤** | **By weight ≥** (mutually exclusive).
+  - **Threshold** text input.
+  - Live status line: e.g. *"12 protected · 240 other (G140H /
+    F100LP · V2 overlap ≈ 500″)"* — updates as you toggle the
+    checkbox, switch the radio, type a threshold, or change the
+    current Disperser/Filter.
+- `_rebuild_merged_catalog` now propagates `weight` when multiple
+  catalogs are stacked — previously single-catalog mode kept weight
+  (it pointed at the original `Catalog` object) but merged mode
+  dropped it, so the multi-catalog "By weight ≥" rule would have
+  silently selected zero sources.
+
+### Results modal
+
+- When protection is enabled the Score cell gains a **`−K`**
+  suffix where K = number of collision-dropped sources at this
+  pointing. The Score column is widened by ~36 px so the suffix
+  doesn't ellipsis-truncate.
+- The hover top-10 prefixes protected sources with **🛡** so the
+  user can verify which sources are providing collision pressure.
+  A trailing line in the tooltip explains the −K count.
+- Header summary line picks up a **"🛡 collision protection ON"**
+  badge with a one-line explainer.
+
+### Tests
+
+- New `tests/test_optimizer_protection.py` — 11 tests covering
+  backwards compatibility, input validation, all three drop rules,
+  cross-detector-half non-collision, stuck-open handling, and the
+  invariant that protection can only reduce a pointing's score
+  (never increase it). 3 tests skip gracefully when synthetic
+  sources don't happen to land in the geometry the test exercises.
+- Existing test suite unchanged: **135 passed, 4 skipped** total
+  (up from 124/1).
+
+### Notes / known limitations
+
+- For the H gratings the V2 overlap distance is ~500″ — comparable
+  to the full MSA — so even one protected target rules out a large
+  fraction of co-observable sources. The result is physically
+  truthful, not a bug; the modal shows the lower kept count so
+  expectations match reality.
+- Unprotected sources whose rows collide with a stuck-open shutter
+  are NOT dropped from scoring (only protected sources have the
+  contamination penalty applied to them). This matches the
+  user-requested semantic: protection is a high-priority-only
+  feature, not a universal contamination filter.
+
 ## [1.1.1] — 2026-06-03
 
 Patch release. Polish + several real bugs in the v1.1.0 optimizer
