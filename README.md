@@ -235,11 +235,21 @@ Click **Run optimization**. A pop-up appears with:
 2. **Results table** — the top-10 distinct solutions (near-duplicates
    are de-duplicated). Each row shows rank, score, and the
    (ΔRA, ΔDec, ΔPA) offset from the search centre, paired with an
-   **Apply #N** button. Clicking Apply does two things:
-   - sets RA/Dec/V3 PA to that solution; AND
-   - opens an N-shutter slitlet (N from the **Setting → Slitlet**
-     dropdown; default 3) at every observable target's shutter,
-     auto-tagged with the source's catalog ID.
+   **Apply #N** button. The Score column adapts to the method:
+   - Democracy → `<count>` (raw count of placed sources).
+   - Meritocracy → `Σw <weight-sum>  (<count>)`.
+   - Hierarchy → `P0:n · P1:n · P2:n …  (<count>)` — per-tier counts +
+     total in parens.
+
+   **Hover any Score cell** to see the top 10 placed sources at that
+   pointing, sorted by priority ascending then weight descending
+   (`1. ID=12345  P=0  W=5`, …).
+
+   Clicking **Apply #N** asks for confirmation (it clears all
+   previously open shutters), then sets RA/Dec/V3 PA to the chosen
+   solution AND opens an N-shutter slitlet (N from the
+   **Setting → Slitlet** dropdown; default 3) at every observable
+   target's shutter, auto-tagged with the source's catalog ID.
 
    The whole apply is a single Undo step in the **Setting → Undo
    last** history, so reverting goes back to your previous picks.

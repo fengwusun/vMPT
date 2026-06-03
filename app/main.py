@@ -702,7 +702,11 @@ opt_modal_card = column(
     opt_modal_close_btn,
     visible=False,
     spacing=10,
-    width=600,
+    # Wider than before to accommodate the Hierarchy mode's per-tier
+    # breakdown in the Score column (e.g. "P0:4·P1:12·P2:30 (46)" —
+    # ~200 px) plus the rest of the row (~480 px) and the modal's
+    # inner padding (~36 px).
+    width=740,
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -713,8 +717,8 @@ opt_modal_card = column(
         "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
         "padding": "16px 18px",
         "z-index": "1000",
-        "min-width": "560px",
-        "max-width": "92vw",
+        "min-width": "700px",
+        "max-width": "94vw",
         # `max-height` + overflow-y keeps the card from running off
         # the bottom of the viewport when there are many result rows.
         "max-height": "85vh",
@@ -725,6 +729,13 @@ opt_modal_card = column(
 # In-flight optimizer state — only one run at a time. Reset on each
 # new run via `on_optimize`.
 _opt_run: dict = {}
+
+# Hidden trigger used by the Apply-button JS confirm dialog. The JS
+# callback writes "<ra>,<dec>,<pa>,<stamp>" here once the user OKs
+# the confirm; Python's on_change handler parses + applies. The
+# stamp guarantees a fresh `change` event even when the same row is
+# re-applied (Bokeh dedupes identical values).
+opt_apply_trigger = TextInput(value="", visible=False)
 
 # Full-page loading overlay — a centered translucent backdrop with an
 # animated spinner. The widget itself is a zero-size Bokeh Div, but its
@@ -4069,12 +4080,19 @@ def _cat_edit_populate_table(idx: int) -> None:
         weight_arr = np.asarray(getattr(cat, "weight", []), dtype=float)
         if weight_arr.size != n:
             weight_arr = np.full(n, np.nan, dtype=float)
+        # Priority and weight are stored as FLOATS (NaN for missing)
+        # — that makes SlickGrid sort them numerically instead of
+        # lexicographically ("10" < "2" with string sort). The
+        # HTMLTemplateFormatter in the column definition renders the
+        # float as an integer and blanks NaN. StringEditor still
+        # works for editing — `_on_cat_edit_data_change` coerces user
+        # input back to float.
         data: dict = dict(
             id=[str(v) for v in np.asarray(cat.ids).tolist()],
             ra=[f"{v:.7f}" for v in ra_arr.tolist()],
             dec=[f"{v:.7f}" for v in dec_arr.tolist()],
-            priority=[_cat_edit_fmt_optional(v) for v in cat.priority],
-            weight=[_cat_edit_fmt_optional(v) for v in weight_arr],
+            priority=[float(v) for v in cat.priority],
+            weight=[float(v) for v in weight_arr],
             mag=[_cat_edit_fmt_optional(v) for v in cat.mag],
             z=[_cat_edit_fmt_optional(v) for v in cat.z],
             label=[str(v) for v in (cat.label if cat.label is not None
@@ -4107,9 +4125,25 @@ def _cat_edit_populate_table(idx: int) -> None:
     _cat_edit_rebuild_columns()
 
 
+# Integer-display formatter for priority + weight. Source data is
+# stored as FLOAT (NaN for missing) so SlickGrid sorts the column
+# numerically. The template renders ints (rounds floats) and blanks
+# NaN/null/empty; if a value is still a string (transient state
+# right after the user commits an edit, before `_on_cat_edit_data_change`
+# coerces it back to float), it's shown verbatim so the user sees
+# their typed text.
+_INT_OR_BLANK_TEMPLATE = (
+    "<%= (value === null || value === undefined || value === '' || "
+    "     (typeof value === 'number' && isNaN(value))) "
+    "    ? '' "
+    "    : (typeof value === 'number' ? Math.round(value) : value) %>"
+)
+
+
 def _cat_edit_rebuild_columns() -> None:
     """Rebuild `cat_edit_table.columns` according to the picker. The
-    trash column always stays at the end."""
+    trash column always stays at the end. Priority + Weight use a
+    NaN-safe integer formatter so the sort is numeric, not lexicographic."""
     visible_titles = set(cat_edit_columns_choice.value or [])
     title_to_field = {**{_CAT_STD_TITLES[c]: c for c in _CAT_STD_COLS}}
     data = _cat_edit_source.data
@@ -4120,13 +4154,17 @@ def _cat_edit_rebuild_columns() -> None:
         title_to_field[k] = k
 
     cols: list = []
+    int_fmt = HTMLTemplateFormatter(template=_INT_OR_BLANK_TEMPLATE)
     # Standard columns first, in their fixed order.
     for c in _CAT_STD_COLS:
         if _CAT_STD_TITLES[c] in visible_titles:
-            cols.append(TableColumn(
+            col_kwargs = dict(
                 field=c, title=_CAT_STD_TITLES[c],
                 editor=StringEditor(), width=_CAT_STD_WIDTHS[c],
-            ))
+            )
+            if c in ("priority", "weight"):
+                col_kwargs["formatter"] = int_fmt
+            cols.append(TableColumn(**col_kwargs))
     # Extras in CSV order.
     for k in extras:
         if k in visible_titles:
@@ -4201,17 +4239,32 @@ from app.catalog_ops import (
 )
 
 
+def _str_or_blank_to_float(v) -> float:
+    """Helper: empty/NaN-ish strings → NaN; numeric strings → float."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    s = ("" if v is None else str(v)).strip()
+    if not s or s.lower() in ("nan", "none", "null", "--"):
+        return float("nan")
+    try:
+        return float(s)
+    except ValueError:
+        return float("nan")
+
+
 def _on_cat_edit_compute_w_from_p():
     data = dict(_cat_edit_source.data)
     pris = list(data.get("priority", []))
-    new_w = _compute_weights_from_priorities(pris)
-    if new_w is None:
+    new_w_str = _compute_weights_from_priorities(pris)
+    if new_w_str is None:
         _set_status(
             "Compute w from p: no finite priorities found. "
             "Fill the Priority column first.", "warn",
         )
         return
-    data["weight"] = new_w
+    # Helper returns strings (per its signature). Convert to floats so
+    # the column stays numerically sortable.
+    data["weight"] = [_str_or_blank_to_float(s) for s in new_w_str]
     _cat_edit_set_data_silently(data)
     # Make sure Weight is visible in the picker.
     titles = cat_edit_columns_choice.value or []
@@ -4229,14 +4282,14 @@ def _on_cat_edit_compute_w_from_p():
 def _on_cat_edit_compute_p_from_w():
     data = dict(_cat_edit_source.data)
     weights = list(data.get("weight", []))
-    new_p = _compute_priorities_from_weights(weights)
-    if new_p is None:
+    new_p_str = _compute_priorities_from_weights(weights)
+    if new_p_str is None:
         _set_status(
             "Compute p from w: no finite weights found. "
             "Fill the Weight column first.", "warn",
         )
         return
-    data["priority"] = new_p
+    data["priority"] = [_str_or_blank_to_float(s) for s in new_p_str]
     _cat_edit_set_data_silently(data)
     titles = cat_edit_columns_choice.value or []
     if _CAT_STD_TITLES["priority"] not in titles:
@@ -4251,7 +4304,12 @@ def _on_cat_edit_compute_p_from_w():
 
 def _on_cat_edit_data_change(attr, old, new):
     """Listener on source.data — fires after any cell edit. Pushes the
-    PRIOR state onto the undo stack so the user can revert it."""
+    PRIOR state onto the undo stack so the user can revert.
+
+    Also coerces priority + weight back to float — they're stored as
+    floats so SlickGrid sorts numerically, but StringEditor writes
+    a string when the user commits. Without this coercion the column
+    becomes mixed-type and sorting flips back to lexicographic."""
     if _cat_edit_suppress["flag"]:
         return
     snap = {k: list(v) for k, v in old.items()}
@@ -4260,6 +4318,36 @@ def _on_cat_edit_data_change(attr, old, new):
         _cat_edit_undo_stack.pop(0)
     _cat_edit_redo_stack.clear()
     _cat_edit_render_history()
+
+    # Coerce any string entries in the numeric columns back to float.
+    needs_fix = False
+    new_dict = {k: list(v) for k, v in new.items()}
+    for col in ("priority", "weight"):
+        if col not in new_dict:
+            continue
+        vals = new_dict[col]
+        if not any(isinstance(v, str) for v in vals):
+            continue
+        coerced = []
+        for v in vals:
+            if isinstance(v, (int, float)) and not (
+                isinstance(v, float) and not np.isfinite(v)
+            ):
+                coerced.append(float(v))
+                continue
+            s = ("" if v is None else str(v)).strip()
+            if not s or s.lower() in ("nan", "none", "null", "--"):
+                coerced.append(float("nan"))
+            else:
+                try:
+                    coerced.append(float(s))
+                except ValueError:
+                    coerced.append(float("nan"))
+        new_dict[col] = coerced
+        needs_fix = True
+    if needs_fix:
+        # Suppress recursion: setting `data` would re-trigger us.
+        _cat_edit_set_data_silently(new_dict)
 
 
 def _on_cat_edit_undo():
@@ -4441,12 +4529,27 @@ def _on_cat_edit_apply():
     _cat_edit_close()
 
 
-def _on_cat_edit_save_csv():
-    """Write the working copy to CSV at the user-supplied path.
+def _fmt_int_or_blank(v) -> str:
+    """Render a float/int/string cell value as an integer string, or "".
+    NaN / None / empty → "". Used by CSV save for priority + weight,
+    which are stored as floats internally."""
+    try:
+        if isinstance(v, str):
+            s = v.strip()
+            if not s or s.lower() in ("nan", "none", "null", "--"):
+                return ""
+            f = float(s)
+        else:
+            f = float(v)
+        if not np.isfinite(f):
+            return ""
+        return str(int(round(f)))
+    except (ValueError, TypeError):
+        return "" if v is None else str(v).strip()
 
-    Source.data already carries strings for every editable column
-    (blank for NaN), so we can pass values straight through.
-    """
+
+def _on_cat_edit_save_csv():
+    """Write the working copy to CSV at the user-supplied path."""
     path = (cat_edit_csv_path_input.value or "").strip()
     if not path:
         _set_status("Enter a save path first.", "warn")
@@ -4462,19 +4565,21 @@ def _on_cat_edit_save_csv():
         import csv as _csv
         # Column order: the eight standard columns first, then any
         # extras columns the source carries (in insertion order). Skip
-        # the internal `_idx` column.
+        # the internal `_idx` column. Priority / weight are stored as
+        # floats in source.data so we coerce them to int-or-blank.
         extras_cols = [k for k in data.keys()
                        if k not in _CAT_STD_COLS and k != "_idx"]
         header = ["ID", "RA", "DEC", "priority", "weight", "mag", "z",
                   "label", *extras_cols]
+        weights = data.get("weight", [""] * n)
         with open(p, "w", newline="") as f:
             w = _csv.writer(f)
             w.writerow(header)
             for i in range(n):
                 row_vals = [
                     data["id"][i], data["ra"][i], data["dec"][i],
-                    data["priority"][i],
-                    data.get("weight", [""] * n)[i],
+                    _fmt_int_or_blank(data["priority"][i]),
+                    _fmt_int_or_blank(weights[i]),
                     data["mag"][i], data["z"][i],
                     data["label"][i],
                 ]
@@ -4587,26 +4692,66 @@ curdoc().js_on_event(DocumentReady, _cat_edit_clipboard_js)
 # the page never fired DocumentReady (rare) or the function got wiped.
 _cat_edit_source.js_on_change("data", _cat_edit_clipboard_js)
 
+# When the user clicks a SlickGrid column header to sort, the table
+# stays at whatever row was on screen — so a sort hidden 200 rows
+# down looks like nothing happened. Install a document-level click
+# delegate that scrolls the affected table's viewport back to row 0
+# after every header click.
+_cat_edit_sort_scroll_js = CustomJS(code="""
+if (!window.__vmpt_sort_scroll_installed) {
+    window.__vmpt_sort_scroll_installed = true;
+    document.addEventListener('click', function(e) {
+        const header = e.target.closest('.slick-header-column');
+        if (!header) return;
+        // Walk up to the SlickGrid container, then find its viewport.
+        // Bokeh wraps the DataTable in a `.bk-DataTable` (Bokeh 3.x)
+        // — but the SlickGrid viewport class is stable.
+        const grid = header.closest('.slick-pane') ||
+                     header.closest('.slick-container') ||
+                     header.closest('.bk-DataTable') ||
+                     header.parentElement;
+        if (!grid) return;
+        const viewport = grid.querySelector('.slick-viewport') ||
+                         grid.parentElement.querySelector('.slick-viewport');
+        if (!viewport) return;
+        // SlickGrid commits the sort synchronously on click; the
+        // re-render runs immediately after. A small delay ensures
+        // we scroll the NEW layout, not the pre-sort one.
+        setTimeout(function() { viewport.scrollTop = 0; }, 80);
+    });
+}
+""")
+curdoc().js_on_event(DocumentReady, _cat_edit_sort_scroll_js)
+_cat_edit_source.js_on_change("data", _cat_edit_sort_scroll_js)
 
-def _apply_optimizer_result(ra_p: float, dec_p: float, pa_v3: float) -> None:
-    """Apply one of the optimizer's pointings AND open an N-shutter
-    slitlet at every observable target.
 
-    Mechanics:
-      1. Push current open_shutters to history so the user can Undo
-         the whole optimizer apply in one step.
-      2. Set RA/Dec/V3 PA via the widgets (their on_change handlers
-         update state and queue a refresh).
-      3. Use the in-flight `_opt_run["evaluator"]` to compute, for
-         this pointing, which sources are observable and where their
-         shutter centres are. Open a slitlet at each — its height
-         (1/2/3/5) follows the current Setting-tab dropdown.
-      4. Status bar reports how many slitlets opened.
+def _apply_optimizer_result(
+    ra_p: float, dec_p: float, pa_v3: float,
+    *, clear_existing: bool = True,
+) -> None:
+    """Apply one of the optimizer's pointings.
 
-    Per-source IDs come from `_opt_run["source_ids"]`, the parallel
-    array of catalog IDs stashed in `on_optimize`.
+    1. Push current open_shutters to history so the Undo button
+       reverts the whole apply in one step.
+    2. If `clear_existing` is True, drop every previously open shutter
+       before placing the optimizer's slitlets. (This is the default —
+       the user is warned via a confirm dialog before the Apply
+       button fires.)
+    3. Set RA / Dec / V3 PA via the widgets.
+    4. Use the in-flight `_opt_run["evaluator"]` to find, for this
+       pointing, which sources are observable and where their shutter
+       centres are; open an N-shutter slitlet (N from Setting tab)
+       at each, auto-tagged with the catalog source ID.
+
+    The optimizer's `axy_to_shutter` returns 0-based fractional
+    indices (`s_frac ∈ [0,170]`, `d_frac ∈ [0,364]`); vMPT's
+    `_add_slitlet` takes 1-based `s, d`. We convert here so the
+    opened slitlets centre exactly on the target.
     """
-    _push_history()  # snapshot so the next Undo reverts the whole apply
+    _push_history()  # snapshot for Undo
+
+    if clear_existing:
+        state["open_shutters"] = {}
 
     ra_input.value = f"{ra_p:.6f}"
     dec_input.value = f"{dec_p:.6f}"
@@ -4625,8 +4770,11 @@ def _apply_optimizer_result(ra_p: float, dec_p: float, pa_v3: float) -> None:
                     continue
                 n_targets += 1
                 q = int(quad[i])
-                s = int(round(float(s_frac[i])))
-                d = int(round(float(d_frac[i])))
+                # Optimizer indices are 0-based; vMPT shutters use
+                # 1-based `s, d`. Without the +1 the slitlet opens
+                # one row up and one column left of the target.
+                s = int(round(float(s_frac[i]))) + 1
+                d = int(round(float(d_frac[i]))) + 1
                 if not (1 <= q <= 4 and 1 <= s <= 171 and 1 <= d <= 365):
                     continue
                 target_id = str(ids[i]) if i < len(ids) else None
@@ -4642,12 +4790,34 @@ def _apply_optimizer_result(ra_p: float, dec_p: float, pa_v3: float) -> None:
             traceback.print_exc()
 
     n_shutters = int(state.get("slitlet_height", 3))
+    cleared_note = " (cleared previous picks)" if clear_existing else ""
     _set_status(
         f"Applied: pointing → RA={ra_p:.5f}, Dec={dec_p:.5f}, "
         f"V3 PA={pa_v3:.2f}° · opened {n_opened}/{n_targets} "
-        f"{n_shutters}-shutter slitlets.",
+        f"{n_shutters}-shutter slitlets{cleared_note}.",
         "ok", clear_after=14,
     )
+
+
+def _on_opt_apply_trigger(attr, old, new):
+    """Fires when the Apply button's JS confirm dialog returns OK.
+    The trigger value is `"<ra>,<dec>,<pa>,<stamp>"`."""
+    if not new:
+        return
+    try:
+        ra_s, dec_s, pa_s, _stamp = new.split(",", 3)
+        ra_p = float(ra_s); dec_p = float(dec_s); pa_v3 = float(pa_s)
+    except (ValueError, TypeError):
+        opt_apply_trigger.value = ""
+        return
+    # Reset the trigger so the next click on the same row still fires.
+    # (Suppress the recursive on_change by checking `new` at the top.)
+    opt_apply_trigger.value = ""
+    _apply_optimizer_result(ra_p, dec_p, pa_v3, clear_existing=True)
+    _opt_hide_modal()
+
+
+opt_apply_trigger.on_change("value", _on_opt_apply_trigger)
 
 
 # ── Pop-up modal helpers ─────────────────────────────────────────────────
@@ -4685,10 +4855,22 @@ def _opt_update_progress(text: str, frac: float) -> None:
 def _opt_render_results_in_modal(
     results: dict, ra_ref: float, dec_ref: float, pa_ref: float,
     n_sources: int,
+    *, method: str = "Democracy",
 ) -> None:
     """Build the post-run results table: one Bokeh row per solution
     so the Apply button sits exactly next to its cells (no Bokeh
-    column-spacing drift between buttons and table rows)."""
+    column-spacing drift between buttons and table rows).
+
+    Per-row enrichments built upstream and read here:
+      • `total_count[i]` — count of observable sources at this pointing.
+      • `sum_weight[i]`  — Σ weight of observable sources (Meritocracy
+        headline).
+      • `tier_breakdown[i]` — per-priority-tier counts (Hierarchy
+        headline).
+      • `top_targets[i]`  — top-10 sources at this pointing sorted by
+        priority asc / weight desc. Rendered as a hover tooltip on
+        the row's Score cell.
+    """
     n = len(results["score"])
     if n == 0:
         opt_modal_progress_box.visible = False
@@ -4703,24 +4885,45 @@ def _opt_render_results_in_modal(
 
     n_show = min(10, n)
     cos_dec = np.cos(np.deg2rad(dec_ref))
+    breakdowns = results.get("tier_breakdown")
+    totals = results.get("total_count")
+    sum_weights = results.get("sum_weight")
+    top_targets = results.get("top_targets")
+    is_hierarchy = breakdowns is not None and len(breakdowns) >= n_show
+    is_meritocracy = method == "Meritocracy"
 
     # Summary line.
+    method_blurb = {
+        "Democracy":   "ranked by raw count.",
+        "Meritocracy": "ranked by Σ weight; <b>Σw</b> shown, total count in parens.",
+        "Hierarchy":   ("ranked lexicographically by priority tier; "
+                        "<b>P<sub>i</sub>:n</b> = sources placed at tier i."),
+    }.get(method, "")
     opt_modal_results_summary.text = (
         f"<div style='font-size:12px; margin-bottom:4px'>"
         f"<b>Top {n_show}</b> distinct solutions of {n} total · "
-        f"{n_sources} candidate sources. Numbers are offsets from the "
-        f"search centre.</div>"
+        f"{n_sources} candidate sources · "
+        f"<b>Method:</b> {method} — {method_blurb} "
+        f"Hover a Score cell to see the top-10 placed sources. "
+        f"Offsets are from the search centre.</div>"
     )
 
     # Header row (Bokeh row of Divs aligning with the data rows).
     HEADER_BG = "#eef2f8"
     ROW_H = 26
+    # `overflow: hidden + white-space: nowrap` keeps a too-wide label
+    # from wrapping below the row (e.g. "Σw 2009.0 (46)" was wrapping
+    # into a second line and rendering outside the modal). Long
+    # strings get a hover ellipsis-truncate instead.
     CELL_STYLES = {
         "padding": "0 6px",
         "line-height": f"{ROW_H}px",
         "border-bottom": "1px solid #d8dee8",
         "box-sizing": "border-box",
         "height": f"{ROW_H}px",
+        "overflow": "hidden",
+        "white-space": "nowrap",
+        "text-overflow": "ellipsis",
     }
     def _cell(text, width, *, header=False, bold=False, mono=False):
         styles = dict(CELL_STYLES)
@@ -4737,7 +4940,19 @@ def _opt_render_results_in_modal(
             styles["text-align"] = "center"
         return Div(text=text, width=width, height=ROW_H, styles=styles)
 
-    COL_WIDTHS = (32, 60, 90, 90, 100, 168)  # last is wide enough for "Apply #N"
+    # Score column width is method-dependent — Democracy shows a
+    # single integer ("46"), Meritocracy a weight sum + count
+    # ("Σw 287.0 (46)"), Hierarchy a per-tier breakdown +
+    # count ("P0:4 · P1:12 · P2:30 (46)"). Narrow widths caused
+    # the label to wrap below the row.
+    if is_hierarchy:
+        score_w = 200
+    elif is_meritocracy:
+        score_w = 140
+    else:
+        score_w = 80
+    COL_WIDTHS = (32, score_w, 90, 90, 100, 168)
+    total_w = sum(COL_WIDTHS)
     header_row = row(
         _cell("#",     COL_WIDTHS[0], header=True),
         _cell("Score", COL_WIDTHS[1], header=True),
@@ -4745,7 +4960,7 @@ def _opt_render_results_in_modal(
         _cell("ΔDec",  COL_WIDTHS[3], header=True),
         _cell("ΔPA",   COL_WIDTHS[4], header=True),
         _cell("",      COL_WIDTHS[5], header=True),  # spacer over the Apply col
-        spacing=0, width=540,
+        spacing=0, width=total_w,
     )
     data_rows: list = []
     for i in range(n_show):
@@ -4757,30 +4972,98 @@ def _opt_render_results_in_modal(
         d_dec = (dec_i - dec_ref) * 3600.0
         d_pa = (pa_i - pa_ref + 180.0) % 360.0 - 180.0
 
+        # Per-row headline score. Method-dependent:
+        #   Democracy:   "<count>"
+        #   Meritocracy: "<Σw> (<count>)"
+        #   Hierarchy:   "P0:4 · P1:12 · …  (<count>)"
+        total_i = (int(totals[i]) if totals is not None and i < len(totals)
+                   else None)
+        if is_hierarchy:
+            breakdown_label = " · ".join(
+                f"P{int(t)}:{c}" for t, c in breakdowns[i]
+            )
+            if total_i is not None:
+                score_label = f"{breakdown_label}  ({total_i})"
+            else:
+                score_label = breakdown_label or f"{s:.1f}"
+        elif is_meritocracy:
+            sw = (float(sum_weights[i])
+                  if sum_weights is not None and i < len(sum_weights)
+                  else s)
+            score_label = (f"Σw {sw:.1f}  ({total_i})"
+                           if total_i is not None else f"Σw {sw:.1f}")
+        else:
+            score_label = (str(total_i) if total_i is not None
+                           else f"{s:.1f}")
+
+        # Hover tooltip — top-10 placed sources in priority order.
+        tooltip = ""
+        if top_targets is not None and i < len(top_targets):
+            tt = top_targets[i]
+            if tt:
+                tip_lines = [f"Top {len(tt)} placed sources at this pointing:"]
+                for r, t in enumerate(tt, 1):
+                    pid = "—" if t["p"] is None else f"{int(t['p'])}"
+                    wid = "—" if t["w"] is None else f"{int(t['w'])}"
+                    tip_lines.append(f"{r}. ID={t['id']}  P={pid}  W={wid}")
+                tooltip = "\n".join(tip_lines)
+        # `title=` renders as a native browser tooltip on hover.
+        # HTML-escape minimally so quotes don't break the attribute.
+        title_attr = (tooltip
+                      .replace("&", "&amp;")
+                      .replace('"', "&quot;")
+                      .replace("<", "&lt;"))
+        score_html = (
+            f'<span title="{title_attr}" '
+            f'style="cursor:help; border-bottom:1px dotted #888">'
+            f'{score_label}</span>'
+        )
+
         btn = Button(
             label=f"Apply #{i+1}",
             button_type="primary" if i == 0 else "default",
             width=COL_WIDTHS[5] - 12, height=ROW_H,
         )
-
-        def _make_apply(ra_, dec_, pa_):
-            def _cb():
-                _apply_optimizer_result(ra_, dec_, pa_)
-                _opt_hide_modal()
-            return _cb
-
-        btn.on_click(_make_apply(ra_i, dec_i, pa_i))
+        # Apply via JS confirm → trigger TextInput → Python handler.
+        # The browser's `window.confirm` blocks the JS event loop so
+        # the user has to OK before we tell Python to apply (which
+        # CLEARS all previously open shutters). Cancel = no-op.
+        #
+        # NOTE: CustomJS.args only accepts Bokeh Model instances, not
+        # plain floats. We embed the per-button scalars via Python
+        # f-string interpolation into the JS body, and pass only the
+        # trigger TextInput as a real model arg.
+        btn.js_on_click(CustomJS(
+            args=dict(trig=opt_apply_trigger),
+            code=f"""
+            const ra = {float(ra_i)};
+            const dec = {float(dec_i)};
+            const pa = {float(pa_i)};
+            const rank = {i + 1};
+            const msg = "Apply solution #" + rank +
+                        " ?\\n\\nThis will CLEAR all previously open " +
+                        "shutters and replace them with the optimizer's " +
+                        "slitlets.";
+            if (!window.confirm(msg)) {{
+                return;
+            }}
+            // Include a stamp so Bokeh sees a new value even for
+            // repeat applies (same row clicked twice in a session).
+            trig.value = ra.toFixed(8) + "," + dec.toFixed(8) + "," +
+                         pa.toFixed(6) + "," + Date.now() + "_" + Math.random();
+            """,
+        ))
 
         zebra = "#f7f9fc" if i % 2 else "#ffffff"
         row_styles_bg = lambda c=zebra: {"background": c}
         data_rows.append(row(
             _cell(str(i + 1), COL_WIDTHS[0]),
-            _cell(f"{s:.1f}", COL_WIDTHS[1], bold=True),
+            _cell(score_html, COL_WIDTHS[1], bold=True),
             _cell(f"{d_ra:+.2f}″", COL_WIDTHS[2], mono=True),
             _cell(f"{d_dec:+.2f}″", COL_WIDTHS[3], mono=True),
             _cell(f"{d_pa:+.3f}°", COL_WIDTHS[4], mono=True),
             btn,
-            spacing=0, width=540, styles=row_styles_bg(),
+            spacing=0, width=total_w, styles=row_styles_bg(),
         ))
 
     opt_modal_progress_box.visible = False
@@ -4913,16 +5196,30 @@ def _opt_hierarchy_step() -> None:
         _opt_run["de_total"] = n_top
         _opt_run["de_scores"] = []
         _opt_run["de_params"] = []
-        # For DE refinement: bias weights toward the highest tier so
-        # the local search doesn't drift onto a lower-priority hill.
+        # DE refinement weights must PRESERVE the multi-tier lex
+        # ordering established by the filter — otherwise DE, given
+        # only tier-0 weights, would happily slide to a pointing
+        # with same tier-0 count but fewer tier-1 / tier-2 placements.
+        # Use the auto-weight formula (smallest int weights s.t. each
+        # tier strictly outweighs the sum of all lower tiers); their
+        # sum is then a lex-equivalent scalar that DE can maximise
+        # without violating the priority ordering.
         if tiers:
-            top_tier = tiers[0]
-            tier_weights = np.where(pri == top_tier, 1.0, 0.0)
-            # If the top tier has zero sources at this pointing, fall
-            # back to uniform weights (Democracy-style local search).
-            if tier_weights.sum() == 0:
-                tier_weights = np.ones_like(pri)
-            _opt_run["weights"] = tier_weights
+            pri_strs = [
+                str(int(p)) if np.isfinite(p) else "" for p in pri
+            ]
+            w_strs = _compute_weights_from_priorities(pri_strs)
+            if w_strs is None:
+                lex_weights = np.ones_like(pri, dtype=float)
+            else:
+                lex_weights = np.array(
+                    [float(s) if s else 0.0 for s in w_strs],
+                    dtype=float,
+                )
+            _opt_run["weights"] = lex_weights
+            # Store the tiers so post-DE we can compute per-tier
+            # breakdowns for the results display.
+            _opt_run["lex_tiers"] = tiers
         curdoc().add_next_tick_callback(_opt_drive)
         return
 
@@ -4996,16 +5293,103 @@ def _opt_de_step() -> None:
                 keep.append(i)
         refined = {k: refined[k][keep] for k in ("score", "ra", "dec", "pa")}
 
+        # For Hierarchy mode, compute a per-tier source-count
+        # breakdown for each surviving candidate (e.g. P0:4·P1:12·P2:30).
+        # This is what the user actually wants to see — the headline
+        # score from the lex-weighted DE objective is hard to
+        # interpret on its own.
+        # For every refined candidate: compute (a) the total count of
+        # observable sources, (b) the top-10 sources at this pointing
+        # sorted by priority ascending then weight descending. Both
+        # feed the results-modal display — the count appears inline,
+        # the top-10 list as a hover tooltip.
+        ev = _opt_run["evaluator"]
+        pri_arr = _opt_run["priorities"]
+        wt_arr = _opt_run.get(
+            "weight_arr",
+            np.full(len(pri_arr), np.nan, dtype=float),
+        )
+        ids_arr = _opt_run.get("source_ids", [])
+        totals: list[int] = []
+        sum_weights: list[float] = []
+        top_targets: list[list[dict]] = []
+        for k in range(len(refined["score"])):
+            det, _, _ = ev.evaluate(
+                float(refined["ra"][k]),
+                float(refined["dec"][k]),
+                float(refined["pa"][k]),
+            )
+            totals.append(int(det.sum()))
+            # Weight sum across detected sources (Meritocracy headline).
+            w_finite = np.where(np.isfinite(wt_arr), wt_arr, 0.0)
+            sum_weights.append(float(np.sum(det * w_finite)))
+            # Top-10 detected sources, sorted by priority asc (NaN last)
+            # then weight desc. The list goes into a `title=` tooltip.
+            idxs = np.where(det)[0]
+            if idxs.size:
+                pri_key = np.where(np.isfinite(pri_arr[idxs]),
+                                    pri_arr[idxs], np.inf)
+                wt_key = np.where(np.isfinite(wt_arr[idxs]),
+                                   wt_arr[idxs], 0.0)
+                # Lexicographic sort: priority asc, weight desc.
+                order = np.lexsort((-wt_key, pri_key))
+                top_idx = idxs[order[:10]]
+                top_targets.append([
+                    {
+                        "id": (str(ids_arr[i]) if i < len(ids_arr)
+                               else f"<row {i}>"),
+                        "p": (float(pri_arr[i])
+                              if np.isfinite(pri_arr[i]) else None),
+                        "w": (float(wt_arr[i])
+                              if np.isfinite(wt_arr[i]) else None),
+                    }
+                    for i in top_idx
+                ])
+            else:
+                top_targets.append([])
+        refined["total_count"] = totals
+        refined["sum_weight"] = sum_weights
+        refined["top_targets"] = top_targets
+
+        # Hierarchy mode also wants the per-tier breakdown.
+        breakdowns: list[list[tuple[float, int]]] | None = None
+        if _opt_run.get("method") == "Hierarchy" and _opt_run.get("lex_tiers"):
+            tiers_list = _opt_run["lex_tiers"]
+            breakdowns = []
+            for k in range(len(refined["score"])):
+                det, _, _ = ev.evaluate(
+                    float(refined["ra"][k]),
+                    float(refined["dec"][k]),
+                    float(refined["pa"][k]),
+                )
+                per_tier: list[tuple[float, int]] = []
+                for t in tiers_list:
+                    cnt = int(np.sum(det & (pri_arr == t)))
+                    per_tier.append((float(t), cnt))
+                breakdowns.append(per_tier)
+            refined["tier_breakdown"] = breakdowns
+
         _opt_render_results_in_modal(
             refined,
             _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
             _opt_run["n_sources"],
+            method=_opt_run.get("method", "Democracy"),
         )
-        _set_status(
-            f"Optimization complete: best score "
-            f"{refined['score'][0]:.1f} of {_opt_run['n_sources']} sources.",
-            "ok", clear_after=10,
-        )
+        if breakdowns and breakdowns[0]:
+            best_summary = " · ".join(
+                f"P{int(t)}={c}" for t, c in breakdowns[0]
+            )
+            _set_status(
+                f"Optimization complete (Hierarchy): "
+                f"{best_summary} of {_opt_run['n_sources']} sources.",
+                "ok", clear_after=12,
+            )
+        else:
+            _set_status(
+                f"Optimization complete: best score "
+                f"{refined['score'][0]:.1f} of {_opt_run['n_sources']} sources.",
+                "ok", clear_after=10,
+            )
         _opt_run["phase"] = "done"
         return
 

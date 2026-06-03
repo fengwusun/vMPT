@@ -4,6 +4,85 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.1.1] — 2026-06-03
+
+Patch release. Polish + several real bugs in the v1.1.0 optimizer
+and catalog editor. The big change is that **Hierarchy mode actually
+optimises lower tiers now**, plus a much richer results table.
+
+### Optimizer
+
+- **Slitlet centre is now right under the target.** The optimizer's
+  `axy_to_shutter` returns 0-based fractional indices, but
+  `_add_slitlet` expects 1-based — the missing `+1` was opening every
+  slitlet one row up and one column to the left of the target. Now
+  centred correctly.
+- **Confirm dialog before Apply.** Clicking **Apply #N** opens a
+  browser confirm: "This will CLEAR all previously open shutters and
+  replace them with the optimizer's slitlets." OK → clears + applies
+  (single Undo step); Cancel → no-op. Wired via `Button.js_on_click`
+  → hidden trigger `TextInput` → Python handler. The trigger pattern
+  is needed because `CustomJS.args` only accepts Bokeh Model
+  instances, not floats — that's why the Apply button silently did
+  nothing in v1.1.0; embed per-button scalars via Python f-string
+  interpolation into the JS body.
+- **Hierarchy mode now genuinely optimises every priority tier.**
+  Previously DE refinement used `weights = 1 at top tier, 0
+  elsewhere`, so DE happily slid to any pointing that kept the
+  top-tier count even if it lost lower-tier sources in the process.
+  DE now uses **auto-derived lex weights** (smallest int weights
+  such that any higher tier strictly outweighs the sum of all lower
+  tiers); their sum is a lex-equivalent scalar that DE maximises
+  without violating priority ordering. The grid + multi-stage filter
+  phase is unchanged.
+- **Results table shows tier breakdown.** For Hierarchy, the Score
+  column reads e.g. `P0:4 · P1:12 · P2:30 (46)` — per-tier source
+  count + total in parens. For Meritocracy, `Σw 287.0 (46)`. For
+  Democracy, just the count `46`.
+- **Hover any Score cell** to see the top 10 placed sources at that
+  pointing, sorted by priority ascending then weight descending —
+  IDs + P + W per line.
+- **Modal widened** to 740 px to fit the new columns; Score column
+  width is method-specific; cells now `overflow: hidden +
+  white-space: nowrap + text-overflow: ellipsis` so a label that
+  overruns its column truncates instead of wrapping under the row.
+
+### Catalog editor
+
+- **Numeric sort on Priority + Weight.** Both columns are now stored
+  as floats with NaN for missing (was strings → `"10"` < `"2"`
+  lexicographically). An HTMLTemplateFormatter renders the cell as
+  a rounded integer or blank; cell edits via StringEditor are
+  coerced back to float in `_on_cat_edit_data_change` so the column
+  stays a sortable numeric.
+- **After a header click, the table scrolls to row 1.** Document-
+  level click delegate on `.slick-header-column` resets the table's
+  `.slick-viewport.scrollTop` to 0 (with an 80 ms delay so the
+  re-render finishes first).
+- **CSV save** uses `_fmt_int_or_blank` for Priority + Weight so
+  the output is `5` not `5.0` and blanks stay blank.
+- **`Compute w from p` / `Compute p from w`** write floats to the
+  source (was strings) so the new column stays numerically sortable.
+
+### Misc
+
+- The `compute_weights_from_priorities` helper now correctly
+  satisfies BOTH `w(p) > w(p+1)` AND `N(p)·w(p) > N(p+1)·w(p+1)`
+  using `max(w_prev + 1, n_prev * w_prev // n_q + 1)` as the
+  smallest integer that dominates the prior class (regression-tested
+  in `tests/test_catalog_ops.py`).
+- Loader: empty cells in numeric columns now properly become NaN
+  even when the source column was masked-int (previously came
+  through as 0).
+- A couple of additional patterns added to `.gitignore` so stray
+  personal files in the repo root can't accidentally be staged.
+
+### Tests
+
+- 124 passing, 1 skipped (same as v1.1.0; no test regressions).
+
+[1.1.1]: https://github.com/fengwusun/vMPT/releases/tag/v1.1.1
+
 ## [1.1.0] — 2026-06-02
 
 Headline feature: a complete **MSA pointing optimizer** with three
