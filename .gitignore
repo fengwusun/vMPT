@@ -16,6 +16,10 @@ build/
 dist/
 *.egg-info/
 .eggs/
+
+# Sphinx output.
+docs/_build/
+docs/_autosummary/
 # Example data is now committed (after JPG recompression in May 2026)
 # so cloners can try vMPT immediately. If you don't want the large
 # example files in your local copy, run:
