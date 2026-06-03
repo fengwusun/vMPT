@@ -6,21 +6,13 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.2.2] — 2026-06-03
 
-Packaging release: vMPT is now **pip-installable** as `jwst-vmpt`
-on TestPyPI / PyPI.
+Packaging release: vMPT is now **pip-installable** from PyPI as
+[`jwst-vmpt`](https://pypi.org/project/jwst-vmpt/).
 
 ### `pip install`
 
 ```bash
-# Real PyPI (once promoted):
 pip install jwst-vmpt
-
-# TestPyPI today — install deps from real PyPI first so the resolver
-# doesn't pick up TestPyPI typosquats with bogus version numbers,
-# then pull jwst-vmpt itself from TestPyPI with --no-deps.
-pip install astropy bokeh jwst jwst_gtvt numpy pandas Pillow pysiaf scipy
-pip install --index-url https://test.pypi.org/simple/ --no-deps jwst-vmpt
-
 vmpt                               # opens at http://localhost:5006/app
 ```
 
