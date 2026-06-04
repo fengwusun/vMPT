@@ -116,13 +116,60 @@ When you click **Apply** the popover's values get written into the
 editor's working copy and a single undo entry is pushed. The Edit…
 button colour flips to blue for that row.
 
-**Persistence**: per-target constraints survive `Save as CSV`
-(extra columns `lam_req`, `no_gap`, `extend_blue`, `extend_red`,
-`protect` are emitted when at least one row has a constraint set —
-otherwise the CSV stays unchanged for backward compatibility). To
-preserve constraints across `Save session` / `Load session`,
-**Save as CSV first** so the workspace JSON's catalog-path
-reference points at a CSV that includes the constraints.
+### Persisting constraints across sessions
+
+Constraints round-trip through the **catalog CSV** itself, so the
+recipe for "edit constraints today, reload them tomorrow" is just
+two clicks:
+
+1. Click **Constraints…** on the rows you care about, edit, Apply.
+2. Click **Save as CSV** in the editor — choose a path (the
+   suggested default is `<original>_edited.csv`).
+3. On reload, point the **Catalog path** at that CSV. Constraints
+   come back exactly as written.
+
+The CSV writer emits five extra columns when any row has a
+constraint set:
+
+| Column | Type | Empty means |
+|---|---|---|
+| `lam_req` | string `"lo-hi; lo-hi"` (μm) | no required λ ranges |
+| `no_gap` | `1` / blank | False |
+| `extend_blue` | `1` / blank | False |
+| `extend_red` | `1` / blank | False |
+| `protect` | `1` / blank | False |
+
+When **no** row in the catalog has a constraint set, the writer
+**omits** these columns — the CSV stays in the v1.2.x format so
+old workflows that read the catalog elsewhere don't break.
+
+You can also build / save catalogs programmatically:
+
+```python
+from vmpt.catalog import Catalog, load_catalog, save_catalog
+import numpy as np
+
+cat = load_catalog("my_targets.csv")
+# Mark the first three rows as collision-protected:
+cat.protect[:3] = True
+# Require Hα at z = 6.0 (656.3 nm × 7.0 = 4.59 μm) for source 0:
+cat.required_lam[0] = [(4.55, 4.65)]
+save_catalog(cat, "my_targets_with_constraints.csv")
+```
+
+`save_catalog(cat, path, include_constraints="auto" | "always" |
+"never")` controls whether the constraint columns appear:
+
+- `"auto"` (default): emit iff at least one row has a non-default
+  value.
+- `"always"`: emit unconditionally — useful for shipping a
+  "template" CSV the user can hand-edit.
+- `"never"`: skip them entirely.
+
+The vMPT `Save session` workflow stores **catalog paths**, not
+contents, so make sure your constraint-bearing CSV is at a stable
+path before saving the session — the session JSON will point at
+that file on reload.
 
 ## The optimizer's view
 

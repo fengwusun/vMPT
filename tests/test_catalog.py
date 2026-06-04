@@ -8,7 +8,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from vmpt.catalog import Catalog, catalog_in_view, load_catalog
+from vmpt.catalog import Catalog, catalog_in_view, load_catalog, save_catalog
 
 
 def test_load_csv(tmp_path):
@@ -204,3 +204,136 @@ def test_view_bbox_ra_wrap():
     # RA window 359 → 1 (wraps)
     mask = catalog_in_view(cat, 359.0, 1.0, -1.0, 1.0)
     assert mask.tolist() == [True, True, False]
+
+
+# ---------------------------------------------------------------------
+# Per-target spectral constraints — CSV round-trip (v1.3.0+)
+# ---------------------------------------------------------------------
+
+
+def test_load_csv_with_constraints(tmp_path):
+    """A user-edited CSV that includes the five constraint columns
+    round-trips faithfully through `load_catalog`."""
+    p = tmp_path / "cat_with_constraints.csv"
+    p.write_text(
+        "ID,RA,DEC,priority,weight,mag,z,label,"
+        "lam_req,no_gap,extend_blue,extend_red,protect\n"
+        "1,53.16,-27.78,1,10,20.0,0.5,src_A,"
+        "1.0-1.3; 1.5-1.8,1,1,,1\n"
+        "2,53.17,-27.79,2,5,21.0,0.6,src_B,,,,,\n"
+        "3,53.18,-27.80,3,1,22.0,0.7,src_C,2.0-2.5,1,,,\n"
+    )
+    cat = load_catalog(str(p))
+    assert len(cat.ra_deg) == 3
+    # Row 0 has every constraint set.
+    assert cat.required_lam[0] == [(1.0, 1.3), (1.5, 1.8)]
+    assert bool(cat.no_gap[0]) is True
+    assert bool(cat.extend_blue[0]) is True
+    assert bool(cat.extend_red[0]) is False
+    assert bool(cat.protect[0]) is True
+    # Row 1 has nothing set.
+    assert cat.required_lam[1] == []
+    assert bool(cat.no_gap[1]) is False
+    assert bool(cat.extend_blue[1]) is False
+    assert bool(cat.protect[1]) is False
+    # Row 2 has a single λ range + no_gap.
+    assert cat.required_lam[2] == [(2.0, 2.5)]
+    assert bool(cat.no_gap[2]) is True
+
+
+def test_save_catalog_omits_constraints_when_unset(tmp_path):
+    """`include_constraints="auto"` (the default) skips the
+    constraint columns entirely when no row has any constraint
+    set — keeps the v1.2.x CSV format intact for users who
+    never touched the Constraints… popover."""
+    cat = Catalog(
+        ids=np.array([1, 2]),
+        ra_deg=np.array([10.0, 11.0]),
+        dec_deg=np.array([20.0, 21.0]),
+        priority=np.array([1.0, 2.0]),
+        weight=np.array([10.0, 5.0]),
+        mag=np.array([20.0, 21.0]),
+        z=np.array([0.5, 0.6]),
+        label=np.array(["a", "b"], dtype=object),
+        source_path="",
+    )
+    out = tmp_path / "no_constraints.csv"
+    save_catalog(cat, str(out))
+    header_line = out.read_text().splitlines()[0]
+    for col in ("lam_req", "no_gap", "extend_blue", "extend_red",
+                "protect"):
+        assert col not in header_line, (
+            f"Default save included {col!r} but no row has it set"
+        )
+
+
+def test_save_catalog_with_constraints_round_trip(tmp_path):
+    """Set per-target constraints on a Catalog, save it via
+    `save_catalog`, reload it via `load_catalog`, and verify every
+    field comes back as written."""
+    n = 4
+    rl = np.empty(n, dtype=object)
+    rl[0] = [(1.0, 1.3), (1.5, 1.8)]
+    rl[1] = []
+    rl[2] = [(2.0, 2.5)]
+    rl[3] = []
+    cat = Catalog(
+        ids=np.array([1, 2, 3, 4]),
+        ra_deg=np.array([10.0, 11.0, 12.0, 13.0]),
+        dec_deg=np.array([20.0, 21.0, 22.0, 23.0]),
+        priority=np.array([1.0, 2.0, 3.0, 4.0]),
+        weight=np.array([10.0, 5.0, 1.0, 1.0]),
+        mag=np.array([20.0, 21.0, 22.0, 23.0]),
+        z=np.array([0.5, 0.6, 0.7, 0.8]),
+        label=np.array(["a", "b", "c", "d"], dtype=object),
+        required_lam=rl,
+        no_gap=np.array([True, False, True, False]),
+        extend_blue=np.array([True, False, False, False]),
+        extend_red=np.array([False, False, False, True]),
+        protect=np.array([True, False, False, True]),
+        source_path="",
+    )
+    out = tmp_path / "with_constraints.csv"
+    save_catalog(cat, str(out))
+
+    # Constraint columns SHOULD now appear in the header.
+    header_line = out.read_text().splitlines()[0]
+    for col in ("lam_req", "no_gap", "extend_blue", "extend_red",
+                "protect"):
+        assert col in header_line, f"Missing {col!r} in {header_line!r}"
+
+    # Reload and check every constraint round-trips.
+    rt = load_catalog(str(out))
+    assert len(rt.ra_deg) == n
+    for i in range(n):
+        assert rt.required_lam[i] == rl[i], (
+            f"row {i}: required_lam round-trip failed: "
+            f"{rt.required_lam[i]} != {rl[i]}"
+        )
+        assert bool(rt.no_gap[i]) == bool(cat.no_gap[i])
+        assert bool(rt.extend_blue[i]) == bool(cat.extend_blue[i])
+        assert bool(rt.extend_red[i]) == bool(cat.extend_red[i])
+        assert bool(rt.protect[i]) == bool(cat.protect[i])
+
+
+def test_save_catalog_always_emits_when_requested(tmp_path):
+    """`include_constraints="always"` forces emission even for a
+    catalog with no constraints set — useful when shipping a
+    "template" CSV."""
+    cat = Catalog(
+        ids=np.array([1]),
+        ra_deg=np.array([10.0]),
+        dec_deg=np.array([20.0]),
+        priority=np.array([1.0]),
+        weight=np.array([10.0]),
+        mag=np.array([20.0]),
+        z=np.array([0.5]),
+        label=np.array(["a"], dtype=object),
+        source_path="",
+    )
+    out = tmp_path / "tmpl.csv"
+    save_catalog(cat, str(out), include_constraints="always")
+    header_line = out.read_text().splitlines()[0]
+    for col in ("lam_req", "no_gap", "extend_blue", "extend_red",
+                "protect"):
+        assert col in header_line

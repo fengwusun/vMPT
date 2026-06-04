@@ -499,6 +499,153 @@ def load_catalog(path: str) -> Catalog:
     )
 
 
+def save_catalog(cat: Catalog, path: str, *,
+                 include_constraints: str = "auto") -> None:
+    """Write a :class:`Catalog` back to CSV.
+
+    Emits the standard eight columns (``ID, RA, DEC, priority,
+    weight, mag, z, label``) followed optionally by the five v1.3.0
+    per-target constraint columns (``lam_req, no_gap, extend_blue,
+    extend_red, protect``), then any ``extras`` columns the catalog
+    is carrying. The output is round-trip-compatible with
+    :func:`load_catalog` — write, reload, and the resulting
+    :class:`Catalog` matches the input modulo dtype.
+
+    Parameters
+    ----------
+    cat : Catalog
+        The catalog to save.
+    path : str
+        Destination CSV path. Parent directories are NOT created
+        automatically — callers should ensure the parent exists.
+    include_constraints : {"auto", "always", "never"}
+        Controls whether the five constraint columns appear in the
+        output:
+
+        - ``"auto"`` (default): emit the columns iff at least one
+          row has a non-default value (the same rule the catalog
+          editor's Save-as-CSV button uses, so v1.2.x catalogs that
+          never picked up constraints get the same CSV format they
+          had before).
+        - ``"always"``: always emit the columns, even when every
+          row is at defaults. Useful when you want a "template"
+          CSV the user can hand-edit.
+        - ``"never"``: omit them. Use when you specifically want
+          to drop the constraint metadata.
+
+    Notes
+    -----
+    Wavelength-range cells round-trip via the same string format
+    the catalog editor uses (``"1.0-1.3; 1.5-1.8"``), parsed back
+    by :func:`_parse_lam_req_str` on the next load.
+
+    NaN / missing values render as empty cells in the CSV; on
+    reload they come back as NaN (for float columns) or empty
+    string (for label / extras).
+    """
+    import csv
+
+    if include_constraints not in ("auto", "always", "never"):
+        raise ValueError(
+            f"include_constraints must be one of "
+            f"'auto', 'always', 'never'; got {include_constraints!r}"
+        )
+
+    n = len(cat.ra_deg)
+
+    def _fmt_int_or_blank(v) -> str:
+        try:
+            f = float(v)
+            if not np.isfinite(f):
+                return ""
+            return str(int(round(f)))
+        except (TypeError, ValueError):
+            return "" if v is None else str(v)
+
+    def _fmt_float_or_blank(v) -> str:
+        try:
+            f = float(v)
+            if not np.isfinite(f):
+                return ""
+            # Drop trailing zeros / trailing decimal so the CSV is
+            # tidy for hand-editing.
+            s = f"{f:.6f}".rstrip("0").rstrip(".")
+            return s or "0"
+        except (TypeError, ValueError):
+            return "" if v is None else str(v)
+
+    def _fmt_id(v) -> str:
+        # Catalog.ids can be int64 or object dtype (string IDs).
+        try:
+            return str(int(v))
+        except (TypeError, ValueError):
+            return "" if v is None else str(v)
+
+    # Decide constraint-column emission policy. `"auto"` mode emits
+    # only when at least one row has a non-default value.
+    required_lam = getattr(cat, "required_lam", None)
+    no_gap = np.asarray(getattr(cat, "no_gap", []), dtype=bool)
+    extend_blue = np.asarray(getattr(cat, "extend_blue", []), dtype=bool)
+    extend_red = np.asarray(getattr(cat, "extend_red", []), dtype=bool)
+    protect = np.asarray(getattr(cat, "protect", []), dtype=bool)
+    has_lam = (required_lam is not None
+               and len(required_lam) == n
+               and any(bool(r) and len(r) > 0 for r in required_lam))
+    has_constraints = (
+        has_lam
+        or (no_gap.size == n and no_gap.any())
+        or (extend_blue.size == n and extend_blue.any())
+        or (extend_red.size == n and extend_red.any())
+        or (protect.size == n and protect.any())
+    )
+    emit_constraints = (
+        include_constraints == "always"
+        or (include_constraints == "auto" and has_constraints)
+    )
+
+    extras = getattr(cat, "extras", {}) or {}
+
+    constraint_cols = (["lam_req", "no_gap", "extend_blue",
+                        "extend_red", "protect"]
+                       if emit_constraints else [])
+    header = (["ID", "RA", "DEC", "priority", "weight", "mag", "z",
+               "label", *constraint_cols, *extras.keys()])
+
+    with open(path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for i in range(n):
+            row = [
+                _fmt_id(cat.ids[i]),
+                _fmt_float_or_blank(cat.ra_deg[i]),
+                _fmt_float_or_blank(cat.dec_deg[i]),
+                _fmt_int_or_blank(cat.priority[i])
+                    if i < len(cat.priority) else "",
+                _fmt_int_or_blank(cat.weight[i])
+                    if i < len(cat.weight) else "",
+                _fmt_float_or_blank(cat.mag[i])
+                    if i < len(cat.mag) else "",
+                _fmt_float_or_blank(cat.z[i])
+                    if i < len(cat.z) else "",
+                str(cat.label[i]) if i < len(cat.label) else "",
+            ]
+            if emit_constraints:
+                rl = (required_lam[i] if required_lam is not None
+                      and i < len(required_lam) else [])
+                row.append(_format_lam_req(rl) if rl else "")
+                row.append("1" if (no_gap.size > i
+                                   and bool(no_gap[i])) else "")
+                row.append("1" if (extend_blue.size > i
+                                   and bool(extend_blue[i])) else "")
+                row.append("1" if (extend_red.size > i
+                                   and bool(extend_red[i])) else "")
+                row.append("1" if (protect.size > i
+                                   and bool(protect[i])) else "")
+            for k, vals in extras.items():
+                row.append(str(vals[i]) if i < len(vals) else "")
+            w.writerow(row)
+
+
 def catalog_in_view(cat: Catalog, ra_min, ra_max, dec_min, dec_max) -> np.ndarray:
     ra = cat.ra_deg
     dec = cat.dec_deg
