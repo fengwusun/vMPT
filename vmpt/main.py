@@ -45,6 +45,7 @@ from bokeh.models import (
     RadioGroup,
     Select,
     Slider,
+    Spinner,
     StringEditor,
     TableColumn,
     TabPanel,
@@ -1499,19 +1500,31 @@ overlay_stroke_slider = Slider(
 # extra canvas area shows empty space (the user can pan into it).
 # We deliberately do NOT couple X/Y to the image's W:H — letting
 # them roam free is the point of having two sliders. Default 800x800.
-canvas_x_slider = Slider(
-    start=400, end=1600, step=50, value=800,
-    title="Canvas width (X, px)",
-    width=SIDEBAR_W - 40,
+# Compact `W: [n] x H: [n]` pair — Spinner instead of Slider. The
+# Spinner has up/down arrows, accepts free typing, and only commits
+# on blur / Enter / arrow click so it's naturally throttled (no
+# need for `value_throttled`).  Layout-wise the two spinners go
+# in a `row()` next to a short label so the Settings tab stays
+# compact.
+_CANVAS_SIZE_MIN, _CANVAS_SIZE_MAX, _CANVAS_SIZE_STEP = 400, 1600, 50
+canvas_x_spinner = Spinner(
+    low=_CANVAS_SIZE_MIN, high=_CANVAS_SIZE_MAX, step=_CANVAS_SIZE_STEP,
+    value=800, width=88, title="Width (X)",
 )
-canvas_y_slider = Slider(
-    start=400, end=1600, step=50, value=800,
-    title="Canvas height (Y, px)",
-    width=SIDEBAR_W - 40,
+canvas_y_spinner = Spinner(
+    low=_CANVAS_SIZE_MIN, high=_CANVAS_SIZE_MAX, step=_CANVAS_SIZE_STEP,
+    value=800, width=88, title="Height (Y)",
 )
 
 undo_btn = Button(label="Undo last", button_type="default")
 clear_btn = Button(label="Clear open", button_type="warning")
+# Reset-to-defaults button — handler wired further down in the
+# preferences-init section (forward-declared here so the Settings
+# tab layout can include it).
+reset_prefs_btn = Button(
+    label="Reset display to defaults",
+    button_type="default", width=SIDEBAR_W - 20,
+)
 
 export_dir_input = TextInput(title="Export dir", value=str(Path.cwd() / "exports"))
 export_btn = Button(label="Export eMPT bundle", button_type="success")
@@ -4800,11 +4813,11 @@ def _on_canvas_y(attr, old, new):
     )
 
 
-# Use `value_throttled` (fires on slider RELEASE) instead of `value`
-# (fires on every tick during drag) — saves a dozen+ unnecessary
-# redraws of an 8000x12000 image while the user is still dragging.
-canvas_x_slider.on_change("value_throttled", _on_canvas_x)
-canvas_y_slider.on_change("value_throttled", _on_canvas_y)
+# Spinner commits its `value` only on blur / Enter / arrow click —
+# that's naturally throttled, so no `value_throttled` distinction
+# is needed (Spinner doesn't expose one).
+canvas_x_spinner.on_change("value", _on_canvas_x)
+canvas_y_spinner.on_change("value", _on_canvas_y)
 
 
 # ---------------------------------------------------------------------------
@@ -7928,14 +7941,14 @@ pick_tab = TabPanel(title="Settings", child=column(
     overlay_layer_select,
     overlay_alpha_slider,
     overlay_stroke_slider,
-    Div(text="<b>Canvas</b>"),
-    canvas_x_slider,
-    canvas_y_slider,
+    Div(text="<b>Canvas</b> <small style='color:#5a6b85'>(pixels)</small>"),
+    row(canvas_x_spinner, canvas_y_spinner, spacing=10),
     Div(text="<b>Customise display</b>"),
     stats_bar_open_btn,
     catalog_hover_open_btn,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
+    reset_prefs_btn,
     width=SIDEBAR_W - 20,
 ))
 
@@ -8062,6 +8075,266 @@ curdoc().add_root(overwrite_modal_card)
 # viewport, under the sidebar.
 curdoc().add_root(status)
 curdoc().title = "vMPT — visual MSA Planning Tool"
+
+
+# ── User preferences (v1.3.4+) ──────────────────────────────────────────
+# Settings the user touches in the Settings tab persist across
+# sessions via ~/.vmpt/preferences.json. Loaded once at startup and
+# auto-saved on every widget change. See `vmpt/preferences.py` for
+# the IO layer.
+
+from .preferences import (
+    load_preferences as _load_prefs,
+    save_preferences as _save_prefs,
+    reset_preferences as _reset_prefs,
+)
+
+# When True, prefs-mutating callbacks return early — used while we
+# push saved prefs into widgets at startup (otherwise each setattr
+# would trigger a write of the partially-applied snapshot).
+_prefs_save_suppress = {"flag": False}
+
+
+def _collect_prefs() -> dict:
+    """Snapshot the current widget state into a JSON-serialisable dict."""
+    overlay_alphas: dict = {}
+    overlay_strokes: dict = {}
+    for name, cfg in _OVERLAY_LAYER_CONFIG.items():
+        glyph = cfg["glyph"].glyph
+        try:
+            overlay_alphas[name] = float(
+                getattr(glyph, cfg["alpha_attr"])
+            )
+        except (AttributeError, TypeError, ValueError):
+            pass
+        try:
+            overlay_strokes[name] = float(
+                getattr(glyph, cfg["stroke_attr"])
+            )
+        except (AttributeError, TypeError, ValueError):
+            pass
+    return {
+        "frame_x": int(canvas_x_spinner.value or 800),
+        "frame_y": int(canvas_y_spinner.value or 800),
+        "slitlet_size": int(slitlet_select.value or 3),
+        "snap_to_operable": 0 in (snap_box.active or []),
+        "layers_visible": list(layers_box.active or []),
+        "overlay_alphas": overlay_alphas,
+        "overlay_strokes": overlay_strokes,
+        "stats_bar_order": list(stats_bar_choice.value or []),
+        "catalog_hover_order": list(catalog_hover_choice.value or []),
+        "help_visible": bool(help_div.visible),
+    }
+
+
+def _apply_prefs(prefs: dict) -> None:
+    """Push a saved prefs dict back into the widgets. Guarded by
+    `_prefs_save_suppress` so the cascade of setattr's doesn't
+    trigger another save round-trip per widget change.
+    """
+    if not prefs:
+        return
+    _prefs_save_suppress["flag"] = True
+    try:
+        if "frame_x" in prefs:
+            try:
+                v = int(prefs["frame_x"])
+                canvas_x_spinner.value = v
+                state["frame_x"] = v
+            except (ValueError, TypeError):
+                pass
+        if "frame_y" in prefs:
+            try:
+                v = int(prefs["frame_y"])
+                canvas_y_spinner.value = v
+                state["frame_y"] = v
+            except (ValueError, TypeError):
+                pass
+        if "slitlet_size" in prefs:
+            try:
+                slitlet_select.value = str(int(prefs["slitlet_size"]))
+            except (ValueError, TypeError):
+                pass
+        if "snap_to_operable" in prefs:
+            snap_box.active = [0] if bool(prefs["snap_to_operable"]) else []
+        if "layers_visible" in prefs:
+            try:
+                layers_box.active = [int(i) for i in prefs["layers_visible"]]
+            except (ValueError, TypeError):
+                pass
+        # Per-layer overlay properties — set glyph attrs directly so
+        # `_on_overlay_layer` then re-syncs the sliders' visible
+        # values to whichever layer is currently selected.
+        for name, alpha in (prefs.get("overlay_alphas") or {}).items():
+            cfg = _OVERLAY_LAYER_CONFIG.get(name)
+            if cfg is None:
+                continue
+            try:
+                setattr(cfg["glyph"].glyph, cfg["alpha_attr"],
+                        float(alpha))
+            except (AttributeError, ValueError, TypeError):
+                pass
+        for name, stroke in (prefs.get("overlay_strokes") or {}).items():
+            cfg = _OVERLAY_LAYER_CONFIG.get(name)
+            if cfg is None:
+                continue
+            try:
+                setattr(cfg["glyph"].glyph, cfg["stroke_attr"],
+                        float(stroke))
+                extra = cfg.get("stroke_extra")
+                if extra is not None:
+                    extra(float(stroke))
+            except (AttributeError, ValueError, TypeError):
+                pass
+        # Resync the visible sliders to the currently-selected layer.
+        try:
+            _on_overlay_layer("value", None, overlay_layer_select.value)
+        except Exception:  # noqa: BLE001
+            pass
+        if "stats_bar_order" in prefs:
+            try:
+                stats_bar_choice.value = list(prefs["stats_bar_order"])
+                state["stats_bar_order"] = [
+                    _STATS_BAR_LABEL_TO_KEY[l]
+                    for l in stats_bar_choice.value
+                    if l in _STATS_BAR_LABEL_TO_KEY
+                ]
+            except (KeyError, TypeError):
+                pass
+        if "catalog_hover_order" in prefs:
+            try:
+                catalog_hover_choice.value = list(
+                    prefs["catalog_hover_order"]
+                )
+                state["catalog_hover_order"] = [
+                    _CATALOG_HOVER_LABEL_TO_KEY[l]
+                    for l in catalog_hover_choice.value
+                    if l in _CATALOG_HOVER_LABEL_TO_KEY
+                ]
+                try:
+                    _refresh_catalog_hover_tooltip()
+                except Exception:  # noqa: BLE001
+                    pass
+            except (KeyError, TypeError):
+                pass
+        if "help_visible" in prefs:
+            try:
+                v = bool(prefs["help_visible"])
+                help_div.visible = v
+                tip_div.visible = v
+                help_toggle_btn.label = "Hide help" if v else "Show help"
+                help_panel.width = HELPPANEL_W if v else 130
+            except Exception:  # noqa: BLE001
+                pass
+    finally:
+        _prefs_save_suppress["flag"] = False
+
+
+def _save_current_prefs_now() -> None:
+    """Snapshot + save the full widget state. Suppressed during
+    `_apply_prefs` so startup doesn't write back the same prefs
+    once per widget."""
+    if _prefs_save_suppress["flag"]:
+        return
+    try:
+        _save_prefs(_collect_prefs())
+    except Exception:  # noqa: BLE001
+        # Disk problems shouldn't break the app — just lose this save.
+        pass
+
+
+def _save_current_prefs(attr, old, new) -> None:
+    """Bokeh on_change wrapper — strict (attr, old, new) signature
+    (Bokeh validates parameter names exactly, no defaults allowed).
+    Args are discarded; we always re-snapshot the full state."""
+    _save_current_prefs_now()
+
+
+# Apply persisted prefs (if any) before wiring auto-save callbacks.
+# Doing it in this order means the apply itself doesn't generate
+# spurious save events (the suppress flag is on during apply, and
+# the change-callbacks haven't been registered yet anyway).
+_apply_prefs(_load_prefs())
+
+# Auto-save: every widget change writes the FULL snapshot back to
+# disk. Cheap (a few hundred bytes of JSON) and immune to partial
+# state — the file is always whatever the user currently sees.
+canvas_x_spinner.on_change("value", _save_current_prefs)
+canvas_y_spinner.on_change("value", _save_current_prefs)
+slitlet_select.on_change("value", _save_current_prefs)
+snap_box.on_change("active", _save_current_prefs)
+layers_box.on_change("active", _save_current_prefs)
+overlay_alpha_slider.on_change("value", _save_current_prefs)
+overlay_stroke_slider.on_change("value", _save_current_prefs)
+stats_bar_choice.on_change("value", _save_current_prefs)
+catalog_hover_choice.on_change("value", _save_current_prefs)
+# The help-panel toggle button already has `on_help_toggle` bound;
+# adding `_save_current_prefs` as a SECOND on_click means both fire
+# on every click — the first toggles the panel state, the second
+# saves the new state.
+help_toggle_btn.on_click(_save_current_prefs_now)
+
+
+def _on_reset_prefs():
+    """User clicked 'Reset to defaults'. Wipe the file, then push
+    hard-coded defaults into every widget the prefs system covers."""
+    _reset_prefs()
+    _prefs_save_suppress["flag"] = True
+    try:
+        canvas_x_spinner.value = 800
+        canvas_y_spinner.value = 800
+        state["frame_x"] = 800
+        state["frame_y"] = 800
+        slitlet_select.value = "3"
+        snap_box.active = [0]
+        layers_box.active = [0, 1, 2]
+        # Overlay defaults — reset every layer's alpha/stroke to the
+        # values they had at module import.
+        for name, cfg in _OVERLAY_LAYER_CONFIG.items():
+            try:
+                setattr(cfg["glyph"].glyph, cfg["alpha_attr"], 0.20)
+                setattr(cfg["glyph"].glyph, cfg["stroke_attr"], 1.0)
+                extra = cfg.get("stroke_extra")
+                if extra is not None:
+                    extra(1.0)
+            except (AttributeError, ValueError, TypeError):
+                pass
+        try:
+            _on_overlay_layer("value", None, overlay_layer_select.value)
+        except Exception:  # noqa: BLE001
+            pass
+        # Customise pickers — full default order.
+        stats_bar_choice.value = [
+            STATS_BAR_CELL_LABELS[k] for k in STATS_BAR_DEFAULT_ORDER
+        ]
+        state["stats_bar_order"] = list(STATS_BAR_DEFAULT_ORDER)
+        catalog_hover_choice.value = [
+            CATALOG_HOVER_FIELDS[k][0] for k in CATALOG_HOVER_DEFAULT_ORDER
+        ]
+        state["catalog_hover_order"] = list(CATALOG_HOVER_DEFAULT_ORDER)
+        try:
+            _refresh_catalog_hover_tooltip()
+        except Exception:  # noqa: BLE001
+            pass
+        # Help panel back on (matches the v1.3.3 default-on change).
+        help_div.visible = True
+        tip_div.visible = True
+        help_toggle_btn.label = "Hide help"
+        help_panel.width = HELPPANEL_W
+    finally:
+        _prefs_save_suppress["flag"] = False
+    # Apply the new sizes to the canvas if an image is loaded.
+    if state.get("image") is not None:
+        refresh_image_glyph()
+    refresh_overlays()
+    _set_status("Display settings reset to defaults.", "ok",
+                clear_after=10)
+
+
+# `reset_prefs_btn` was forward-declared near the other action
+# buttons so the Settings tab layout can include it. Wire the
+# handler now that `_on_reset_prefs` exists.
+reset_prefs_btn.on_click(_on_reset_prefs)
 
 
 # ── CLI auto-load ─────────────────────────────────────────────────────
