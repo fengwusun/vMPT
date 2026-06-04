@@ -2720,52 +2720,59 @@ def refresh_image_glyph() -> None:
     arr = _image_array_for_bokeh(img)
     H, W = arr.shape
     src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
-    # Let DataRange1d auto-bound to the new image glyph's extent and
-    # let `match_aspect=True` on the figure do its job of enforcing
-    # 1:1 pixel aspect (one data unit in x renders at the same screen
-    # size as one data unit in y).
-    #
-    # Pinning explicit start/end on BOTH axes (the pre-v1.3.2 pattern)
-    # silently disabled match_aspect whenever the canvas aspect
-    # (`frame_width:frame_height`) didn't match the image's W:H —
-    # Bokeh can only satisfy fixed-on-both-axes data ranges OR
-    # match_aspect, not both. After the X/Y canvas split (v1.3.2),
-    # the canvas is almost never the image's W:H, so match_aspect
-    # would silently fail and the image would render stretched to
-    # fill the frame (visibly squashed for rectangular images).
-    #
-    # Setting `start=None, end=None` resets the DataRange1d to its
-    # auto-bound mode; combined with `range_padding=0` we get the
-    # union extent of all renderers (image + MSA outline + catalog
-    # targets, all in the image's pixel-coord frame). match_aspect
-    # then expands whichever range is short so pixels stay square.
-    fig.x_range.update(start=None, end=None, range_padding=0)
-    fig.y_range.update(start=None, end=None, range_padding=0)
-    # Lock the canvas frame pixel dimensions to the image's W:H so 1
-    # image pixel = (FRAME_SCALE × W / max(W, H)) screen pixels,
-    # consistently in X and Y. Window resizes leave these alone —
-    # the canvas is a fixed-pixel block; the layout column letterboxes
-    # around it. Trade-off: the canvas doesn't grow on big monitors,
-    # but image pixels are guaranteed square.
+    # Lock the canvas frame pixel dimensions to the user-set values
+    # so 1 data unit renders the same in x and y. Default 800x800;
+    # the legacy "frame_max" key (pre-split) still drives both axes
+    # if present, for session-reload backwards compatibility.
     if W > 0 and H > 0:
         # User-adjustable canvas dimensions (state-backed so values
-        # survive image reloads). Each axis is set directly here;
-        # `match_aspect=True` on the figure then enforces
-        # **per-pixel square** — every data-unit-in-x renders at
-        # the same screen-pixel-size as every data-unit-in-y — by
-        # expanding whichever data range is short for the chosen
-        # frame ratio. That keeps the image's pixels visually
-        # square AND the MSA shutter geometry correct at any (X, Y).
-        # We deliberately do NOT constrain (X, Y) to the image's
-        # W:H — letting them be independent is the point.
-        # Default 800x800; the legacy "frame_max" key (pre-split)
-        # still drives both axes if present, for session-reload
-        # backwards compatibility.
+        # survive image reloads). Default 800x800; legacy
+        # "frame_max" key (pre-X/Y-split) still drives both axes if
+        # present, for session-reload backwards compatibility.
         legacy = state.get("frame_max")
         frame_x = int(state.get("frame_x", legacy or 800))
         frame_y = int(state.get("frame_y", legacy or 800))
         fig.frame_width = max(100, frame_x)
         fig.frame_height = max(100, frame_y)
+        # **Per-pixel square** invariant: every data-unit-in-x must
+        # render at the same screen-pixel size as every
+        # data-unit-in-y, regardless of the (frame_x, frame_y) the
+        # user chose. `match_aspect=True` on the figure can only
+        # enforce this when the data range aspect equals the frame
+        # aspect — so we PRE-COMPUTE the data ranges to match the
+        # frame aspect by inflating the short axis symmetrically
+        # around the image centre.
+        #
+        # The image stays anchored at (x=0, y=0) and renders at its
+        # native W:H aspect inside the inflated data area. The
+        # inflated "empty" padding shows on whichever axis was
+        # short for the canvas — user can pan into it. The MSA
+        # outline + catalog overlay sit at their WCS-derived
+        # coords (in the same pixel-coord frame as the image), so
+        # they keep their correct geometric ratios at any (X, Y).
+        #
+        # NB: We need explicit Float values here — Bokeh 3.7's
+        # DataRange1d.start/end rejects None even though they're
+        # "Nullable". The previous fix using start=None blew up
+        # at runtime; this version pins explicit floats that are
+        # geometrically consistent with the chosen frame so
+        # match_aspect's check passes trivially.
+        canvas_aspect = float(frame_x) / float(frame_y)
+        image_aspect = float(W) / float(H)
+        if image_aspect < canvas_aspect:
+            # Image narrower than canvas — pad x_range on both sides.
+            target_x_span = canvas_aspect * H
+            pad_x = (target_x_span - W) / 2.0
+            x_start, x_end = -pad_x, W + pad_x
+            y_start, y_end = 0.0, float(H)
+        else:
+            # Image wider than canvas — pad y_range on both sides.
+            target_y_span = W / canvas_aspect
+            pad_y = (target_y_span - H) / 2.0
+            x_start, x_end = 0.0, float(W)
+            y_start, y_end = -pad_y, H + pad_y
+        fig.x_range.update(start=x_start, end=x_end)
+        fig.y_range.update(start=y_start, end=y_end)
     # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
     # WCS. Linear approximation around the image center — accurate at the
     # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
