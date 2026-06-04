@@ -34,6 +34,7 @@ from bokeh.models import (
     CustomJSTickFormatter,
     DataTable,
     Div,
+    GlobalInlineStyleSheet,
     HoverTool,
     HTMLTemplateFormatter,
     MultiChoice,
@@ -1555,7 +1556,75 @@ catalog_hover_choice = MultiChoice(
              for k in CATALOG_HOVER_FIELDS],
     value=[CATALOG_HOVER_FIELDS[k][0]
            for k in CATALOG_HOVER_DEFAULT_ORDER],
-    width=SIDEBAR_W - 20,
+    width=SIDEBAR_W + 70,
+)
+
+# ── Pop-up "Customise…" dialogs (v1.3.0+) ──────────────────────────
+# Both pickers used to live inline in the Settings tab. They worked,
+# but the chip widget needed ~250 vertical px each which pushed the
+# Actions group (Undo / Clear) off the bottom of the viewport on a
+# 913 px laptop screen. Wrap each picker in its own modal dialog
+# (mirrors the optimizer-config and catalog-editor patterns) so the
+# Settings tab stays compact and the chip area gets the whole modal
+# width for chip reflow.
+
+# Resize the stats-bar picker to match the modal width too.
+stats_bar_choice.width = SIDEBAR_W + 70
+
+# Open / close buttons for both modals — the open buttons live in the
+# Settings tab; close buttons live inside the modal cards.
+stats_bar_open_btn = Button(
+    label="Customise stats bar…",
+    button_type="default", width=SIDEBAR_W - 20,
+)
+stats_bar_modal_close_btn = Button(
+    label="Done", button_type="primary", width=80,
+)
+stats_bar_modal_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+    styles={
+        "position": "absolute",
+        "top": "6px", "right": "8px",
+        "z-index": "5",
+    },
+)
+stats_bar_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
+)
+
+catalog_hover_open_btn = Button(
+    label="Customise catalog hover…",
+    button_type="default", width=SIDEBAR_W - 20,
+)
+catalog_hover_modal_close_btn = Button(
+    label="Done", button_type="primary", width=80,
+)
+catalog_hover_modal_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+    styles={
+        "position": "absolute",
+        "top": "6px", "right": "8px",
+        "z-index": "5",
+    },
+)
+catalog_hover_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
 )
 
 # Glyph data sources
@@ -6984,6 +7053,111 @@ catalog_hover_reset_btn.on_click(_reset_catalog_hover_order)
 # which maps to "id · ra/dec · priority" — same content as v1.0).
 _refresh_catalog_hover_tooltip()
 
+
+# ── Build the two "Customise…" modal cards (v1.3.0+) ─────────────────
+# The cards reference the picker + reset-button widgets, so they have
+# to be built AFTER those widgets are defined. Same layout pattern as
+# `opt_config_modal_card` — title Div, content, Done button, with a
+# top-right × dismiss and a fixed-position centered card.
+
+_CUSTOMISE_MODAL_STYLES = {
+    "position": "fixed",
+    "top": "50%", "left": "50%",
+    "transform": "translate(-50%, -50%)",
+    "background": "white",
+    "border": "1px solid #c0c8d6",
+    "border-radius": "6px",
+    "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+    "padding": "16px 18px",
+    "z-index": "1000",
+    "max-height": "92vh",
+    "overflow-y": "auto",
+}
+
+# Bokeh injects ``body > div > .bk-Column { height: 100% !important; }``
+# at the page root, which makes any top-level Column stretch to fill
+# the viewport. That's correct for the main layout but wrong for our
+# little customise modals — they have ~4 children and end up with a
+# huge empty white area. Override it with a more-specific selector
+# (matches both classes; specificity beats Bokeh's `body > div > class`)
+# and re-assert it with !important so the picker modal hugs its content.
+_CUSTOMISE_MODAL_CSS = GlobalInlineStyleSheet(css="""
+.bk-Column.vmpt-customise-modal {
+  height: auto !important;
+}
+""")
+
+stats_bar_modal_card = column(
+    stats_bar_modal_top_close_btn,
+    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
+             "Customise top stats bar</h3>"
+             "<div style='font-size:12px; color:#5a6b85'>"
+             "Pick which cells appear in the bar above the figure, "
+             "and in what order. Drop a chip with its × to hide that "
+             "cell; click in the dropdown to re-add. The order of "
+             "the chips is the on-screen order.</div>",
+        width=SIDEBAR_W + 100),
+    stats_bar_choice,
+    stats_bar_reset_btn,
+    row(stats_bar_modal_close_btn, spacing=10),
+    spacing=10,
+    width=SIDEBAR_W + 130,
+    visible=False,
+    styles=_CUSTOMISE_MODAL_STYLES,
+    css_classes=["vmpt-customise-modal"],
+    stylesheets=[_CUSTOMISE_MODAL_CSS],
+)
+
+catalog_hover_modal_card = column(
+    catalog_hover_modal_top_close_btn,
+    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
+             "Customise catalog hover</h3>"
+             "<div style='font-size:12px; color:#5a6b85'>"
+             "Pick which fields show up in the tooltip when you "
+             "hover a catalog target marker on the canvas, and in "
+             "what order. The Constraints field renders a compact "
+             "summary (e.g. <code>λ:1·G·🛡</code>) when the source "
+             "has any per-target spectral constraint set.</div>",
+        width=SIDEBAR_W + 100),
+    catalog_hover_choice,
+    catalog_hover_reset_btn,
+    row(catalog_hover_modal_close_btn, spacing=10),
+    spacing=10,
+    width=SIDEBAR_W + 130,
+    visible=False,
+    styles=_CUSTOMISE_MODAL_STYLES,
+    css_classes=["vmpt-customise-modal"],
+    stylesheets=[_CUSTOMISE_MODAL_CSS],
+)
+
+
+def _open_stats_bar_modal(_e=None) -> None:
+    stats_bar_modal_backdrop.visible = True
+    stats_bar_modal_card.visible = True
+
+
+def _close_stats_bar_modal(_e=None) -> None:
+    stats_bar_modal_backdrop.visible = False
+    stats_bar_modal_card.visible = False
+
+
+def _open_catalog_hover_modal(_e=None) -> None:
+    catalog_hover_modal_backdrop.visible = True
+    catalog_hover_modal_card.visible = True
+
+
+def _close_catalog_hover_modal(_e=None) -> None:
+    catalog_hover_modal_backdrop.visible = False
+    catalog_hover_modal_card.visible = False
+
+
+stats_bar_open_btn.on_click(_open_stats_bar_modal)
+stats_bar_modal_close_btn.on_click(_close_stats_bar_modal)
+stats_bar_modal_top_close_btn.on_click(_close_stats_bar_modal)
+catalog_hover_open_btn.on_click(_open_catalog_hover_modal)
+catalog_hover_modal_close_btn.on_click(_close_catalog_hover_modal)
+catalog_hover_modal_top_close_btn.on_click(_close_catalog_hover_modal)
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -7059,15 +7233,9 @@ pick_tab = TabPanel(title="Settings", child=column(
     overlay_layer_select,
     overlay_alpha_slider,
     overlay_stroke_slider,
-    Div(text="<b>Top stats bar</b> "
-             "<small style='color:#5a6b85'>(above the figure)</small>"),
-    stats_bar_choice,
-    stats_bar_reset_btn,
-    Div(text="<b>Catalog hover</b> "
-             "<small style='color:#5a6b85'>"
-             "(tooltip on each target marker)</small>"),
-    catalog_hover_choice,
-    catalog_hover_reset_btn,
+    Div(text="<b>Customise display</b>"),
+    stats_bar_open_btn,
+    catalog_hover_open_btn,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
     width=SIDEBAR_W - 20,
@@ -7182,6 +7350,10 @@ curdoc().add_root(cat_edit_modal_backdrop)
 curdoc().add_root(cat_edit_modal_card)
 curdoc().add_root(cat_constraints_modal_backdrop)
 curdoc().add_root(cat_constraints_modal_card)
+curdoc().add_root(stats_bar_modal_backdrop)
+curdoc().add_root(stats_bar_modal_card)
+curdoc().add_root(catalog_hover_modal_backdrop)
+curdoc().add_root(catalog_hover_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.
