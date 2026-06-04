@@ -4,27 +4,239 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
-## [1.3.0] — unreleased
+## [1.3.0] — 2026-06-04
 
-Features (cumulative for the v1.3 series):
+Big feature release. Adds per-target spectral constraints (a whole
+new constraint system), per-target centration overrides, persistent
+user preferences, draggable modal dialogs, a confirm-overwrite gate
+on file saves, and a long list of UX polish + bug fixes.
 
-- **per-target spectral constraints** (this entry, below)
-- **per-target source-centering override** — the Constraints…
-  popover gains a `Source centering override` dropdown that can
-  pick any of the five centration levels (or leave it on
-  `(use global)`). Whatever you pick wins **unconditionally**
-  over the optimizer modal's global Source-centering Select for
-  that one row — even when it's laxer than the global. A small
-  italic line under the global Select shows how many rows carry
-  overrides so they're not invisible at run time. Round-trips
-  through the catalog CSV as a new `centration` column. See
-  [Catalogs → Source centering override](docs/catalogs.md).
-- **stats-bar + catalog-hover customisation** — Settings tab
-  adds two pop-up dialogs, `Customise stats bar…` and
-  `Customise catalog hover…`, that let you reorder / hide cells
-  in the top stats bar above the figure and the tooltip that
-  appears when you hover a catalog target on the canvas. Same
-  modal pattern as the optimizer.
+### Per-target spectral constraints (headline feature)
+
+The catalog editor gains a per-row **Constraints…** button (gray
+when unset, primary-blue when ≥1 field is set). Clicking it opens
+a popover that captures spectral requirements for that source. At
+every candidate pointing the optimizer fetches the source's
+centre-shutter wavelength endpoints via `vmpt.wavelengths.cutoffs`
+and drops the source if any constraint fails — same machinery as
+the v1.2.0 collision drop, just with new reason codes.
+
+Five per-target fields:
+
+`required_lam`
+: List of `(λ_lo, λ_hi)` ranges in μm that must land on the
+  detector for this source (gap excluded — a range straddling the
+  NRS1/NRS2 gap fails). Empty list = no constraint. Editor input
+  format: `"1.0-1.3; 1.5-1.8"`.
+
+`no_gap`
+: Boolean. When True, the NRS gap must not fall inside the
+  source's spectrum. PRISM at non-central shutters has no gap →
+  passes. H gratings have a gap inside every shutter's spectrum →
+  fails.
+
+`extend_blue` / `extend_red`
+: Booleans. Shutter must reach the disperser/filter's MSA-wide
+  best blue / red wavelength (within 20 nm tolerance). Useful when
+  you need the full blue/red end of the bandpass.
+
+`protect`
+: Per-target equivalent of the v1.2.0 catalog-wide collision
+  protection. OR'd with the catalog-wide cutoff.
+
+**Tolerant filter** (v1.3.0 final): a required-λ range entirely
+outside the current disperser's wavelength bounds is silently
+filtered out at evaluator-init rather than dropping the source.
+Lets users pre-stage `1.0–1.2 μm` while G395H is selected without
+losing every tagged source. Partial-overlap ranges are kept — the
+standard `interval_covered` check handles the achievable portion.
+
+### Per-target source-centering override
+
+The Constraints… popover gains a `Source centering override`
+dropdown with the five canonical levels (UNCONSTRAINED →
+TIGHTLY_CONSTRAINED) plus `(use global)`. Whatever you pick wins
+**unconditionally** over the optimizer modal's global
+Source-centering Select for that one row — even when it's laxer
+than the global. A small italic line under the global Select
+shows how many rows carry overrides. Round-trips through the
+catalog CSV as a new `centration` column.
+
+### Customisable stats bar + catalog hover
+
+Settings tab adds two pop-up dialogs, `Customise stats bar…` and
+`Customise catalog hover…`. Both let the user reorder / hide
+fields via MultiChoice chips — drop a chip with its × to hide,
+click in the dropdown to re-add, drag to reorder. Affects the top
+status bar above the figure and the tooltip shown when hovering a
+catalog target on the canvas.
+
+### Draggable modals + uniform header bar
+
+Every modal dialog (optimizer config / results / advanced, catalog
+editor, per-target Constraints, Customise pickers, Overwrite
+confirmation) is now a draggable card. Each carries a distinct
+**light-blue header bar** with the title on the left and an
+explicit ✕ close button on the right — the **header is the only
+drag handle**, so form controls and SlickGrid cells in the body
+stay fully interactive.
+
+### Confirm-overwrite dialog for file writes
+
+Catalog editor's Save-as-CSV and the Save-session button now route
+through a generic overwrite-confirmation modal when the target
+path already exists. Red "Overwrite" danger button + default
+"Cancel"; Cancel preserves the existing file. eMPT bundle export
+already creates a timestamped subdirectory each call, so no
+change there.
+
+### Compact canvas X/Y inputs
+
+Replaced the two full-width canvas-size sliders with a compact
+`row(Spinner, Spinner)` pair ("Width (X)" / "Height (Y)", 88 px
+each, side-by-side). Each spinner has up/down arrows + free
+typing; commit on blur/Enter/arrow click so the previous
+`value_throttled` distinction is moot. The user can set any
+(X, Y) — `match_aspect=True` enforces the per-pixel-square
+invariant by inflating the short data axis symmetrically around
+the image, so image pixels stay square and the NIRSpec FoV stays
+at correct geometric ratio at any canvas aspect.
+
+### Canvas resize feedback
+
+Slider release now triggers the same full-page loading overlay
+(gold spinner on translucent backdrop) that file loads use,
+labelled "Resizing canvas…". Stays up for 1.2 s after the
+Python-side resize so the browser has time to repaint the image
+before the spinner fades.
+
+### Persistent user preferences
+
+New file `~/.vmpt/preferences.json` stores the full Settings tab
+across sessions: canvas X/Y, slitlet size, snap, layer visibility,
+overlay alpha + stroke per layer (all 5), stats-bar order,
+catalog-hover order, help-panel visibility. Auto-saved on every
+widget change via `vmpt/preferences.py` (atomic temp+rename
+writes; corrupt files don't break startup). A new "Reset display
+to defaults" button in the Settings tab wipes the file and
+restores hard-coded defaults. Override the file location via the
+`VMPT_PREFS_PATH` env var (test hook).
+
+### Help panel default-on
+
+The right-side help panel now opens **expanded** at first launch
+(persists via prefs). One click on "Hide help" collapses it; the
+new value is saved.
+
+### hMPT / eMPT attribution rewording
+
+README, RTD docs, and the `vmpt/optimizer.py` module docstring all
+clarified: vMPT's optimizer is a lightweight Python module
+**inspired by** hMPT (which is itself inspired by ESA's eMPT) —
+not a direct port of either. The MSA shutter geometry, V2/V3 ↔
+(s, d) transforms, gnomonic projection, and constraint machinery
+were written fresh; the search algorithm is a simpler variant
+than hMPT's.
+
+### Catalog editor — z as float-sortable
+
+The `z` (redshift) column was string-stored, so the header click
+sorted lexicographically (`"10.5"` < `"2.3"`). Now stored as
+float (NaN for missing), rendered with a 3-decimal HTML formatter,
+and coerced back to float on cell edit — same pattern as
+priority + weight in v1.1.1.
+
+### Bug fixes
+
+- **Image aspect ratio stretched for non-square images.** With
+  the v1.3.0 independent X/Y canvas sliders, `match_aspect=True`
+  silently failed whenever the canvas aspect didn't match the
+  image's W:H, because the data ranges were pinned on both axes.
+  Fixed by pre-computing data ranges from the canvas aspect so
+  match_aspect's check passes trivially.
+- **`DataRange1d.start=None` crash on canvas slider change.** A
+  prior fix tried `fig.x_range.update(start=None, end=None)` to
+  reset to auto-bound; Bokeh 3.7.2 rejects None on explicit
+  assignment to DataRange1d.start/end. Replaced with the
+  aspect-matched explicit-Float fix above.
+- **Optimizer crash on multi-source catalog with `centration`
+  field.** `getattr(cat, "centration", None) or []` triggered
+  `bool()` on a length-N numpy array, raising
+  `ValueError: The truth value of an array with more than one
+  element is ambiguous`. Fixed with explicit `is None` check;
+  added a regression test that drives a 5-source Catalog with
+  mixed centration overrides through PointingEvaluator end-to-end.
+
+### Editor / loader
+
+- The catalog loader recognises the new column aliases:
+  `lam_req` / `lambda_required`, `no_gap` / `gapless`,
+  `extend_blue` / `bluest`, `extend_red` / `reddest`,
+  `protect` / `protected`, `centration` / `source_centering`.
+- `save_catalog(cat, path, include_constraints="auto|always|never")`
+  is now a public function for programmatic catalog writes; the
+  catalog editor's Save-as-CSV uses the same path.
+- The optimizer driver passes the constraint arrays to
+  `PointingEvaluator` automatically — no extra wiring per-call.
+
+### Optimizer
+
+- `PointingEvaluator.__init__` accepts five new constraint kwargs
+  + `centration_per_target`. A new method
+  `evaluate_with_reasons(...)` returns the per-pointing
+  drop-reason dict keyed by `DROP_REASONS` (`collision`,
+  `required_lam`, `no_gap`, `extend_blue`, `extend_red`).
+- `evaluate_with_stats(...)` keeps its v1.2 4-tuple shape — the
+  int it returns is now the sum of the per-reason counts.
+- The Optimizer-results modal Score-cell hover tooltip breaks
+  the `−K` count down by reason:
+
+  ```
+  Top 10 placed sources at this pointing:
+    …
+  −6 dropped:
+     3× spectral collision
+     2× required λ-range missing
+     1× detector gap inside spectrum
+  ```
+
+### RXCJ0600 example catalog slimmed
+
+`example_r0600/v01_fsun.cat` reduced from 28,569 → 2,000 rows
+(F200W or F444W magnitude in 24–27, random sample seed=42). Loads
+in ~5 s on a laptop instead of ~70 s, with no science loss for a
+demo file.
+
+### Tests
+
+`tests/test_optimizer_constraints.py` — 30 new tests for the
+constraint system (parse-string, disperser_range, interval_covered,
+Catalog dataclass defaults, optimizer keys + size-mismatch, per-
+constraint behaviour, drop-reason invariants).
+
+`tests/test_optimizer.py` — 6 new tests for per-target centration
+override (unconditional rule, size-mismatch raise, blank/None/
+unknown fall back to global), tolerant required_lam filter, and
+the multi-source numpy-truthiness regression.
+
+`tests/test_catalog.py` — 4 new tests for the constraint CSV
+round-trip (auto / always / never emission policies) and 4 for the
+centration column.
+
+**183 passed, 5 skipped** total (up from 139/4 at v1.2.2). The
+skips are synthetic-geometry cases where no source happens to
+land in the MSA at the test pointing.
+
+[1.3.0]: https://github.com/fengwusun/vMPT/releases/tag/v1.3.0
+
+---
+
+## [1.3.0-superseded] — earlier in-flight notes
+
+The text below was the initial scoping note for v1.3.0 (the
+per-target spectral constraints work alone). Preserved verbatim
+for the project log; the consolidated v1.3.0 release notes above
+supersede it.
 
 Feature: **per-target spectral constraints**.
 

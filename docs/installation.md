@@ -32,7 +32,7 @@ git clone https://github.com/fengwusun/vMPT.git
 cd vMPT
 pip install -e .            # editable install, picks up local edits
 ./run.sh                    # same as `vmpt` after install
-pytest tests/               # 139 passed, 4 skipped
+pytest tests/               # 183 passed, 5 skipped
 ```
 
 ### STScI's `stenv`

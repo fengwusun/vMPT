@@ -11,8 +11,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   (RA, Dec, V3 PA) for the best MSA pointing and roll angle. It's
   inspired by [hMPT](https://github.com/zihaowu-astro/hMPT)
   (Zihao Wu et al., CfA|Harvard), which is itself inspired by
-  ESA's eMPT (Bonaventura et al. 2023) — *not* a direct port of
-  either. The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate
+  ESA's eMPT (Bonaventura et al. 2023). The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate
   mapping, and gnomonic projection are independently implemented;
   the search algorithm (grid → differential-evolution refine) is
   a simpler version than hMPT's. Three modes: Democracy (count),
@@ -32,7 +31,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-169%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-183%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
 ![release](https://img.shields.io/badge/release-v1.3.0-blueviolet)
@@ -118,7 +117,7 @@ pip install -r requirements.txt
 ### Verify the install
 
 ```bash
-pytest tests/    # 139 passed, 4 skipped; ~15 seconds
+pytest tests/    # 183 passed, 5 skipped; ~15 seconds
 ```
 
 If everything's green, the tool is ready. If `pytest` complains about

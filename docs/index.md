@@ -22,7 +22,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   angle. Inspired by
   [hMPT](https://github.com/zihaowu-astro/hMPT) (Z. Wu et al.,
   CfA / Harvard), which is itself inspired by ESA's eMPT
-  (Bonaventura et al. 2023) — *not* a direct port of either.
+  (Bonaventura et al. 2023).
   The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate mapping,
   and constraint machinery are independently implemented; the
   search algorithm (grid → differential-evolution refine) is a
