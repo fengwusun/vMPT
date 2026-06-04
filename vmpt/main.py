@@ -1510,6 +1510,48 @@ canvas_y_slider = Slider(
     width=SIDEBAR_W - 40,
 )
 
+# "Resizing canvas…" indicator — a floating pill with a CSS-animated
+# spinner that appears while a slider release triggers the
+# (potentially slow) figure redraw. The handler sets
+# `canvas_busy_div.visible = True`, defers the actual resize to a
+# next-tick callback, then hides the indicator on the tick AFTER —
+# that's the sequence that makes the spinner actually visible to the
+# user, since Bokeh batches all property changes from a single
+# Python callback into one browser update.
+canvas_busy_div = Div(
+    text="""
+<div style='display:flex; align-items:center; gap:10px;
+            background:rgba(30, 50, 90, 0.92); color:#fff;
+            padding:10px 18px; border-radius:22px;
+            box-shadow:0 6px 18px rgba(0, 30, 80, 0.4);
+            font-size:13px; font-family:sans-serif;
+            font-weight:500;'>
+  <div style='width:16px; height:16px;
+              border:2.5px solid rgba(255,255,255,0.35);
+              border-top-color:#fff;
+              border-radius:50%;
+              animation:vmpt-canvas-busy-spin 0.85s linear infinite;'></div>
+  Resizing canvas…
+</div>
+<style>
+@keyframes vmpt-canvas-busy-spin {
+    to { transform: rotate(360deg); }
+}
+</style>
+""",
+    visible=False,
+    styles={
+        "position": "fixed",
+        # Centred horizontally near the top of the figure area; the
+        # JPG / FITS render happens just below.
+        "top": "70px",
+        "left": "50%",
+        "transform": "translateX(-50%)",
+        "z-index": "900",
+        "pointer-events": "none",  # never block clicks on the canvas
+    },
+)
+
 undo_btn = Button(label="Undo last", button_type="default")
 clear_btn = Button(label="Clear open", button_type="warning")
 
@@ -4723,22 +4765,49 @@ overlay_alpha_slider.on_change("value", _on_overlay_alpha)
 overlay_stroke_slider.on_change("value", _on_overlay_stroke)
 
 
+def _canvas_resize_apply(axis: str, value: int) -> None:
+    """Apply a canvas-axis resize and clear the busy indicator.
+
+    Split out so :func:`_on_canvas_x` / :func:`_on_canvas_y` can
+    defer the actual work to a next-tick callback — that way the
+    "Resizing canvas…" spinner has time to appear in the browser
+    BEFORE the (potentially slow) image redraw kicks off. Without
+    the deferral Bokeh batches the show→resize→hide property
+    changes into a single update and the user never sees the
+    spinner. v1.3.3+.
+    """
+    if axis == "x":
+        state["frame_x"] = value
+    elif axis == "y":
+        state["frame_y"] = value
+    if state.get("image") is not None:
+        refresh_image_glyph()
+    # Hide the spinner on the NEXT tick (one more frame after the
+    # resize has been applied) so the user actually sees the
+    # animation during the redraw.
+    def _hide():
+        canvas_busy_div.visible = False
+    curdoc().add_next_tick_callback(_hide)
+
+
 def _on_canvas_x(attr, old, new):
     """Resize the figure frame's WIDTH in response to the Settings
-    slider. Stashes the value on `state["frame_x"]` so the change
-    survives image reloads; calls :func:`refresh_image_glyph` to
-    apply immediately when an image is loaded. `match_aspect=True`
-    on the figure handles pixel-aspect locking, so a non-square
-    canvas letterboxes the image to keep the MSA FoV correct.
+    slider. Fires only on slider RELEASE (value_throttled) so a
+    long drag doesn't trigger a redraw on every mouse tick. State-
+    backed so the value survives image reloads. `match_aspect=True`
+    handles pixel-aspect locking — a non-square canvas keeps image
+    pixels square (the image renders at native aspect inside the
+    canvas with empty padding on whichever axis is short).
     """
     try:
         v = int(new)
     except (TypeError, ValueError):
         return
     v = max(400, min(1600, v))
-    state["frame_x"] = v
-    if state.get("image") is not None:
-        refresh_image_glyph()
+    canvas_busy_div.visible = True
+    curdoc().add_next_tick_callback(
+        lambda v=v: _canvas_resize_apply("x", v)
+    )
 
 
 def _on_canvas_y(attr, old, new):
@@ -4748,13 +4817,17 @@ def _on_canvas_y(attr, old, new):
     except (TypeError, ValueError):
         return
     v = max(400, min(1600, v))
-    state["frame_y"] = v
-    if state.get("image") is not None:
-        refresh_image_glyph()
+    canvas_busy_div.visible = True
+    curdoc().add_next_tick_callback(
+        lambda v=v: _canvas_resize_apply("y", v)
+    )
 
 
-canvas_x_slider.on_change("value", _on_canvas_x)
-canvas_y_slider.on_change("value", _on_canvas_y)
+# Use `value_throttled` (fires on slider RELEASE) instead of `value`
+# (fires on every tick during drag) — saves a dozen+ unnecessary
+# redraws of an 8000x12000 image while the user is still dragging.
+canvas_x_slider.on_change("value_throttled", _on_canvas_x)
+canvas_y_slider.on_change("value_throttled", _on_canvas_y)
 
 
 # ---------------------------------------------------------------------------
@@ -8007,6 +8080,9 @@ curdoc().add_root(catalog_hover_modal_card)
 # stacks above every other modal.
 curdoc().add_root(overwrite_modal_backdrop)
 curdoc().add_root(overwrite_modal_card)
+# "Resizing canvas…" busy indicator — floating pill, position:fixed,
+# pointer-events:none so it never blocks the canvas underneath.
+curdoc().add_root(canvas_busy_div)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.
