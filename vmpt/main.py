@@ -496,7 +496,8 @@ opt_advanced_modal_card = column(
     Div(text="<h3 style='margin:0 0 6px 0; color:#1a3b66'>"
              "Advanced optimizer settings</h3>"
              "<div style='font-size:12px; color:#5a6b85'>"
-             "Tune only if the defaults don't fit. Values stick after Done.</div>",
+             "Tune only if the defaults don't fit. Values stick after Done. "
+             "<i>Drag the header to reposition.</i></div>",
         width=520),
     row(opt_grid_n_ra_input, opt_grid_n_dec_input, spacing=12),
     row(opt_grid_n_pa_input, opt_de_maxiter_input, spacing=12),
@@ -507,6 +508,7 @@ opt_advanced_modal_card = column(
     spacing=10,
     width=540,
     visible=False,
+    css_classes=["vmpt-draggable-modal"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -782,6 +784,7 @@ cat_edit_modal_card = column(
     spacing=10,
     width=860,
     visible=False,
+    css_classes=["vmpt-draggable-modal"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -906,6 +909,7 @@ cat_constraints_modal_card = column(
     spacing=10,
     width=460,
     visible=False,
+    css_classes=["vmpt-draggable-modal"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -1000,6 +1004,7 @@ opt_config_modal_card = column(
     spacing=10,
     width=SIDEBAR_W + 70,
     visible=False,
+    css_classes=["vmpt-draggable-modal"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -1133,6 +1138,7 @@ opt_modal_card = column(
     # ~200 px) plus the rest of the row (~480 px) and the modal's
     # inner padding (~36 px).
     width=740,
+    css_classes=["vmpt-draggable-modal"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -5977,6 +5983,158 @@ _cat_edit_install_js = CustomJS(
 curdoc().js_on_event(DocumentReady, _cat_edit_install_js)
 _cat_edit_source.js_on_change("data", _cat_edit_install_js)
 
+
+# ── Draggable modal dialogs (v1.3.3+) ────────────────────────────────────
+# Every pop-up card (optimizer config / results / advanced, catalog
+# editor, per-target constraints, customise stats-bar / catalog-hover)
+# carries the css_class "vmpt-draggable-modal". The JS below attaches a
+# mousedown→mousemove→mouseup drag handler to each so the user can
+# reposition any dialog anywhere on the browser page. Useful when a
+# dialog covers something the user wants to inspect (e.g., the canvas
+# under the optimizer-results modal).
+#
+# Guard rules:
+#   * Mousedown on a form control (input / button / select / textarea
+#     / option) → fall through to the control, no drag.
+#   * Mousedown on a Bokeh widget shell (.bk-input-group, .bk-btn,
+#     .bk-slider-handle, .bk-MultiChoice) → fall through, no drag.
+#   * Mousedown on a SlickGrid cell / header → fall through (sort,
+#     edit, scroll all keep working).
+#   * Mousedown elsewhere (title text, padding, the modal background
+#     itself) → start drag.
+#
+# On the FIRST drag of a session the card's centered transform
+# (`translate(-50%, -50%)`) is converted to absolute top/left so
+# subsequent drags can do straight arithmetic. The transform is
+# preserved on the first call to `__vmpt_init_drag` (idempotent),
+# but cleared on the first mousedown — that way modals still open
+# centred on first display, but stay where the user put them after.
+_vmpt_drag_init_js = CustomJS(code=r"""
+    if (window.__vmpt_init_drag) {
+        // Re-fire to catch newly-rendered cards. The per-element
+        // dataset.vmptDraggable flag makes re-wiring a no-op.
+        window.__vmpt_init_drag();
+        return;
+    }
+    let isDragging = false;
+    let target = null;
+    let startX = 0, startY = 0;
+    let origLeft = 0, origTop = 0;
+
+    function shouldSkipDrag(e) {
+        // Walk up from the click target looking for "interactive" hits.
+        // If any matches before we reach the modal card itself, skip
+        // drag and let the control receive the click normally.
+        const tag = (e.target.tagName || "").toLowerCase();
+        if (["input", "button", "select", "textarea", "option",
+             "a", "label"].includes(tag)) {
+            return true;
+        }
+        // Bokeh widget shells + SlickGrid hit-zones.
+        const closestInteractive = e.target.closest(
+            ".bk-input, .bk-input-group, .bk-btn, .bk-slider-handle, " +
+            ".bk-MultiChoice, .bk-Choices, .choices, " +
+            ".slick-cell, .slick-header, .slick-header-column, " +
+            ".slick-viewport"
+        );
+        if (closestInteractive) return true;
+        return false;
+    }
+
+    function onMouseDown(e) {
+        if (e.button !== 0) return;  // left-click only
+        if (shouldSkipDrag(e)) return;
+        const card = e.currentTarget;
+        const rect = card.getBoundingClientRect();
+        // Promote centred-transform card to absolute coordinates so
+        // subsequent drags do straightforward arithmetic. Safe to
+        // re-run; once `transform: none` is set the position is
+        // already absolute.
+        card.style.top = rect.top + "px";
+        card.style.left = rect.left + "px";
+        card.style.transform = "none";
+        isDragging = true;
+        target = card;
+        startX = e.clientX;
+        startY = e.clientY;
+        origLeft = rect.left;
+        origTop = rect.top;
+        // Block text selection / focus migrations during the drag.
+        e.preventDefault();
+    }
+
+    function onMouseMove(e) {
+        if (!isDragging || target === null) return;
+        const newLeft = origLeft + (e.clientX - startX);
+        const newTop = origTop + (e.clientY - startY);
+        // Loose clamp so the user can't drag the card entirely
+        // off-screen (top-left corner of the card must remain inside
+        // the viewport). Lets dragging across most of the page but
+        // prevents accidental "lost the dialog" surprises.
+        target.style.left = Math.max(
+            -Math.max(0, target.offsetWidth - 80),
+            Math.min(window.innerWidth - 80, newLeft)
+        ) + "px";
+        target.style.top = Math.max(
+            0,
+            Math.min(window.innerHeight - 32, newTop)
+        ) + "px";
+    }
+
+    function onMouseUp() {
+        isDragging = false;
+        target = null;
+    }
+
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+
+    window.__vmpt_init_drag = function () {
+        document.querySelectorAll(".vmpt-draggable-modal").forEach((el) => {
+            if (el.dataset.vmptDraggable === "1") return;
+            el.dataset.vmptDraggable = "1";
+            el.addEventListener("mousedown", onMouseDown);
+        });
+    };
+    window.__vmpt_init_drag();
+
+    // Some modals are created after DocumentReady (e.g., the catalog-
+    // editor table re-binds when a catalog is added). A short-lived
+    // MutationObserver catches any draggable card injected later.
+    const obs = new MutationObserver(() => window.__vmpt_init_drag());
+    obs.observe(document.body, {childList: true, subtree: true});
+""")
+curdoc().js_on_event(DocumentReady, _vmpt_drag_init_js)
+
+# Cursor cue: any draggable modal shows the "move" cursor over its
+# non-interactive padding, while form controls inside keep their
+# default cursors. The :not(...) selectors mirror the JS shouldSkipDrag.
+_vmpt_drag_styles = GlobalInlineStyleSheet(css="""
+.vmpt-draggable-modal {
+  cursor: move;
+  user-select: none;
+}
+.vmpt-draggable-modal input,
+.vmpt-draggable-modal button,
+.vmpt-draggable-modal select,
+.vmpt-draggable-modal textarea,
+.vmpt-draggable-modal .bk-input,
+.vmpt-draggable-modal .bk-btn,
+.vmpt-draggable-modal .bk-slider-handle,
+.vmpt-draggable-modal .bk-MultiChoice,
+.vmpt-draggable-modal .slick-cell,
+.vmpt-draggable-modal .slick-header,
+.vmpt-draggable-modal .slick-header-column {
+  cursor: default;
+  user-select: text;
+}
+""")
+# Attach the GlobalInlineStyleSheet to the main figure's stylesheets
+# list — Bokeh emits it into <head> for the whole document. (Adding
+# it as a root via curdoc().add_root() isn't the documented API for
+# stylesheets; `stylesheets=` on any LayoutDOM is.)
+fig.stylesheets = list(fig.stylesheets) + [_vmpt_drag_styles]
+
 # SlickGrid intercepts Cmd-C / Ctrl-C at the grid container level and
 # copies the entire selected column / row from its internal data
 # model, which defeats the in-cell drag-select + copy workflow. We
@@ -7414,7 +7572,7 @@ stats_bar_modal_card = column(
     width=SIDEBAR_W + 130,
     visible=False,
     styles=_CUSTOMISE_MODAL_STYLES,
-    css_classes=["vmpt-customise-modal"],
+    css_classes=["vmpt-customise-modal", "vmpt-draggable-modal"],
     stylesheets=[_CUSTOMISE_MODAL_CSS],
 )
 
@@ -7436,7 +7594,7 @@ catalog_hover_modal_card = column(
     width=SIDEBAR_W + 130,
     visible=False,
     styles=_CUSTOMISE_MODAL_STYLES,
-    css_classes=["vmpt-customise-modal"],
+    css_classes=["vmpt-customise-modal", "vmpt-draggable-modal"],
     stylesheets=[_CUSTOMISE_MODAL_CSS],
 )
 
