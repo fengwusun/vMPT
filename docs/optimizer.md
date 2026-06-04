@@ -6,10 +6,14 @@ sources in operable, well-centred MSA shutters.
 
 Algorithm: a 3-axis grid search followed by
 `scipy.optimize.differential_evolution` polish of the top-N
-candidates. Re-implemented in vMPT style from
+candidates. `vmpt/optimizer.py` is a lightweight, self-contained
+Python module inspired by
 [**hMPT**](https://github.com/zihaowu-astro/hMPT) (Z. Wu et al.,
-CfA/Harvard), itself a Python re-implementation of ESA's eMPT
-(Bonaventura et al. 2023).
+CfA/Harvard), which is itself inspired by ESA's eMPT
+(Bonaventura et al. 2023). vMPT is **not** a direct port of
+either — the MSA geometry, coordinate transforms, and constraint
+machinery are independently implemented, and the search algorithm
+is a simpler version than hMPT's.
 
 ## Method
 

@@ -6,12 +6,17 @@
 Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 **directly on an image of the target field**. vMPT combines:
 
-- **Automated MSA pointing optimization** — derived from [hMPT](https://github.com/zihaowu-astro/hMPT)
-  (Zihao Wu et al., CfA|Harvard), itself a Python re-implementation
-  of ESA's eMPT (Bonaventura et al. 2023). Grid + differential-
-  evolution search over (RA, Dec, V3 PA) in three modes: Democracy
-  (count), Meritocracy (Σ weight), Hierarchy (strict priority
-  tiers).
+- **Automated MSA pointing optimization** — vMPT's
+  `optimizer.py` is a lightweight Python module that searches
+  (RA, Dec, V3 PA) for the best MSA pointing and roll angle. It's
+  inspired by [hMPT](https://github.com/zihaowu-astro/hMPT)
+  (Zihao Wu et al., CfA|Harvard), which is itself inspired by
+  ESA's eMPT (Bonaventura et al. 2023) — *not* a direct port of
+  either. The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate
+  mapping, and gnomonic projection are independently implemented;
+  the search algorithm (grid → differential-evolution refine) is
+  a simpler version than hMPT's. Three modes: Democracy (count),
+  Meritocracy (Σ weight), Hierarchy (strict priority tiers).
 - **Shutter-collision protection** — mark high-priority targets
   whose spectra must not overlap any other source on the detector
   under the current Disperser / Filter. Slitlet-aware row buffer
@@ -215,11 +220,15 @@ Bottom of the **Pointing** tab. Searches for an (RA, Dec, V3 PA) that
 maximises the number — or weighted flux — of catalog sources placed in
 operable, well-centred MSA shutters.
 
-The algorithm is re-implemented in vMPT style from
-[**hMPT**](https://github.com/zihaowu-astro/hMPT) (Zihao Wu, Daniel Eisenstein,
-Samuel McCarty; CfA/Harvard), itself derived from ESA's
-eMPT. See `app/optimizer.py` for the module-level docstring with
-attribution + algorithm notes.
+The optimizer is a lightweight, self-contained Python module
+(`vmpt/optimizer.py`) inspired by
+[**hMPT**](https://github.com/zihaowu-astro/hMPT) (Zihao Wu,
+Daniel Eisenstein, Samuel McCarty; CfA/Harvard), which is itself
+inspired by ESA's eMPT (Bonaventura et al. 2023). vMPT is **not**
+a direct port of either — the MSA geometry handling, coordinate
+transforms, and constraint machinery were written fresh and the
+algorithm is simpler than hMPT's. See `vmpt/optimizer.py` for the
+module-level docstring with attribution + algorithm notes.
 
 ### Method
 

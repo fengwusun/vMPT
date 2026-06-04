@@ -16,13 +16,18 @@ changelog
 Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 **directly on an image of the target field**. vMPT combines:
 
-- **Automated MSA pointing optimization** — derived from
+- **Automated MSA pointing optimization** —
+  `vmpt/optimizer.py` is a lightweight Python module that
+  searches (RA, Dec, V3 PA) for the best MSA pointing and roll
+  angle. Inspired by
   [hMPT](https://github.com/zihaowu-astro/hMPT) (Z. Wu et al.,
-  CfA / Harvard), itself a Python re-implementation of ESA's
-  eMPT (Bonaventura et al. 2023). Grid + differential-evolution
-  search over (RA, Dec, V3 PA) in three modes: Democracy
-  (count), Meritocracy (Σ weight), Hierarchy (strict priority
-  tiers).
+  CfA / Harvard), which is itself inspired by ESA's eMPT
+  (Bonaventura et al. 2023) — *not* a direct port of either.
+  The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate mapping,
+  and constraint machinery are independently implemented; the
+  search algorithm (grid → differential-evolution refine) is a
+  simpler version than hMPT's. Three modes: Democracy (count),
+  Meritocracy (Σ weight), Hierarchy (strict priority tiers).
 - **Shutter-collision protection** — mark high-priority targets
   whose spectra must not overlap any other source on the
   detector under the current Disperser / Filter. Slitlet-aware
@@ -67,8 +72,11 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 
 If you use vMPT in a paper, please cite the underlying algorithms:
 
-- **hMPT** — Wu, Z. et al. (in prep); CfA/Harvard. Python re-
-  implementation of ESA's eMPT. <https://github.com/zihaowu-astro/hMPT>
+- **hMPT** — Wu, Z. et al. (in prep); CfA/Harvard. Lightweight
+  Python script for optimizing MSA pointing and roll angles,
+  inspired by ESA's eMPT (and the inspiration for vMPT's own
+  optimizer).
+  <https://github.com/zihaowu-astro/hMPT>
 - **eMPT** — Bonaventura, N. et al. (2023), *A&A* 672, A40.
   ESA's reference MSA Planning Tool pipeline.
 

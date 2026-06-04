@@ -3,15 +3,21 @@
 Searches for (RA, Dec, V3 PA) maximising the number — or weighted flux —
 of catalog sources that fall in operable, well-centred MSA shutters.
 
-The algorithm is derived from **hMPT** by Daniel Eisenstein, Samuel
-McCarty, and Zihao Wu (Harvard / CfA), itself a Python re-implementation
-of ESA's eMPT (Bonaventura et al. 2023, A&A 672, A40):
+This module is inspired by **hMPT** — a lightweight Python script
+for optimizing MSA pointing and roll angles by Daniel Eisenstein,
+Samuel McCarty, and Zihao Wu (Harvard / CfA), which is itself
+inspired by ESA's eMPT (Bonaventura et al. 2023, A&A 672, A40):
 <https://github.com/zihaowu-astro/hMPT>.
 
-vMPT does NOT depend on hMPT — this module re-implements the core
-algorithm in vMPT's style with attribution, so it composes cleanly
-with our existing MSA grid (`vmpt/data/nirspec_msa_v2v3.npz`), CRDS
-operability loader, and Bokeh UI.
+vMPT is **not** a direct port of hMPT or eMPT. The MSA shutter
+geometry handling, V2/V3 ↔ (s, d) coordinate transforms, gnomonic
+projection, centration check, and per-target constraint machinery
+were all written fresh — the differences are visible side-by-side
+between this file and hMPT's. The search algorithm is a simpler
+variant (single-stage DE refine of the top grid candidates) than
+hMPT's. The module composes cleanly with our existing MSA grid
+(`vmpt/data/nirspec_msa_v2v3.npz`), CRDS operability loader, and
+Bokeh UI.
 
 Algorithm summary
 -----------------

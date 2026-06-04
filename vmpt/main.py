@@ -1441,10 +1441,18 @@ overlay_stroke_slider = Slider(
 # (height) of the figure's drawing frame in pixels.
 # `refresh_image_glyph()` reads state["frame_x"] / state["frame_y"]
 # and sets fig.frame_width / fig.frame_height directly.
-# `match_aspect=True` on the figure keeps image pixels square — when
-# the canvas aspect ≠ image aspect, Bokeh letterboxes the image so
-# both the science image AND the NIRSpec FoV stay at their correct
-# aspect ratios at any (frame_x, frame_y). Default 800×800.
+#
+# `match_aspect=True` on the figure enforces the **per-pixel
+# square** constraint: 1 data unit in x renders at the same screen
+# size as 1 data unit in y, no matter what the canvas X/Y are.
+# That's what keeps the science image's pixels visually square AND
+# the NIRSpec shutters at their correct geometric ratios. Bokeh
+# achieves this by EXPANDING whichever data range is "too short"
+# given the canvas dimensions — when the user sets a non-image-
+# aspect canvas, the image stays at its native pixel shape and the
+# extra canvas area shows empty space (the user can pan into it).
+# We deliberately do NOT couple X/Y to the image's W:H — letting
+# them roam free is the point of having two sliders. Default 800x800.
 canvas_x_slider = Slider(
     start=400, end=1600, step=50, value=800,
     title="Canvas width (X, px)",
@@ -2723,13 +2731,15 @@ def refresh_image_glyph() -> None:
     if W > 0 and H > 0:
         # User-adjustable canvas dimensions (state-backed so values
         # survive image reloads). Each axis is set directly here;
-        # `match_aspect=True` on the figure then enforces 1:1 pixel
-        # aspect by adjusting the data range — image pixels stay
-        # square and the MSA overlay's data range stays consistent.
-        # When the canvas aspect ≠ image aspect, the image is
-        # letterboxed inside the frame so both stay at their
-        # correct ratios at any (frame_x, frame_y).
-        # Default 800×800; the legacy "frame_max" key (pre-split)
+        # `match_aspect=True` on the figure then enforces
+        # **per-pixel square** — every data-unit-in-x renders at
+        # the same screen-pixel-size as every data-unit-in-y — by
+        # expanding whichever data range is short for the chosen
+        # frame ratio. That keeps the image's pixels visually
+        # square AND the MSA shutter geometry correct at any (X, Y).
+        # We deliberately do NOT constrain (X, Y) to the image's
+        # W:H — letting them be independent is the point.
+        # Default 800x800; the legacy "frame_max" key (pre-split)
         # still drives both axes if present, for session-reload
         # backwards compatibility.
         legacy = state.get("frame_max")
