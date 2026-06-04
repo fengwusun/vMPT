@@ -678,6 +678,36 @@ class PointingEvaluator:
                               self._constraint_filt)
         if rng is not None:
             self._disperser_lam_lo, self._disperser_lam_hi = rng
+
+        # v1.3.2+ tolerant filter on `required_lam` ranges:
+        # silently drop any user-supplied (lo, hi) range that lies
+        # entirely outside the current disperser/filter's wavelength
+        # bounds. Rationale — a user editing constraints often
+        # pre-stages for a different disperser (say PRISM at 1.0–1.2
+        # μm) and would otherwise see every such source dropped under
+        # G395H. We treat impossible-under-this-grating ranges as
+        # "no constraint" rather than "always fails". When a range
+        # only PARTIALLY overlaps the disperser, we keep it — the
+        # standard `interval_covered` check then enforces the
+        # achievable portion.
+        self._required_lam_dropped = 0
+        if rng is not None and self._required_lam is not None:
+            lo_d, hi_d = rng
+            for i in range(n):
+                orig = self._required_lam[i]
+                if not orig:
+                    continue
+                kept = [
+                    (lo, hi) for (lo, hi) in orig
+                    # Overlap test: range [lo, hi] overlaps the
+                    # disperser [lo_d, hi_d] iff lo < hi_d AND hi > lo_d.
+                    if (lo < hi_d and hi > lo_d)
+                ]
+                if len(kept) != len(orig):
+                    self._required_lam_dropped += (
+                        len(orig) - len(kept)
+                    )
+                    self._required_lam[i] = kept
         # Scan the precomputed per-shutter dispersion table to find
         # the actual "best" lam_blue and lam_red ACHIEVABLE for this
         # (disp, filt) across the MSA. extend_blue passes iff the

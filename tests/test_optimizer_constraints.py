@@ -249,9 +249,19 @@ def test_constraint_without_disperser_raises():
 # ---------------------------------------------------------------------
 
 
-def test_required_lam_outside_disperser_drops_all():
-    """Asking for λ ∈ [6, 7] μm under PRISM (range 0.60-5.30) drops
-    every detected source as required_lam."""
+def test_required_lam_outside_disperser_is_silently_dropped():
+    """v1.3.2 tolerant filter: a required-λ range entirely outside
+    the disperser/filter's wavelength bounds is **ignored** at
+    evaluator-init time, not enforced.
+
+    Before v1.3.2 this would drop every detected source as
+    `required_lam`. After: the impossible range is filtered out
+    silently and the source's effective constraint becomes
+    "no required λ" — same outcome as the unconstrained baseline.
+
+    The filter count is stashed on the evaluator as
+    `_required_lam_dropped` for diagnostics.
+    """
     ra, dec = grid_sources(n=50)
     ev_base = PointingEvaluator(ra, dec, centration="UNCONSTRAINED")
     det_base, _, _ = ev_base.evaluate(**FIDUCIAL)
@@ -264,8 +274,56 @@ def test_required_lam_outside_disperser_drops_all():
         required_lam=ragged_lam_req(len(ra), [(6.0, 7.0)]),
         disperser="PRISM", filt="CLEAR",
     )
-    _, _, _, reasons = ev.evaluate_with_reasons(**FIDUCIAL)
-    assert reasons[DROP_REQUIRED_LAM] == n_base
+    det, _, _, reasons = ev.evaluate_with_reasons(**FIDUCIAL)
+    # No drops attributable to required_lam — the range was filtered.
+    assert reasons[DROP_REQUIRED_LAM] == 0
+    # Filter bookkeeping: every source's single range was dropped.
+    assert ev._required_lam_dropped == len(ra)
+    # Behaviour matches the constraint-free baseline.
+    assert int(det.sum()) == n_base
+
+
+def test_required_lam_partial_overlap_kept():
+    """A range that PARTIALLY overlaps the disperser's bounds is
+    NOT filtered — the existing per-pointing check then enforces
+    whatever fraction of the range falls on the detector.
+
+    Range [4.0, 6.0] under PRISM (0.60–5.30 μm): the upper half is
+    outside the disperser, but the lower half is inside, so we keep
+    the range and let the normal constraint check decide per source.
+    """
+    ra, dec = grid_sources(n=20)
+    ev = PointingEvaluator(
+        ra, dec, centration="UNCONSTRAINED",
+        required_lam=ragged_lam_req(len(ra), [(4.0, 6.0)]),
+        disperser="PRISM", filt="CLEAR",
+    )
+    assert ev._required_lam_dropped == 0
+    # The range survives the filter — at least one source carries it.
+    assert any(
+        len(ev._required_lam[i]) > 0 for i in range(len(ra))
+    )
+
+
+def test_required_lam_mixed_ranges_only_impossible_dropped():
+    """When a source has multiple ranges, ONLY the impossible-under-
+    disperser ones are silently dropped; satisfiable ranges survive
+    and the per-pointing check enforces them as usual."""
+    ra, dec = grid_sources(n=15)
+    # Ranges per source: one inside PRISM (kept), one outside (dropped).
+    ranges_per_src = [(1.0, 1.2), (6.0, 7.0)]
+    ev = PointingEvaluator(
+        ra, dec, centration="UNCONSTRAINED",
+        required_lam=ragged_lam_req(len(ra), ranges_per_src),
+        disperser="PRISM", filt="CLEAR",
+    )
+    # Each source had 1 of its 2 ranges dropped → total = N.
+    assert ev._required_lam_dropped == len(ra)
+    # The surviving range matches the in-disperser one.
+    for i in range(len(ra)):
+        kept = ev._required_lam[i]
+        assert len(kept) == 1
+        assert kept[0] == (1.0, 1.2)
 
 
 def test_required_lam_inside_keeps_all():

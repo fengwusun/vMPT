@@ -597,6 +597,11 @@ cat_edit_table = DataTable(
         TableColumn(field="dec",      title="Dec (deg)",editor=StringEditor(), width=110),
         TableColumn(field="priority", title="Priority", editor=StringEditor(), width=80),
         TableColumn(field="mag",      title="Mag",      editor=StringEditor(), width=80),
+        # `z` is stored as float; the float HTML formatter is added by
+        # `_cat_edit_rebuild_columns()` (same pattern priority/weight
+        # follow with their int formatter). Static init is plain
+        # StringEditor with no formatter — only ever visible before the
+        # first rebuild, which runs as part of the catalog load.
         TableColumn(field="z",        title="z",        editor=StringEditor(), width=80),
         TableColumn(field="label",    title="Label",    editor=StringEditor(), width=150),
         # Per-row Constraints button. Always visible — the column
@@ -1429,6 +1434,18 @@ overlay_alpha_slider = Slider(
 overlay_stroke_slider = Slider(
     start=0.0, end=3.0, step=0.05, value=1.0,
     title="Stroke (px)",
+    width=SIDEBAR_W - 40,
+)
+
+# Canvas size — controls the LONGER pixel dimension of the image
+# frame inside the figure. `refresh_image_glyph()` reads this from
+# state["frame_max"]; the other dimension is computed from the
+# image's W:H so pixels stay square (match_aspect=True) and the MSA
+# overlay's data range stays in 1:1 aspect with the image. Default
+# 800 px = pre-v1.3.2 behaviour.
+canvas_size_slider = Slider(
+    start=400, end=1600, step=50, value=800,
+    title="Canvas size (longer dim, px)",
     width=SIDEBAR_W - 40,
 )
 
@@ -2700,7 +2717,9 @@ def refresh_image_glyph() -> None:
         # Constrain the canvas so neither dimension exceeds FRAME_MAX.
         # Whichever image axis is longer becomes FRAME_MAX; the other
         # shrinks proportionally to preserve W:H exactly.
-        FRAME_MAX = 800
+        # User-adjustable via the Settings tab slider (state-backed
+        # so the value survives image reloads). Default 800.
+        FRAME_MAX = int(state.get("frame_max", 800))
         if W >= H:
             fig.frame_width = FRAME_MAX
             fig.frame_height = int(round(FRAME_MAX * H / W))
@@ -4619,6 +4638,31 @@ overlay_alpha_slider.on_change("value", _on_overlay_alpha)
 overlay_stroke_slider.on_change("value", _on_overlay_stroke)
 
 
+def _on_canvas_size(attr, old, new):
+    """Resize the figure frame in response to the Settings slider.
+
+    Stash the value on `state` so :func:`refresh_image_glyph` picks
+    it up on every image reload, then call it once to apply the new
+    size right away if an image is loaded. The user sees the canvas
+    grow / shrink immediately; pixel aspect (`match_aspect=True`)
+    keeps image pixels square and the MSA-shutter overlay's data
+    range scaled in lockstep.
+    """
+    try:
+        v = int(new)
+    except (TypeError, ValueError):
+        return
+    # Clamp to the slider's nominal range to defend against script
+    # access. The slider widget itself enforces these bounds.
+    v = max(400, min(1600, v))
+    state["frame_max"] = v
+    if state.get("image") is not None:
+        refresh_image_glyph()
+
+
+canvas_size_slider.on_change("value", _on_canvas_size)
+
+
 # ---------------------------------------------------------------------------
 # Drag-pointing handle and double-tap highlight
 # ---------------------------------------------------------------------------
@@ -5024,7 +5068,16 @@ def _cat_edit_populate_table(idx: int) -> None:
             priority=[float(v) for v in cat.priority],
             weight=[float(v) for v in weight_arr],
             mag=[_cat_edit_fmt_optional(v) for v in cat.mag],
-            z=[_cat_edit_fmt_optional(v) for v in cat.z],
+            # `z` stored as FLOAT (NaN for missing) so SlickGrid
+            # sorts the column numerically — same pattern priority +
+            # weight follow. The HTMLTemplateFormatter at the table
+            # column level renders 3 decimals + blanks NaN; the
+            # data-change handler coerces user-typed strings back to
+            # float on edit commit. v1.3.2+.
+            z=[float(v) if (isinstance(v, (int, float))
+                            and np.isfinite(float(v)))
+               else float("nan")
+               for v in cat.z],
             label=[str(v) for v in (cat.label if cat.label is not None
                                     else [""] * n)],
             _idx=list(range(n)),
@@ -5076,6 +5129,18 @@ _INT_OR_BLANK_TEMPLATE = (
     "    ? '' "
     "    : (typeof value === 'number' ? Math.round(value) : value) %>"
 )
+# Like `_INT_OR_BLANK_TEMPLATE` but renders 3 decimal places instead
+# of rounding to int — used for the redshift `z` column (v1.3.2+),
+# which is stored as float so SlickGrid sorts numerically. A
+# transient string-typed value (right after a user commits an edit
+# but before the data-change handler coerces it back to float) is
+# shown verbatim so the user sees their typed text.
+_FLOAT_OR_BLANK_TEMPLATE = (
+    "<%= (value === null || value === undefined || value === '' || "
+    "     (typeof value === 'number' && isNaN(value))) "
+    "    ? '' "
+    "    : (typeof value === 'number' ? value.toFixed(3) : value) %>"
+)
 
 
 def _cat_edit_rebuild_columns() -> None:
@@ -5104,6 +5169,8 @@ def _cat_edit_rebuild_columns() -> None:
 
     cols: list = []
     int_fmt = HTMLTemplateFormatter(template=_INT_OR_BLANK_TEMPLATE)
+    # 3-decimal float formatter for the redshift column.
+    float_fmt = HTMLTemplateFormatter(template=_FLOAT_OR_BLANK_TEMPLATE)
     # Standard columns first, in their fixed order.
     for c in _CAT_STD_COLS:
         if _CAT_STD_TITLES[c] in visible_titles:
@@ -5113,6 +5180,8 @@ def _cat_edit_rebuild_columns() -> None:
             )
             if c in ("priority", "weight"):
                 col_kwargs["formatter"] = int_fmt
+            elif c == "z":
+                col_kwargs["formatter"] = float_fmt
             cols.append(TableColumn(**col_kwargs))
     # Extras in CSV order.
     for k in extras:
@@ -5275,9 +5344,13 @@ def _on_cat_edit_data_change(attr, old, new):
     _cat_edit_render_history()
 
     # Coerce any string entries in the numeric columns back to float.
+    # priority + weight + z are all float-stored so SlickGrid sorts
+    # them numerically; StringEditor commits a string on every cell
+    # edit and we coerce here so the column doesn't drift to mixed
+    # types (which silently re-enables lexicographic sort).
     needs_fix = False
     new_dict = {k: list(v) for k, v in new.items()}
-    for col in ("priority", "weight"):
+    for col in ("priority", "weight", "z"):
         if col not in new_dict:
             continue
         vals = new_dict[col]
@@ -5556,6 +5629,27 @@ def _fmt_int_or_blank(v) -> str:
         return "" if v is None else str(v).strip()
 
 
+def _fmt_float_or_blank(v) -> str:
+    """Render a float/int/string cell value as a clean float string.
+    NaN / None / empty → "". Trailing zeros / trailing decimal point
+    are stripped so the CSV stays tidy for hand-editing. Used by CSV
+    save for `z` (v1.3.2+) which is float-stored in the editor."""
+    try:
+        if isinstance(v, str):
+            s = v.strip()
+            if not s or s.lower() in ("nan", "none", "null", "--"):
+                return ""
+            f = float(s)
+        else:
+            f = float(v)
+        if not np.isfinite(f):
+            return ""
+        s = f"{f:.6f}".rstrip("0").rstrip(".")
+        return s or "0"
+    except (ValueError, TypeError):
+        return "" if v is None else str(v).strip()
+
+
 def _on_cat_edit_save_csv():
     """Write the working copy to CSV at the user-supplied path."""
     path = (cat_edit_csv_path_input.value or "").strip()
@@ -5603,7 +5697,10 @@ def _on_cat_edit_save_csv():
                     data["id"][i], data["ra"][i], data["dec"][i],
                     _fmt_int_or_blank(data["priority"][i]),
                     _fmt_int_or_blank(weights[i]),
-                    data["mag"][i], data["z"][i],
+                    # mag is still string-stored in the editor; z
+                    # became float in v1.3.2 so we format it like a
+                    # float (3+ decimals, NaN → blank).
+                    data["mag"][i], _fmt_float_or_blank(data["z"][i]),
                     data["label"][i],
                 ]
                 for k in constraint_cols:
@@ -7416,6 +7513,8 @@ pick_tab = TabPanel(title="Settings", child=column(
     overlay_layer_select,
     overlay_alpha_slider,
     overlay_stroke_slider,
+    Div(text="<b>Canvas</b>"),
+    canvas_size_slider,
     Div(text="<b>Customise display</b>"),
     stats_bar_open_btn,
     catalog_hover_open_btn,
