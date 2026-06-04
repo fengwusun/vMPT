@@ -5,6 +5,7 @@ Run:  bokeh serve vmpt/ --show   (or `vmpt` after `pip install jwst-vmpt`)
 from __future__ import annotations
 
 import base64
+import os
 import re
 import sys
 import tempfile
@@ -2719,15 +2720,27 @@ def refresh_image_glyph() -> None:
     arr = _image_array_for_bokeh(img)
     H, W = arr.shape
     src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
-    # Re-fit figure ranges to the new image's pixel extent. We use a
-    # single atomic update per axis (via `.update()`) so match_aspect's
-    # aspect-locking pass sees a coherent change and re-evaluates the
-    # constraint. Setting `.start` and `.end` separately on DataRange1d
-    # can leave the ranges in an intermediate state where match_aspect
-    # doesn't fire — that was the "switch from A370 to a JPG and the
-    # aspect comes out wrong" bug.
-    fig.x_range.update(start=0, end=W)
-    fig.y_range.update(start=0, end=H)
+    # Let DataRange1d auto-bound to the new image glyph's extent and
+    # let `match_aspect=True` on the figure do its job of enforcing
+    # 1:1 pixel aspect (one data unit in x renders at the same screen
+    # size as one data unit in y).
+    #
+    # Pinning explicit start/end on BOTH axes (the pre-v1.3.2 pattern)
+    # silently disabled match_aspect whenever the canvas aspect
+    # (`frame_width:frame_height`) didn't match the image's W:H —
+    # Bokeh can only satisfy fixed-on-both-axes data ranges OR
+    # match_aspect, not both. After the X/Y canvas split (v1.3.2),
+    # the canvas is almost never the image's W:H, so match_aspect
+    # would silently fail and the image would render stretched to
+    # fill the frame (visibly squashed for rectangular images).
+    #
+    # Setting `start=None, end=None` resets the DataRange1d to its
+    # auto-bound mode; combined with `range_padding=0` we get the
+    # union extent of all renderers (image + MSA outline + catalog
+    # targets, all in the image's pixel-coord frame). match_aspect
+    # then expands whichever range is short so pixels stay square.
+    fig.x_range.update(start=None, end=None, range_padding=0)
+    fig.y_range.update(start=None, end=None, range_padding=0)
     # Lock the canvas frame pixel dimensions to the image's W:H so 1
     # image pixel = (FRAME_SCALE × W / max(W, H)) screen pixels,
     # consistently in X and Y. Window resizes leave these alone —
@@ -4093,18 +4106,27 @@ def _build_current_session() -> Session:
 
 
 def on_session_save():
+    """Save the current session JSON to the user-supplied path.
+
+    Wrapped in `_confirm_overwrite_if_exists` so the user is asked
+    before clobbering an existing session file. v1.3.3+.
+    """
     path = session_save_path_input.value.strip()
     if not path:
         _set_status("Set a session save path first.", "warn")
         return
     p = Path(path).expanduser()
-    p.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        export_session_json(_build_current_session(), str(p))
-        _set_status(f"Session saved → {p}", "ok", clear_after=10)
-    except Exception as e:  # noqa: BLE001
-        _set_status(f"Session save failed: {e}", "err")
-        traceback.print_exc()
+
+    def _do_save():
+        p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            export_session_json(_build_current_session(), str(p))
+            _set_status(f"Session saved → {p}", "ok", clear_after=10)
+        except Exception as e:  # noqa: BLE001
+            _set_status(f"Session save failed: {e}", "err")
+            traceback.print_exc()
+
+    _confirm_overwrite_if_exists(p, _do_save, what="session JSON")
 
 
 def _resolve_jpg_sidecar(jpg_path: Path, recorded: Optional[str]) -> Optional[str]:
@@ -5687,7 +5709,11 @@ def _fmt_float_or_blank(v) -> str:
 
 
 def _on_cat_edit_save_csv():
-    """Write the working copy to CSV at the user-supplied path."""
+    """Write the working copy to CSV at the user-supplied path.
+
+    Wrapped in `_confirm_overwrite_if_exists` so the user gets a
+    confirmation dialog when the target path already exists. v1.3.3+.
+    """
     path = (cat_edit_csv_path_input.value or "").strip()
     if not path:
         _set_status("Enter a save path first.", "warn")
@@ -5698,6 +5724,17 @@ def _on_cat_edit_save_csv():
         _set_status("Nothing to save — table is empty.", "warn")
         return
     p = Path(path).expanduser()
+
+    def _do_save():
+        _cat_edit_save_csv_to(p, data, n)
+
+    _confirm_overwrite_if_exists(p, _do_save, what="CSV")
+
+
+def _cat_edit_save_csv_to(p: Path, data: dict, n: int) -> None:
+    """Inner CSV writer extracted from `_on_cat_edit_save_csv` so the
+    overwrite-confirmation flow can call it either directly (when the
+    path is new) or after the user confirms (when it exists)."""
     p.parent.mkdir(parents=True, exist_ok=True)
     try:
         import csv as _csv
@@ -7599,6 +7636,129 @@ catalog_hover_modal_card = column(
 )
 
 
+# ── Overwrite-confirmation modal (v1.3.3+) ───────────────────────────────
+# Shown when a Save-as-CSV or Save-session would clobber an existing
+# file. Lists the path(s) being overwritten, defaults to Cancel
+# (safer), and only proceeds with the queued callback when the user
+# explicitly clicks "Overwrite". For new paths the modal is bypassed
+# entirely — same UX as before.
+overwrite_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.45)",
+        # Stacks above the catalog-editor backdrop (z-index 999) so a
+        # save from inside the editor still shows the confirmation
+        # on top of the table.
+        "z-index": "1020",
+    },
+)
+overwrite_modal_title = Div(
+    text="<h3 style='margin:0 0 4px 0; color:#a04030'>"
+         "Overwrite existing file?</h3>",
+    width=520,
+)
+overwrite_modal_body = Div(text="", width=520)
+overwrite_modal_yes_btn = Button(
+    label="Overwrite", button_type="danger", width=140,
+)
+overwrite_modal_no_btn = Button(
+    label="Cancel", button_type="default", width=80,
+)
+overwrite_modal_card = column(
+    overwrite_modal_title,
+    overwrite_modal_body,
+    row(overwrite_modal_yes_btn, overwrite_modal_no_btn, spacing=10),
+    spacing=10,
+    width=560,
+    visible=False,
+    css_classes=["vmpt-draggable-modal"],
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 18px",
+        "z-index": "1021",
+    },
+)
+
+# Stash the pending callback here while the user decides. Keying by a
+# dict (not a closure variable) so the JS-free Python handlers stay
+# composable.
+_overwrite_pending: dict = {"callback": None}
+
+
+def _confirm_overwrite_if_exists(paths, callback, what: str = "file") -> None:
+    """If any of `paths` already exists, show the overwrite modal and
+    only call `callback()` when the user confirms. Otherwise call
+    `callback()` immediately.
+
+    Parameters
+    ----------
+    paths : str | iterable[str]
+        Path(s) that the save operation is about to write. Strings
+        get expanded with ~ resolution.
+    callback : callable
+        Zero-argument function that performs the actual write.
+    what : str
+        Short label used in the modal (e.g. "CSV", "session JSON").
+        Defaults to "file".
+    """
+    if isinstance(paths, (str, os.PathLike)):
+        paths = [paths]
+    expanded = [Path(p).expanduser() for p in paths]
+    existing = [p for p in expanded if p.exists()]
+    if not existing:
+        callback()
+        return
+    if len(existing) == 1:
+        body = (
+            f"<p>The {what} already exists at:</p>"
+            f"<p><code>{existing[0]}</code></p>"
+            f"<p>Click <b>Overwrite</b> to replace it, or "
+            f"<b>Cancel</b> to keep the existing file and pick a "
+            f"different path.</p>"
+        )
+    else:
+        items = "".join(f"<li><code>{p}</code></li>" for p in existing)
+        body = (
+            f"<p>{len(existing)} {what}s already exist:</p>"
+            f"<ul>{items}</ul>"
+            f"<p>Click <b>Overwrite</b> to replace them all, or "
+            f"<b>Cancel</b>.</p>"
+        )
+    overwrite_modal_body.text = body
+    _overwrite_pending["callback"] = callback
+    overwrite_modal_backdrop.visible = True
+    overwrite_modal_card.visible = True
+
+
+def _on_overwrite_yes() -> None:
+    cb = _overwrite_pending["callback"]
+    _overwrite_pending["callback"] = None
+    overwrite_modal_backdrop.visible = False
+    overwrite_modal_card.visible = False
+    if cb is not None:
+        cb()
+
+
+def _on_overwrite_no() -> None:
+    _overwrite_pending["callback"] = None
+    overwrite_modal_backdrop.visible = False
+    overwrite_modal_card.visible = False
+    _set_status("Save cancelled — existing file preserved.", "info",
+                clear_after=10)
+
+
+overwrite_modal_yes_btn.on_click(_on_overwrite_yes)
+overwrite_modal_no_btn.on_click(_on_overwrite_no)
+
+
 def _open_stats_bar_modal(_e=None) -> None:
     stats_bar_modal_backdrop.visible = True
     stats_bar_modal_card.visible = True
@@ -7825,6 +7985,11 @@ curdoc().add_root(stats_bar_modal_backdrop)
 curdoc().add_root(stats_bar_modal_card)
 curdoc().add_root(catalog_hover_modal_backdrop)
 curdoc().add_root(catalog_hover_modal_card)
+# Overwrite-confirmation modal — gates Save-as-CSV and Save-session
+# from clobbering existing files. Lives at z-index 1020/1021 so it
+# stacks above every other modal.
+curdoc().add_root(overwrite_modal_backdrop)
+curdoc().add_root(overwrite_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.
