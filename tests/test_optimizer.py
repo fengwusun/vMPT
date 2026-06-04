@@ -219,6 +219,61 @@ def test_per_target_centration_blank_uses_global():
         )
 
 
+def test_catalog_centration_array_truthiness_regression():
+    """Regression for v1.3.4 crash:
+
+      File "vmpt/main.py", line 7392, in on_optimize
+          _cent_full = np.asarray(getattr(cat, "centration", None) or [],
+      ValueError: The truth value of an array with more than one
+          element is ambiguous. Use a.any() or a.all()
+
+    The fix has to live in ``on_optimize``, which is wired up to
+    Bokeh widgets and not easy to import standalone, so this test
+    pins the failure shape at the layer below — a Catalog with a
+    multi-element `centration` numpy array must be transparently
+    usable wherever the optimizer driver touches it.
+    """
+    from vmpt.catalog import Catalog
+
+    # Five-source catalog with mixed centration overrides — enough
+    # to trigger the `bool(arr)` ambiguity if anyone uses
+    # `cat.centration or []` again.
+    n = 5
+    cat = Catalog(
+        ids=np.arange(1, n + 1),
+        ra_deg=53.16 + 0.001 * np.arange(n),
+        dec_deg=-27.78 - 0.001 * np.arange(n),
+        priority=np.ones(n),
+        weight=np.ones(n),
+        mag=np.full(n, 24.0),
+        z=np.full(n, 1.0),
+        label=np.array([f"src{i}" for i in range(n)], dtype=object),
+        centration=np.array([
+            "TIGHTLY_CONSTRAINED", "", "CONSTRAINED", "", "ENTIRE_OPEN",
+        ], dtype=object),
+        source_path="",
+    )
+    # The bug fires on any code path that does
+    #   `arr = getattr(cat, "centration", None) or fallback`
+    # Pin the safe pattern: the array must coerce to np.asarray
+    # without triggering bool() on it.
+    cent_raw = getattr(cat, "centration", None)
+    assert cent_raw is not None
+    arr = np.asarray(cent_raw, dtype=object)
+    assert arr.shape == (n,)
+
+    # And it must drive PointingEvaluator end-to-end without
+    # crashing. evaluate() is the same call the optimizer driver
+    # makes for every grid point.
+    ev = PointingEvaluator(
+        cat.ra_deg, cat.dec_deg,
+        centration="UNCONSTRAINED",
+        centration_per_target=cat.centration,
+    )
+    det, _, _ = ev.evaluate(53.16, -27.78, 30.0)
+    assert det.shape == (n,)
+
+
 # ---------------------------------------------------------------------
 # Grid search + DE
 # ---------------------------------------------------------------------

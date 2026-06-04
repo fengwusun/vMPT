@@ -7389,8 +7389,16 @@ def on_optimize():
     # Per-target centration override (v1.3.1+). Strings (not bools),
     # so we can't reuse `_slice_or_default`. Treat missing / wrong-
     # length as all-empty (= use the global setting for every row).
-    _cent_full = np.asarray(getattr(cat, "centration", None) or [],
-                            dtype=object)
+    #
+    # NB: `getattr(...) or []` triggers `bool(arr)` on a numpy array,
+    # which raises `ValueError: The truth value of an array with more
+    # than one element is ambiguous` whenever the catalog has 2+
+    # sources. Check `is None` explicitly instead.
+    _cent_raw = getattr(cat, "centration", None)
+    if _cent_raw is None:
+        _cent_full = np.array([], dtype=object)
+    else:
+        _cent_full = np.asarray(_cent_raw, dtype=object)
     if _cent_full.size != len(cat.ra_deg):
         _cent_full = np.array([""] * len(cat.ra_deg), dtype=object)
     centration_per_target_arr = (
