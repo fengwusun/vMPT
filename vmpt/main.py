@@ -6782,17 +6782,24 @@ slitlet_select.on_change("value", on_slitlet_height)
 
 def _on_stats_bar_choice(attr, old, new):
     """Translate the picker's value list (display labels) back into
-    the cell-key list that `refresh_overlays_light` reads from
-    ``state["stats_bar_order"]`` and trigger a redraw."""
+    the cell-key list that ``refresh_overlays`` reads from
+    ``state["stats_bar_order"]`` and trigger a redraw.
+
+    Note: must call the FULL :func:`refresh_overlays`, not the
+    "light" variant — the stats bar HTML is built at the tail end
+    of the full refresh (after all the per-shutter computation).
+    The light variant only redraws the cheap glyphs (MSA outline,
+    fixed slits, pointing handle) and does not touch ``stats_div``.
+    The user only retoggles cells occasionally, so the extra cost
+    is invisible in practice.
+    """
     keys = [
         _STATS_BAR_LABEL_TO_KEY[label]
         for label in (new or [])
         if label in _STATS_BAR_LABEL_TO_KEY
     ]
     state["stats_bar_order"] = keys
-    # Lightweight refresh — only the stats div needs rebuilding;
-    # everything else on the canvas is unaffected by reordering.
-    refresh_overlays_light()
+    refresh_overlays()
 
 
 stats_bar_choice.on_change("value", _on_stats_bar_choice)
