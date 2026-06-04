@@ -112,6 +112,18 @@ specific source:
   matching row from the catalog-wide cutoff in the optimizer
   modal) makes a target collision-protected.
 
+`Source centering override` (v1.3.1+)
+: Dropdown with the same five labels as the optimizer modal's
+  global Source-centering Select (UNCONSTRAINED, ENTIRE_OPEN,
+  MIDPOINT, CONSTRAINED, TIGHTLY_CONSTRAINED), plus
+  `(use global)` (the default). Whatever you pick here wins
+  **unconditionally** over the global setting **for this one row**
+  — even when it's laxer than the global. The optimizer modal
+  shows a small italic count under the global Select (e.g.
+  *"3 sources have a per-target centering override — those rows
+  ignore this setting."*) so the overrides aren't invisible at
+  run time.
+
 When you click **Apply** the popover's values get written into the
 editor's working copy and a single undo entry is pushed. The Edit…
 button colour flips to blue for that row.
@@ -128,7 +140,7 @@ two clicks:
 3. On reload, point the **Catalog path** at that CSV. Constraints
    come back exactly as written.
 
-The CSV writer emits five extra columns when any row has a
+The CSV writer emits six extra columns when any row has a
 constraint set:
 
 | Column | Type | Empty means |
@@ -138,10 +150,17 @@ constraint set:
 | `extend_blue` | `1` / blank | False |
 | `extend_red` | `1` / blank | False |
 | `protect` | `1` / blank | False |
+| `centration` | one of the 5 labels / blank | use global (no override) |
 
 When **no** row in the catalog has a constraint set, the writer
 **omits** these columns — the CSV stays in the v1.2.x format so
 old workflows that read the catalog elsewhere don't break.
+
+The `centration` column accepts the five canonical labels
+(`UNCONSTRAINED`, `ENTIRE_OPEN`, `MIDPOINT`, `CONSTRAINED`,
+`TIGHTLY_CONSTRAINED`) plus loose aliases like `tight`,
+`tightly-constrained`, `unc`, `mid`. Anything unrecognised
+silently loads as blank (= use global).
 
 You can also build / save catalogs programmatically:
 

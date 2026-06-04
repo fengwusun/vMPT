@@ -409,6 +409,15 @@ opt_centration_select = Select(
     value="UNCONSTRAINED",
     width=SIDEBAR_W - 20,
 )
+# Per-target centration override hint (v1.3.1+). Lives directly under
+# `opt_centration_select` in the optimizer modal; populated by
+# `_refresh_centration_override_hint()` whenever the catalog changes
+# (catalog load, editor Apply, session reload). Empty unless ≥1 row
+# carries a non-blank `centration` field.
+opt_centration_override_hint = Div(
+    text="",
+    width=SIDEBAR_W - 20,
+)
 opt_priority_input = TextInput(
     title="Priority cutoff ≤ (blank = all)", value="", placeholder="e.g. 1",
     width=SIDEBAR_W - 20,
@@ -838,6 +847,30 @@ cat_constraints_checks = CheckboxGroup(
     active=[],
     width=420,
 )
+# Per-target source-centering override (v1.3.1+). "(use global)" → ""
+# in storage; the rest are the same five labels as the optimizer's
+# global Source-centering Select. The override is **unconditional** —
+# whatever the user picks here wins, even when it's laxer than the
+# global setting.
+cat_constraints_centration_select = Select(
+    title="Source centering override (blank = use optimizer global)",
+    options=[
+        "(use global)",
+        "UNCONSTRAINED",
+        "ENTIRE_OPEN",
+        "MIDPOINT",
+        "CONSTRAINED",
+        "TIGHTLY_CONSTRAINED",
+    ],
+    value="(use global)",
+    width=420,
+)
+cat_constraints_centration_hint = Div(
+    text="<small style='color:#5a6b85'>"
+         "Wins over the optimizer's global Source-centering "
+         "setting for this row only.</small>",
+    width=420,
+)
 cat_constraints_apply_btn = Button(
     label="Apply", button_type="primary", width=80,
 )
@@ -862,6 +895,8 @@ cat_constraints_modal_card = column(
     cat_constraints_lam_input,
     cat_constraints_lam_warn,
     cat_constraints_checks,
+    cat_constraints_centration_select,
+    cat_constraints_centration_hint,
     row(cat_constraints_apply_btn, cat_constraints_cancel_btn, spacing=10),
     spacing=10,
     width=460,
@@ -947,6 +982,7 @@ opt_config_modal_card = column(
     row(opt_dra_input, opt_ddec_input, spacing=12),
     row(opt_dpa_input, opt_n_top_input, spacing=12),
     opt_centration_select,
+    opt_centration_override_hint,
     opt_priority_input,
     opt_protect_section_div,
     opt_protect_enable_cb,
@@ -2473,6 +2509,19 @@ def refresh_overlays() -> None:
         ext_b = np.asarray(getattr(cat, "extend_blue", []), dtype=bool)
         ext_r = np.asarray(getattr(cat, "extend_red", []), dtype=bool)
         prot = np.asarray(getattr(cat, "protect", []), dtype=bool)
+        cent = np.asarray(
+            getattr(cat, "centration", []), dtype=object,
+        )
+
+        # Single-letter shorthand for the per-target centration label
+        # used in the hover-summary glyph. Anything that doesn't match
+        # falls back to "?" — defensive; the loader normalises so this
+        # branch shouldn't fire in practice.
+        _CENTR_SHORT = {
+            "UNCONSTRAINED": "U", "ENTIRE_OPEN": "E",
+            "MIDPOINT": "M", "CONSTRAINED": "C",
+            "TIGHTLY_CONSTRAINED": "T",
+        }
 
         def _constr_glyph(i: int) -> str:
             tags: list[str] = []
@@ -2490,6 +2539,10 @@ def refresh_overlays() -> None:
                 tags.append("R")
             if prot.size > i and bool(prot[i]):
                 tags.append("🛡")
+            if cent.size > i:
+                c = str(cent[i]).strip()
+                if c:
+                    tags.append("C:" + _CENTR_SHORT.get(c.upper(), "?"))
             return "·".join(tags)
 
         rows_mask = np.where(mask)[0]
@@ -2906,6 +2959,22 @@ def _rebuild_merged_catalog() -> None:
     extend_blue_merged = _pad_bool_per_cat("extend_blue")
     extend_red_merged = _pad_bool_per_cat("extend_red")
     protect_merged = _pad_bool_per_cat("protect")
+
+    # Per-target centration override (v1.3.1+). Strings (not bools),
+    # so it gets its own merge helper — pad missing/short entries
+    # with "" (= use the global optimizer setting).
+    def _pad_centration_per_cat() -> np.ndarray:
+        chunks = []
+        for c in cats:
+            arr = getattr(c, "centration", None)
+            arr = (np.asarray(arr, dtype=object) if arr is not None
+                   else np.array([], dtype=object))
+            if arr.size != len(c.ra_deg):
+                arr = np.array([""] * len(c.ra_deg), dtype=object)
+            chunks.append(arr)
+        return (np.concatenate(chunks) if chunks
+                else np.array([], dtype=object))
+    centration_merged = _pad_centration_per_cat()
     colors = np.concatenate([
         np.full(len(e["catalog"].ra_deg), e["color"], dtype=object)
         for e in ordered_for_draw
@@ -2926,6 +2995,7 @@ def _rebuild_merged_catalog() -> None:
         extend_blue=extend_blue_merged,
         extend_red=extend_red_merged,
         protect=protect_merged,
+        centration=centration_merged,
         source_path=" + ".join(c.source_path for c in cats),
     )
     state["catalog_colors"] = colors
@@ -2937,6 +3007,13 @@ def _rebuild_merged_catalog() -> None:
     # initial autoload doesn't hit a forward-reference error.
     try:
         _refresh_opt_status_div()
+    except NameError:
+        pass
+    # Refresh the per-target centration-override hint in the optimizer
+    # modal. Gated for the same forward-reference reason — defined
+    # later in the file.
+    try:
+        _refresh_centration_override_hint()
     except NameError:
         pass
 
@@ -4747,6 +4824,13 @@ def _open_opt_config_modal():
     # Refresh the status text every time the modal opens so it
     # reflects the catalog + method state the user is about to see.
     _refresh_opt_status_div()
+    # Same idea for the per-target centration-override hint — the
+    # catalog may have changed since the modal was last opened (editor
+    # Apply, session reload, multi-catalog Add/Remove).
+    try:
+        _refresh_centration_override_hint()
+    except NameError:
+        pass
     opt_config_modal_backdrop.visible = True
     opt_config_modal_card.visible = True
 
@@ -4766,6 +4850,37 @@ opt_config_top_close_btn.on_click(_close_opt_config_modal)
 opt_method_select.on_change(
     "value", lambda attr, old, new: _refresh_opt_status_div(),
 )
+
+
+def _refresh_centration_override_hint() -> None:
+    """Update the per-target centration-override hint Div under the
+    optimizer modal's Source-centering Select.
+
+    Counts how many catalog rows have a non-empty ``centration`` value;
+    if ≥1, shows ``N sources have per-target centering overrides —
+    those rows ignore this setting.`` Empty otherwise. Same triggers
+    as ``_refresh_opt_status_div`` (catalog load / remove, editor
+    Apply, session reload).
+    """
+    cat = state.get("catalog") if state else None
+    if cat is None:
+        opt_centration_override_hint.text = ""
+        return
+    cent = np.asarray(
+        getattr(cat, "centration", []), dtype=object,
+    )
+    n_overrides = sum(1 for v in cent if str(v).strip())
+    if n_overrides == 0:
+        opt_centration_override_hint.text = ""
+        return
+    word_source = "source" if n_overrides == 1 else "sources"
+    word_verb = "has" if n_overrides == 1 else "have"
+    opt_centration_override_hint.text = (
+        "<small style='color:#5a6b85; font-style:italic'>"
+        f"{n_overrides} {word_source} {word_verb} a per-target "
+        "centering override — those rows ignore this setting."
+        "</small>"
+    )
 
 
 # ── Catalog editor handlers ──────────────────────────────────────────────
@@ -4878,10 +4993,21 @@ def _cat_edit_populate_table(idx: int) -> None:
                 lam_req_list.append(_fmt_lam_req(entry))
         else:
             lam_req_list = ["" for _ in range(n)]
+        # Per-target centration override (v1.3.1+) — empty string means
+        # "use the optimizer's global Source-centering setting". Pad to
+        # length n with "" when the Catalog dataclass field is missing
+        # or has the wrong length.
+        centration_arr = np.asarray(
+            getattr(cat, "centration", []), dtype=object,
+        )
+        if centration_arr.size != n:
+            centration_list = ["" for _ in range(n)]
+        else:
+            centration_list = [str(v).strip() for v in centration_arr]
         has_constraint_list = [
             int(bool(lam_req_list[i]) or no_gap_list[i] or
                 extend_blue_list[i] or extend_red_list[i]
-                or protect_list[i])
+                or protect_list[i] or bool(centration_list[i]))
             for i in range(n)
         ]
         # Priority and weight are stored as FLOATS (NaN for missing)
@@ -4908,6 +5034,7 @@ def _cat_edit_populate_table(idx: int) -> None:
             extend_blue=extend_blue_list,
             extend_red=extend_red_list,
             protect=protect_list,
+            centration=centration_list,
             _has_constraint=has_constraint_list,
         )
         # Add every extras column verbatim (already object arrays of
@@ -4966,6 +5093,7 @@ def _cat_edit_rebuild_columns() -> None:
         # Constraint values surface via the dedicated Constraints…
         # popover, not as inline-editable columns.
         "lam_req", "no_gap", "extend_blue", "extend_red", "protect",
+        "centration",
     )
     # Extras: any source-data key not in the standard set + not
     # internal.
@@ -5323,6 +5451,7 @@ def _on_cat_edit_apply():
     _NON_EXTRAS = set(_CAT_STD_COLS) | {
         "_idx", "_has_constraint",
         "lam_req", "no_gap", "extend_blue", "extend_red", "protect",
+        "centration",
     }
     for k in src_keys:
         if k in _NON_EXTRAS:
@@ -5355,6 +5484,20 @@ def _on_cat_edit_apply():
                            else False
                            for v in col[:n]], dtype=bool)
 
+    def _centration_col_from_editor(
+        editor_data: dict, n_rows: int,
+    ) -> np.ndarray:
+        """Build a length-N object array of centration labels from the
+        editor's working source. Empty / unrecognised cells normalise
+        to ``""``. Used by `_cat_edit_apply_to_catalog`."""
+        from vmpt.catalog import _normalise_centration
+        col = editor_data.get("centration", [""] * n_rows)
+        out = np.empty(n_rows, dtype=object)
+        for i in range(n_rows):
+            v = col[i] if i < len(col) else ""
+            out[i] = _normalise_centration(v)
+        return out
+
     new_cat = Catalog(
         ids=np.asarray(ids_out, dtype=object),
         ra_deg=np.asarray([_str_to_float_or_nan(v) for v in data["ra"]],
@@ -5375,6 +5518,10 @@ def _on_cat_edit_apply():
         extend_blue=_bool_col("extend_blue"),
         extend_red=_bool_col("extend_red"),
         protect=_bool_col("protect"),
+        # Centration override — coerce to a length-N object array of
+        # strings. Anything not in the canonical five-value set turns
+        # into "" via :func:`vmpt.catalog._normalise_centration`.
+        centration=_centration_col_from_editor(data, n),
         source_path=cat.source_path,
         extras=new_extras,
     )
@@ -5432,7 +5579,8 @@ def _on_cat_edit_save_csv():
         # _has_constraint columns. Priority + weight are stored as
         # floats in source.data so we coerce them to int-or-blank.
         _INTERNAL = {"_idx", "_has_constraint", "lam_req",
-                     "no_gap", "extend_blue", "extend_red", "protect"}
+                     "no_gap", "extend_blue", "extend_red", "protect",
+                     "centration"}
         extras_cols = [k for k in data.keys()
                        if k not in _CAT_STD_COLS and k not in _INTERNAL]
         # Are any per-target constraints set anywhere in the catalog?
@@ -5442,7 +5590,7 @@ def _on_cat_edit_save_csv():
             int(v) for v in (data.get("_has_constraint") or [])
         )
         constraint_cols = (["lam_req", "no_gap", "extend_blue",
-                            "extend_red", "protect"]
+                            "extend_red", "protect", "centration"]
                            if has_constraints else [])
         header = ["ID", "RA", "DEC", "priority", "weight", "mag", "z",
                   "label", *constraint_cols, *extras_cols]
@@ -5462,6 +5610,10 @@ def _on_cat_edit_save_csv():
                     val = (data.get(k) or [""])[i]
                     if k == "lam_req":
                         row_vals.append("" if not val else str(val))
+                    elif k == "centration":
+                        # String label or empty — write verbatim
+                        # (already normalised by the popover/loader).
+                        row_vals.append(str(val) if val else "")
                     else:
                         row_vals.append("1" if int(val or 0) else "")
                 for k in extras_cols:
@@ -5573,6 +5725,18 @@ def _on_cat_constraints_signal(attr, old, new) -> None:
     if int((data.get("protect") or [0] * n)[idx]):
         active.append(3)
     cat_constraints_checks.active = active
+    # Centration override Select. Stored values are the canonical
+    # five labels or ""; the Select's "(use global)" option maps to "".
+    centration_stored = str(
+        (data.get("centration") or [""] * n)[idx]
+    ).strip()
+    if centration_stored and centration_stored in (
+        "UNCONSTRAINED", "ENTIRE_OPEN", "MIDPOINT",
+        "CONSTRAINED", "TIGHTLY_CONSTRAINED",
+    ):
+        cat_constraints_centration_select.value = centration_stored
+    else:
+        cat_constraints_centration_select.value = "(use global)"
     cat_constraints_modal_backdrop.visible = True
     cat_constraints_modal_card.visible = True
 
@@ -5602,8 +5766,13 @@ def _on_cat_constraints_apply() -> None:
     new_blue = int(1 in active)
     new_red = int(2 in active)
     new_protect = int(3 in active)
+    # Centration override — "(use global)" → empty string in storage.
+    cent_val = (cat_constraints_centration_select.value or "").strip()
+    if cent_val == "(use global)":
+        cent_val = ""
     has_any = int(
         bool(lam_val) or new_no_gap or new_blue or new_red or new_protect
+        or bool(cent_val)
     )
 
     # Bokeh ColumnDataSource needs the WHOLE column replaced — mutating
@@ -5620,6 +5789,7 @@ def _on_cat_constraints_apply() -> None:
     _replace("extend_blue", new_blue, 0)
     _replace("extend_red", new_red, 0)
     _replace("protect", new_protect, 0)
+    _replace("centration", cent_val, "")
     _replace("_has_constraint", has_any, 0)
     # Use the silent setter so this edit doesn't push an extra undo
     # step on top of whatever the user was already doing.
@@ -6834,6 +7004,16 @@ def on_optimize():
         getattr(cat, "extend_red", None), False, bool)
     cat_protect_arr = _slice_or_default(
         getattr(cat, "protect", None), False, bool)
+    # Per-target centration override (v1.3.1+). Strings (not bools),
+    # so we can't reuse `_slice_or_default`. Treat missing / wrong-
+    # length as all-empty (= use the global setting for every row).
+    _cent_full = np.asarray(getattr(cat, "centration", None) or [],
+                            dtype=object)
+    if _cent_full.size != len(cat.ra_deg):
+        _cent_full = np.array([""] * len(cat.ra_deg), dtype=object)
+    centration_per_target_arr = (
+        _cent_full[keep] if keep is not None else _cent_full
+    )
 
     # Build the evaluator now so the heavy CloughTocher Delaunay step
     # happens before we show the modal — the user sees the bar start
@@ -6876,6 +7056,9 @@ def on_optimize():
         extend_blue=extend_blue_arr,
         extend_red=extend_red_arr,
         protect=cat_protect_arr,
+        # Per-target centration override (v1.3.1+). Wins unconditionally
+        # over `centration=...` for any row with a non-empty entry.
+        centration_per_target=centration_per_target_arr,
     )
 
     _opt_run.clear()

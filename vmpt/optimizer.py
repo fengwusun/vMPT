@@ -364,6 +364,11 @@ class PointingEvaluator:
         extend_blue: Optional[np.ndarray] = None,
         extend_red: Optional[np.ndarray] = None,
         protect: Optional[np.ndarray] = None,
+        # v1.3.1+: per-target centration override. Length-N array of
+        # strings (or None). Each non-empty cell wins **unconditionally**
+        # over the global ``centration`` argument for that one source —
+        # even when it's a laxer level. Empty / None cells use the global.
+        centration_per_target: Optional[np.ndarray] = None,
     ):
         self.ra = np.asarray(ra_sources, dtype=float)
         self.dec = np.asarray(dec_sources, dtype=float)
@@ -372,6 +377,34 @@ class PointingEvaluator:
         self.sigma = float(sigma_arcsec)
         self.buffer = CENTRATION_BUFFERS.get(
             centration.upper(), CENTRATION_BUFFERS["UNCONSTRAINED"])
+        # Per-target centration buffer. Defaults to a length-N array
+        # filled with the global ``self.buffer``; any source with a
+        # non-empty entry in ``centration_per_target`` overrides its
+        # cell to that level's buffer. ``_check_centration`` consumes
+        # ``self.buffer_per_source`` (vector) instead of ``self.buffer``
+        # (scalar); the latter is retained only for tests / introspection.
+        n_src = len(self.ra)
+        self.buffer_per_source = np.full(n_src, self.buffer, dtype=float)
+        if centration_per_target is not None:
+            arr = np.asarray(centration_per_target, dtype=object)
+            if arr.size != n_src and arr.size != 0:
+                raise ValueError(
+                    f"centration_per_target size {arr.size} != "
+                    f"ra_sources size {n_src}"
+                )
+            for i in range(min(n_src, arr.size)):
+                v = arr[i]
+                if v is None:
+                    continue
+                s = str(v).strip()
+                if not s:
+                    continue
+                buf = CENTRATION_BUFFERS.get(s.upper())
+                if buf is not None:
+                    self.buffer_per_source[i] = buf
+                # Unrecognised label → silently leaves the global
+                # buffer in place (defensive — the loader/UI already
+                # normalises, this is just belt-and-braces).
         self.slit_length = int(slit_length)
         if operable is None:
             operable_loaded, reason_loaded = load_operability()
@@ -1124,10 +1157,17 @@ class PointingEvaluator:
     def _check_centration(
         self, s_frac: np.ndarray, d_frac: np.ndarray,
     ) -> np.ndarray:
-        """Source falls within the centration buffer (in BOTH axes)."""
+        """Source falls within the centration buffer (in BOTH axes).
+
+        Uses ``self.buffer_per_source`` so per-target overrides
+        (v1.3.1+) take effect element-wise; the limits are computed
+        per row instead of as scalars. The global ``self.buffer`` is
+        unused here — it survives only as the default fill of
+        ``self.buffer_per_source``.
+        """
         with np.errstate(invalid="ignore"):
-            row_limit = 0.5 - (self.buffer / SHUTTER_Y_ARCSEC)
-            col_limit = 0.5 - (self.buffer / SHUTTER_X_ARCSEC)
+            row_limit = 0.5 - (self.buffer_per_source / SHUTTER_Y_ARCSEC)
+            col_limit = 0.5 - (self.buffer_per_source / SHUTTER_X_ARCSEC)
             off_r = np.abs(s_frac - np.rint(s_frac))
             off_c = np.abs(d_frac - np.rint(d_frac))
             return ((off_r < row_limit) & (off_c < col_limit)

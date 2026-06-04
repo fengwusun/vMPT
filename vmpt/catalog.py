@@ -79,6 +79,17 @@ class Catalog:
     protect: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=bool)
     )
+    # centration[i] is a per-target source-centering override. Empty
+    # string ("") means "use the optimizer's global Source centering
+    # setting" — the v1.3.0 default. Otherwise must be one of the
+    # five canonical labels (UNCONSTRAINED, ENTIRE_OPEN, MIDPOINT,
+    # CONSTRAINED, TIGHTLY_CONSTRAINED) — anything else gets coerced
+    # to "" at load time. The optimizer reads this verbatim, looks up
+    # CENTRATION_BUFFERS, and the per-target buffer wins **uncondition-
+    # ally** — even when it's laxer than the global. v1.3.1+.
+    centration: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=object)
+    )
 
     # Original-column → values for every column the loader did NOT
     # claim as one of the canonical fields above. Stored as object
@@ -137,6 +148,36 @@ _EXT_RED_KEYS = ("extendred", "extendsred", "redextends", "reddest")
 _PROTECT_KEYS = (
     "protect", "protected", "protectcollision", "collisionprotect",
 )
+# Per-target source-centering override (v1.3.1+). Cell value is one of
+# `_VALID_CENTRATION_LEVELS` (case-insensitive); anything else becomes
+# "" (no override). The match is loose — see `_as_centration_str` for
+# the alias rules (e.g. "tight" → "TIGHTLY_CONSTRAINED").
+_CENTRATION_KEYS = (
+    "centration", "centering", "sourcecentration", "sourcecentering",
+    "centerclass", "centeringclass",
+)
+_VALID_CENTRATION_LEVELS = (
+    "UNCONSTRAINED",
+    "ENTIRE_OPEN",
+    "MIDPOINT",
+    "CONSTRAINED",
+    "TIGHTLY_CONSTRAINED",
+)
+# Short aliases users are likely to type, mapping back to the canonical
+# label. The normalised key is lowercase + non-alnum stripped, matching
+# `_norm()`'s shape (so "tightly-constrained" works too).
+_CENTRATION_ALIASES = {
+    "unconstrained": "UNCONSTRAINED", "unc": "UNCONSTRAINED",
+    "none": "UNCONSTRAINED", "off": "UNCONSTRAINED",
+    "entireopen": "ENTIRE_OPEN", "entire": "ENTIRE_OPEN",
+    "open": "ENTIRE_OPEN",
+    "midpoint": "MIDPOINT", "mid": "MIDPOINT", "middle": "MIDPOINT",
+    "constrained": "CONSTRAINED", "con": "CONSTRAINED",
+    "tight": "TIGHTLY_CONSTRAINED",
+    "tightly": "TIGHTLY_CONSTRAINED",
+    "tightlyconstrained": "TIGHTLY_CONSTRAINED",
+    "tightconstrained": "TIGHTLY_CONSTRAINED",
+}
 _BOOL_TRUE_TOKENS = frozenset(
     ("1", "true", "yes", "y", "t", "✓", "✔", "on")
 )
@@ -411,6 +452,52 @@ def _as_lam_req(table: Table, name: str | None) -> np.ndarray:
     return out
 
 
+def _normalise_centration(value) -> str:
+    """Coerce a single centration cell to one of the canonical labels.
+
+    Returns ``""`` (no override) for empty / unrecognised values, or
+    one of the strings in :data:`_VALID_CENTRATION_LEVELS`. Matching
+    is case-insensitive and tolerant of underscores / hyphens (e.g.
+    ``"tightly-constrained"`` and ``"Tight"`` both resolve to
+    ``"TIGHTLY_CONSTRAINED"``).
+    """
+    if value is None:
+        return ""
+    s = str(value).strip()
+    if not s or s.lower() in ("nan", "none", "null", "--"):
+        return ""
+    # Direct canonical match (handles the common case fast).
+    upper = s.upper().replace("-", "_").replace(" ", "_")
+    if upper in _VALID_CENTRATION_LEVELS:
+        return upper
+    # Loose-match against the alias table (lowercase + alnum-only).
+    key = re.sub(r"[^a-z0-9]+", "", s.lower())
+    if key in _CENTRATION_ALIASES:
+        return _CENTRATION_ALIASES[key]
+    return ""
+
+
+def _as_centration_str(table: Table, name: str | None) -> np.ndarray:
+    """Read a centration-override column. Cells coerce via
+    :func:`_normalise_centration`; unrecognised values silently become
+    ``""`` (i.e. "use the optimizer's global setting")."""
+    n = len(table)
+    if name is None:
+        return np.array([""] * n, dtype=object)
+    col = table[name]
+    out = np.empty(n, dtype=object)
+    mask = getattr(col, "mask", None)
+    for i, v in enumerate(col):
+        masked = False
+        if mask is not None and mask is not False:
+            try:
+                masked = bool(mask[i])
+            except (TypeError, IndexError):
+                masked = False
+        out[i] = "" if masked else _normalise_centration(v)
+    return out
+
+
 def load_catalog(path: str) -> Catalog:
     ext = os.path.splitext(path)[1].lower()
     if ext in (".fits", ".fit", ".fz"):
@@ -446,6 +533,8 @@ def load_catalog(path: str) -> Catalog:
     extend_blue_col = _find_col(table, _EXT_BLUE_KEYS)
     extend_red_col = _find_col(table, _EXT_RED_KEYS)
     protect_col = _find_col(table, _PROTECT_KEYS)
+    # Per-target source-centering override (v1.3.1+).
+    centration_col = _find_col(table, _CENTRATION_KEYS)
     # If `name`/`label` was used as the ID fallback, don't ALSO claim it
     # as the label column — that would just duplicate the ID.
     label_candidates = _LABEL_KEYS
@@ -461,7 +550,8 @@ def load_catalog(path: str) -> Catalog:
     claimed = {c for c in (id_col, ra_col, dec_col, pri_col, weight_col,
                            mag_col, z_col, label_col,
                            lam_req_col, no_gap_col, extend_blue_col,
-                           extend_red_col, protect_col) if c}
+                           extend_red_col, protect_col,
+                           centration_col) if c}
     extras: dict = {}
     for col_name in table.colnames:
         if col_name in claimed:
@@ -494,6 +584,7 @@ def load_catalog(path: str) -> Catalog:
         extend_blue=_as_bool(table, extend_blue_col),
         extend_red=_as_bool(table, extend_red_col),
         protect=_as_bool(table, protect_col),
+        centration=_as_centration_str(table, centration_col),
         source_path=path,
         extras=extras,
     )
@@ -504,11 +595,11 @@ def save_catalog(cat: Catalog, path: str, *,
     """Write a :class:`Catalog` back to CSV.
 
     Emits the standard eight columns (``ID, RA, DEC, priority,
-    weight, mag, z, label``) followed optionally by the five v1.3.0
+    weight, mag, z, label``) followed optionally by the six v1.3.x
     per-target constraint columns (``lam_req, no_gap, extend_blue,
-    extend_red, protect``), then any ``extras`` columns the catalog
-    is carrying. The output is round-trip-compatible with
-    :func:`load_catalog` — write, reload, and the resulting
+    extend_red, protect, centration``), then any ``extras`` columns
+    the catalog is carrying. The output is round-trip-compatible
+    with :func:`load_catalog` — write, reload, and the resulting
     :class:`Catalog` matches the input modulo dtype.
 
     Parameters
@@ -519,7 +610,7 @@ def save_catalog(cat: Catalog, path: str, *,
         Destination CSV path. Parent directories are NOT created
         automatically — callers should ensure the parent exists.
     include_constraints : {"auto", "always", "never"}
-        Controls whether the five constraint columns appear in the
+        Controls whether the six constraint columns appear in the
         output:
 
         - ``"auto"`` (default): emit the columns iff at least one
@@ -588,15 +679,21 @@ def save_catalog(cat: Catalog, path: str, *,
     extend_blue = np.asarray(getattr(cat, "extend_blue", []), dtype=bool)
     extend_red = np.asarray(getattr(cat, "extend_red", []), dtype=bool)
     protect = np.asarray(getattr(cat, "protect", []), dtype=bool)
+    centration = np.asarray(getattr(cat, "centration", []), dtype=object)
     has_lam = (required_lam is not None
                and len(required_lam) == n
                and any(bool(r) and len(r) > 0 for r in required_lam))
+    has_centration = (
+        centration.size == n
+        and any(bool(str(v).strip()) for v in centration)
+    )
     has_constraints = (
         has_lam
         or (no_gap.size == n and no_gap.any())
         or (extend_blue.size == n and extend_blue.any())
         or (extend_red.size == n and extend_red.any())
         or (protect.size == n and protect.any())
+        or has_centration
     )
     emit_constraints = (
         include_constraints == "always"
@@ -606,7 +703,7 @@ def save_catalog(cat: Catalog, path: str, *,
     extras = getattr(cat, "extras", {}) or {}
 
     constraint_cols = (["lam_req", "no_gap", "extend_blue",
-                        "extend_red", "protect"]
+                        "extend_red", "protect", "centration"]
                        if emit_constraints else [])
     header = (["ID", "RA", "DEC", "priority", "weight", "mag", "z",
                "label", *constraint_cols, *extras.keys()])
@@ -641,6 +738,15 @@ def save_catalog(cat: Catalog, path: str, *,
                                    and bool(extend_red[i])) else "")
                 row.append("1" if (protect.size > i
                                    and bool(protect[i])) else "")
+                # Empty cell when no override; otherwise the canonical
+                # label (already normalised by the loader or `_normalise_
+                # centration`). Writing an unrecognised label here is
+                # not a hard error — the next load just resets it to "".
+                if centration.size > i:
+                    c = str(centration[i]).strip()
+                    row.append(c if c else "")
+                else:
+                    row.append("")
             for k, vals in extras.items():
                 row.append(str(vals[i]) if i < len(vals) else "")
             w.writerow(row)

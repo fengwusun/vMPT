@@ -116,6 +116,109 @@ def test_evaluator_unknown_centration_falls_back_to_unconstrained():
     assert det_def.sum() == det_typo.sum()
 
 
+# ── Per-target centration override (v1.3.1+) ─────────────────────────────
+
+
+def test_per_target_centration_override_unconditional():
+    """A per-target centration override wins unconditionally over the
+    global ``centration`` argument, even when it's laxer than global.
+
+    Build two evaluators on the same sources:
+      • ``ev_global`` uses TIGHTLY_CONSTRAINED for everything.
+      • ``ev_mixed``  uses TIGHTLY_CONSTRAINED globally but overrides
+        the first half of the sources to UNCONSTRAINED.
+
+    Whatever the same pointing keeps, ``ev_mixed`` must keep at least
+    as many sources (the laxer override can only ADD placements that
+    fall within the wider buffer), and the kept set in the first half
+    must be a superset of ``ev_global``'s.
+    """
+    np.random.seed(7)
+    N = 60
+    ra = 53 + np.random.rand(N) * 0.08
+    dec = -27 + np.random.rand(N) * 0.08
+    cent_override = [""] * N
+    half = N // 2
+    for i in range(half):
+        cent_override[i] = "UNCONSTRAINED"
+
+    ev_global = PointingEvaluator(
+        ra, dec, centration="TIGHTLY_CONSTRAINED",
+    )
+    ev_mixed = PointingEvaluator(
+        ra, dec, centration="TIGHTLY_CONSTRAINED",
+        centration_per_target=np.asarray(cent_override, dtype=object),
+    )
+
+    det_g, _, _ = ev_global.evaluate(53.05, -26.97, 30.0)
+    det_m, _, _ = ev_mixed.evaluate(53.05, -26.97, 30.0)
+
+    # First-half overrides → laxer than global, so det_m ⊇ det_g.
+    assert np.all(det_m[:half] | ~det_g[:half]), (
+        "Per-target UNCONSTRAINED should keep every source the "
+        "global TIGHTLY_CONSTRAINED kept (det_m ⊇ det_g on first half)."
+    )
+    # Second-half = no override = same buffer as global = identical kept.
+    assert np.array_equal(det_m[half:], det_g[half:]), (
+        "Rows without override should behave identically to the global."
+    )
+    # And it must ALSO kick in the other direction — stricter per-target
+    # overrides drop sources the laxer global would have kept.
+    cent_strict = [""] * N
+    for i in range(half):
+        cent_strict[i] = "TIGHTLY_CONSTRAINED"
+    ev_strict_mix = PointingEvaluator(
+        ra, dec, centration="UNCONSTRAINED",
+        centration_per_target=np.asarray(cent_strict, dtype=object),
+    )
+    det_sm, _, _ = ev_strict_mix.evaluate(53.05, -26.97, 30.0)
+    ev_global_lax = PointingEvaluator(ra, dec, centration="UNCONSTRAINED")
+    det_lax, _, _ = ev_global_lax.evaluate(53.05, -26.97, 30.0)
+    assert np.all(det_sm[:half] <= det_lax[:half]), (
+        "Per-target TIGHTLY_CONSTRAINED should drop ≥0 sources that "
+        "the global UNCONSTRAINED kept."
+    )
+
+
+def test_per_target_centration_size_mismatch_raises():
+    """A mismatched length is a programming error — fail fast."""
+    ra = np.array([53.05, 53.06, 53.07])
+    dec = np.array([-27.0, -27.0, -27.0])
+    with pytest.raises(ValueError, match="centration_per_target"):
+        PointingEvaluator(
+            ra, dec, centration_per_target=np.array(["", ""], dtype=object),
+        )
+
+
+def test_per_target_centration_blank_uses_global():
+    """Empty / None / unrecognised entries fall back to the global
+    buffer for that row."""
+    np.random.seed(42)
+    N = 30
+    ra = 53 + np.random.rand(N) * 0.08
+    dec = -27 + np.random.rand(N) * 0.08
+
+    blanks = np.array([""] * N, dtype=object)
+    nones = np.array([None] * N, dtype=object)
+    bogus = np.array(["NOT_A_LEVEL"] * N, dtype=object)
+
+    ev_baseline = PointingEvaluator(ra, dec, centration="CONSTRAINED")
+    det_baseline, _, _ = ev_baseline.evaluate(53.05, -26.97, 30.0)
+
+    for fill, label in ((blanks, "blanks"),
+                        (nones, "nones"),
+                        (bogus, "unknown labels")):
+        ev = PointingEvaluator(
+            ra, dec, centration="CONSTRAINED",
+            centration_per_target=fill,
+        )
+        det, _, _ = ev.evaluate(53.05, -26.97, 30.0)
+        assert np.array_equal(det, det_baseline), (
+            f"Per-target {label} should fall back to the global setting, "
+            f"got differing result."
+        )
+
+
 # ---------------------------------------------------------------------
 # Grid search + DE
 # ---------------------------------------------------------------------

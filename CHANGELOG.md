@@ -6,6 +6,26 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.3.0] — unreleased
 
+Features (cumulative for the v1.3 series):
+
+- **per-target spectral constraints** (this entry, below)
+- **per-target source-centering override** — the Constraints…
+  popover gains a `Source centering override` dropdown that can
+  pick any of the five centration levels (or leave it on
+  `(use global)`). Whatever you pick wins **unconditionally**
+  over the optimizer modal's global Source-centering Select for
+  that one row — even when it's laxer than the global. A small
+  italic line under the global Select shows how many rows carry
+  overrides so they're not invisible at run time. Round-trips
+  through the catalog CSV as a new `centration` column. See
+  [Catalogs → Source centering override](docs/catalogs.md).
+- **stats-bar + catalog-hover customisation** — Settings tab
+  adds two pop-up dialogs, `Customise stats bar…` and
+  `Customise catalog hover…`, that let you reorder / hide cells
+  in the top stats bar above the figure and the tooltip that
+  appears when you hover a catalog target on the canvas. Same
+  modal pattern as the optimizer.
+
 Feature: **per-target spectral constraints**.
 
 The catalog editor gains a per-row **Constraints…** button (gray

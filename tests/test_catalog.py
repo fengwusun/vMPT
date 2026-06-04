@@ -335,5 +335,83 @@ def test_save_catalog_always_emits_when_requested(tmp_path):
     save_catalog(cat, str(out), include_constraints="always")
     header_line = out.read_text().splitlines()[0]
     for col in ("lam_req", "no_gap", "extend_blue", "extend_red",
-                "protect"):
+                "protect", "centration"):
         assert col in header_line
+
+
+# ── Per-target centration override (v1.3.1+) ─────────────────────────────
+
+
+def test_load_centration_column(tmp_path):
+    """A `centration` column is normalised to the canonical labels."""
+    p = tmp_path / "cent.csv"
+    p.write_text(
+        "ID,RA,DEC,centration\n"
+        "1,53.0,-27.7,TIGHTLY_CONSTRAINED\n"
+        "2,53.1,-27.8,Tight\n"            # alias → TIGHTLY_CONSTRAINED
+        "3,53.2,-27.9,midpoint\n"          # lowercase canonical
+        "4,53.3,-27.8,foobar\n"            # unrecognised → ""
+        "5,53.4,-27.7,\n"                  # blank → ""
+    )
+    cat = load_catalog(str(p))
+    assert list(cat.centration) == [
+        "TIGHTLY_CONSTRAINED",
+        "TIGHTLY_CONSTRAINED",
+        "MIDPOINT",
+        "",
+        "",
+    ]
+
+
+def test_save_catalog_omits_centration_when_unset(tmp_path):
+    """Default `include_constraints="auto"` skips the `centration`
+    column when no row uses it."""
+    cat = Catalog(
+        ids=np.array([1, 2]),
+        ra_deg=np.array([10.0, 11.0]),
+        dec_deg=np.array([20.0, 21.0]),
+        priority=np.array([1.0, 2.0]),
+        weight=np.array([10.0, 5.0]),
+        mag=np.array([20.0, 21.0]),
+        z=np.array([0.5, 0.6]),
+        label=np.array(["a", "b"], dtype=object),
+        source_path="",
+    )
+    out = tmp_path / "no_cent.csv"
+    save_catalog(cat, str(out))
+    header_line = out.read_text().splitlines()[0]
+    assert "centration" not in header_line
+
+
+def test_save_catalog_centration_round_trip(tmp_path):
+    """Setting ``centration`` on some rows triggers the column to be
+    emitted, and the values reload unchanged."""
+    n = 4
+    cat = Catalog(
+        ids=np.array([1, 2, 3, 4]),
+        ra_deg=np.array([10.0, 11.0, 12.0, 13.0]),
+        dec_deg=np.array([20.0, 21.0, 22.0, 23.0]),
+        priority=np.array([1.0, 2.0, 3.0, 4.0]),
+        weight=np.array([10.0, 5.0, 1.0, 1.0]),
+        mag=np.array([20.0, 21.0, 22.0, 23.0]),
+        z=np.array([0.5, 0.6, 0.7, 0.8]),
+        label=np.array(["a", "b", "c", "d"], dtype=object),
+        centration=np.array(
+            ["TIGHTLY_CONSTRAINED", "", "CONSTRAINED", ""],
+            dtype=object,
+        ),
+        source_path="",
+    )
+    out = tmp_path / "with_cent.csv"
+    save_catalog(cat, str(out))
+    header_line = out.read_text().splitlines()[0]
+    assert "centration" in header_line, (
+        f"Expected 'centration' in header, got {header_line!r}"
+    )
+
+    rt = load_catalog(str(out))
+    assert list(rt.centration) == [
+        "TIGHTLY_CONSTRAINED", "", "CONSTRAINED", "",
+    ]
+    # The other (constraint-aware) cells should be unset:
+    assert rt.no_gap.any() is np.False_ or not rt.no_gap.any()
