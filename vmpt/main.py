@@ -1437,15 +1437,22 @@ overlay_stroke_slider = Slider(
     width=SIDEBAR_W - 40,
 )
 
-# Canvas size — controls the LONGER pixel dimension of the image
-# frame inside the figure. `refresh_image_glyph()` reads this from
-# state["frame_max"]; the other dimension is computed from the
-# image's W:H so pixels stay square (match_aspect=True) and the MSA
-# overlay's data range stays in 1:1 aspect with the image. Default
-# 800 px = pre-v1.3.2 behaviour.
-canvas_size_slider = Slider(
+# Canvas size — two independent sliders for the X (width) and Y
+# (height) of the figure's drawing frame in pixels.
+# `refresh_image_glyph()` reads state["frame_x"] / state["frame_y"]
+# and sets fig.frame_width / fig.frame_height directly.
+# `match_aspect=True` on the figure keeps image pixels square — when
+# the canvas aspect ≠ image aspect, Bokeh letterboxes the image so
+# both the science image AND the NIRSpec FoV stay at their correct
+# aspect ratios at any (frame_x, frame_y). Default 800×800.
+canvas_x_slider = Slider(
     start=400, end=1600, step=50, value=800,
-    title="Canvas size (longer dim, px)",
+    title="Canvas width (X, px)",
+    width=SIDEBAR_W - 40,
+)
+canvas_y_slider = Slider(
+    start=400, end=1600, step=50, value=800,
+    title="Canvas height (Y, px)",
     width=SIDEBAR_W - 40,
 )
 
@@ -2714,18 +2721,22 @@ def refresh_image_glyph() -> None:
     # around it. Trade-off: the canvas doesn't grow on big monitors,
     # but image pixels are guaranteed square.
     if W > 0 and H > 0:
-        # Constrain the canvas so neither dimension exceeds FRAME_MAX.
-        # Whichever image axis is longer becomes FRAME_MAX; the other
-        # shrinks proportionally to preserve W:H exactly.
-        # User-adjustable via the Settings tab slider (state-backed
-        # so the value survives image reloads). Default 800.
-        FRAME_MAX = int(state.get("frame_max", 800))
-        if W >= H:
-            fig.frame_width = FRAME_MAX
-            fig.frame_height = int(round(FRAME_MAX * H / W))
-        else:
-            fig.frame_height = FRAME_MAX
-            fig.frame_width = int(round(FRAME_MAX * W / H))
+        # User-adjustable canvas dimensions (state-backed so values
+        # survive image reloads). Each axis is set directly here;
+        # `match_aspect=True` on the figure then enforces 1:1 pixel
+        # aspect by adjusting the data range — image pixels stay
+        # square and the MSA overlay's data range stays consistent.
+        # When the canvas aspect ≠ image aspect, the image is
+        # letterboxed inside the frame so both stay at their
+        # correct ratios at any (frame_x, frame_y).
+        # Default 800×800; the legacy "frame_max" key (pre-split)
+        # still drives both axes if present, for session-reload
+        # backwards compatibility.
+        legacy = state.get("frame_max")
+        frame_x = int(state.get("frame_x", legacy or 800))
+        frame_y = int(state.get("frame_y", legacy or 800))
+        fig.frame_width = max(100, frame_x)
+        fig.frame_height = max(100, frame_y)
     # Axis tick formatters: convert pixel ticks to RA/Dec degrees using the
     # WCS. Linear approximation around the image center — accurate at the
     # ~milliarcsec level for fields up to ~10 arcmin (so good for our use).
@@ -4638,29 +4649,38 @@ overlay_alpha_slider.on_change("value", _on_overlay_alpha)
 overlay_stroke_slider.on_change("value", _on_overlay_stroke)
 
 
-def _on_canvas_size(attr, old, new):
-    """Resize the figure frame in response to the Settings slider.
-
-    Stash the value on `state` so :func:`refresh_image_glyph` picks
-    it up on every image reload, then call it once to apply the new
-    size right away if an image is loaded. The user sees the canvas
-    grow / shrink immediately; pixel aspect (`match_aspect=True`)
-    keeps image pixels square and the MSA-shutter overlay's data
-    range scaled in lockstep.
+def _on_canvas_x(attr, old, new):
+    """Resize the figure frame's WIDTH in response to the Settings
+    slider. Stashes the value on `state["frame_x"]` so the change
+    survives image reloads; calls :func:`refresh_image_glyph` to
+    apply immediately when an image is loaded. `match_aspect=True`
+    on the figure handles pixel-aspect locking, so a non-square
+    canvas letterboxes the image to keep the MSA FoV correct.
     """
     try:
         v = int(new)
     except (TypeError, ValueError):
         return
-    # Clamp to the slider's nominal range to defend against script
-    # access. The slider widget itself enforces these bounds.
     v = max(400, min(1600, v))
-    state["frame_max"] = v
+    state["frame_x"] = v
     if state.get("image") is not None:
         refresh_image_glyph()
 
 
-canvas_size_slider.on_change("value", _on_canvas_size)
+def _on_canvas_y(attr, old, new):
+    """Same as :func:`_on_canvas_x` for the Y (height) axis."""
+    try:
+        v = int(new)
+    except (TypeError, ValueError):
+        return
+    v = max(400, min(1600, v))
+    state["frame_y"] = v
+    if state.get("image") is not None:
+        refresh_image_glyph()
+
+
+canvas_x_slider.on_change("value", _on_canvas_x)
+canvas_y_slider.on_change("value", _on_canvas_y)
 
 
 # ---------------------------------------------------------------------------
@@ -7514,7 +7534,8 @@ pick_tab = TabPanel(title="Settings", child=column(
     overlay_alpha_slider,
     overlay_stroke_slider,
     Div(text="<b>Canvas</b>"),
-    canvas_size_slider,
+    canvas_x_slider,
+    canvas_y_slider,
     Div(text="<b>Customise display</b>"),
     stats_bar_open_btn,
     catalog_hover_open_btn,
