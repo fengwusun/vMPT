@@ -1483,6 +1483,41 @@ stats_div = Div(
     text="<i>Loading vMPT… pick an example from the Input tab to begin.</i>",
 )
 
+# ── Top stats bar — order + visibility (v1.3.0+) ────────────────────
+# The bar above the figure is composed of six "cells": image name,
+# RA/Dec, V3 PA + APA, disperser/filter, open-shutter count, and
+# spec-conflict count. Each is keyed by a short identifier; the
+# corresponding HTML span is built inside `refresh_overlays_light`.
+# Settings → Top stats bar exposes a MultiChoice that lets users pick
+# which cells to show AND the display order — the order of the
+# `value` list IS the on-screen order.
+STATS_BAR_CELL_LABELS: dict[str, str] = {
+    "image":     "Image filename",
+    "radec":     "RA · Dec",
+    "pa":        "V3 PA + APA",
+    "disperser": "Disperser / Filter",
+    "open":      "Open shutters",
+    "conflicts": "Conflict shutters",
+}
+# Default order = the canonical order the bar shipped with in v1.0.
+STATS_BAR_DEFAULT_ORDER: tuple[str, ...] = (
+    "image", "radec", "pa", "disperser", "open", "conflicts",
+)
+# Reverse lookup: label → key (used when reading the picker value
+# back into state). Built once.
+_STATS_BAR_LABEL_TO_KEY: dict[str, str] = {
+    v: k for k, v in STATS_BAR_CELL_LABELS.items()
+}
+# The picker widget — defined now so it's stable for layout, wired
+# below in the Settings tab.
+stats_bar_choice = MultiChoice(
+    title="Top stats bar — pick which cells to show (drag chips or "
+          "click in pick order to reorder)",
+    options=[STATS_BAR_CELL_LABELS[k] for k in STATS_BAR_DEFAULT_ORDER],
+    value=[STATS_BAR_CELL_LABELS[k] for k in STATS_BAR_DEFAULT_ORDER],
+    width=SIDEBAR_W - 20,
+)
+
 # Glyph data sources
 src_image = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
 src_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[]))
@@ -2329,42 +2364,76 @@ def refresh_overlays() -> None:
     )
     label_style = "color:#5a6b85; font-size:11px; text-transform:uppercase; letter-spacing:0.5px;"
     val_style   = "color:#1a3b66; font-weight:600; font-size:14px; margin-left:4px;"
+
+    # Each named cell as an independent HTML span so the user can pick
+    # which to show and in what order via Settings → Top stats bar.
+    # Keys here must match those in STATS_BAR_CELLS (defined near the
+    # Settings UI) so the order/visibility picker stays in sync.
+    cells: dict[str, str] = {
+        "image": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">Image</span>'
+            f'  <span style="{val_style}">{img_label}</span>'
+            f'</span>'
+        ),
+        "radec": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">RA · Dec</span>'
+            f'  <span style="{val_style}">{fiducial.ra.deg:.5f} · {fiducial.dec.deg:.5f}</span>'
+            f'  <span style="color:#7c8aa0; font-size:11px; margin-left:6px;">'
+            f'    ({ra_hms} · {dec_dms})'
+            f'  </span>'
+            f'</span>'
+        ),
+        "pa": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">V3 PA</span>'
+            f'  <span style="{val_style}">{pa_v3:.2f}°</span>'
+            f'  <span style="{label_style}; margin-left:10px;">APA</span>'
+            f'  <span style="{val_style}">{apa:.2f}°</span>'
+            f'</span>'
+        ),
+        "disperser": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">Disperser</span>'
+            f'  <span style="{val_style}">{state["disperser"]} / {state["filter"]}</span>'
+            f'</span>'
+        ),
+        "open": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">Open</span>'
+            f'  <span style="{val_style}">{n_op}</span>'
+            f'  <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">'
+            f'    across {n_tgt_open} target{"s" if n_tgt_open != 1 else ""}'
+            f'  </span>'
+            f'</span>'
+        ),
+        "conflicts": (
+            f'<span style="{cell}">'
+            f'  <span style="{label_style}">Conflicts</span>'
+            f'  <span style="color:{oc}; font-weight:700; font-size:14px; margin-left:4px;">{n_overlap}</span>'
+            f'  <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">shutters</span>'
+            f'</span>'
+        ),
+    }
+    # Resolved cell order = whatever the Settings → Top stats bar
+    # picker says (user-customisable, v1.3.0+). Defaults to the
+    # canonical order if state hasn't been touched.
+    order = state.get("stats_bar_order") or list(STATS_BAR_DEFAULT_ORDER)
+    ordered_html = [cells[k] for k in order if k in cells]
+    # The right-most visible cell drops its right border so the bar
+    # ends cleanly.
+    if ordered_html:
+        last = ordered_html[-1]
+        ordered_html[-1] = last.replace(
+            f'<span style="{cell}">',
+            f'<span style="{cell} border-right:none;">',
+            1,
+        )
     stats_div.text = (
-        f'<div style="display:flex; flex-wrap:wrap; align-items:center; gap:0;">'
-        f'  <span style="{cell}">'
-        f'    <span style="{label_style}">Image</span>'
-        f'    <span style="{val_style}">{img_label}</span>'
-        f'  </span>'
-        f'  <span style="{cell}">'
-        f'    <span style="{label_style}">RA · Dec</span>'
-        f'    <span style="{val_style}">{fiducial.ra.deg:.5f} · {fiducial.dec.deg:.5f}</span>'
-        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:6px;">'
-        f'      ({ra_hms} · {dec_dms})'
-        f'    </span>'
-        f'  </span>'
-        f'  <span style="{cell}">'
-        f'    <span style="{label_style}">V3 PA</span>'
-        f'    <span style="{val_style}">{pa_v3:.2f}°</span>'
-        f'    <span style="{label_style}; margin-left:10px;">APA</span>'
-        f'    <span style="{val_style}">{apa:.2f}°</span>'
-        f'  </span>'
-        f'  <span style="{cell}">'
-        f'    <span style="{label_style}">Disperser</span>'
-        f'    <span style="{val_style}">{state["disperser"]} / {state["filter"]}</span>'
-        f'  </span>'
-        f'  <span style="{cell}">'
-        f'    <span style="{label_style}">Open</span>'
-        f'    <span style="{val_style}">{n_op}</span>'
-        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">'
-        f'      across {n_tgt_open} target{"s" if n_tgt_open != 1 else ""}'
-        f'    </span>'
-        f'  </span>'
-        f'  <span style="{cell} border-right:none;">'
-        f'    <span style="{label_style}">Conflicts</span>'
-        f'    <span style="color:{oc}; font-weight:700; font-size:14px; margin-left:4px;">{n_overlap}</span>'
-        f'    <span style="color:#7c8aa0; font-size:11px; margin-left:4px;">shutters</span>'
-        f'  </span>'
-        f'</div>'
+        '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:0;">'
+        + "".join(ordered_html)
+        + '</div>'
     )
     _set_status(
         f"{n_op} open shutters covering {n_tgt_open} targets. "
@@ -6710,6 +6779,41 @@ layers_box.on_change("active", on_layers)
 disperser_filter_select.on_change("value", on_disperser_filter)
 slitlet_select.on_change("value", on_slitlet_height)
 
+
+def _on_stats_bar_choice(attr, old, new):
+    """Translate the picker's value list (display labels) back into
+    the cell-key list that `refresh_overlays_light` reads from
+    ``state["stats_bar_order"]`` and trigger a redraw."""
+    keys = [
+        _STATS_BAR_LABEL_TO_KEY[label]
+        for label in (new or [])
+        if label in _STATS_BAR_LABEL_TO_KEY
+    ]
+    state["stats_bar_order"] = keys
+    # Lightweight refresh — only the stats div needs rebuilding;
+    # everything else on the canvas is unaffected by reordering.
+    refresh_overlays_light()
+
+
+stats_bar_choice.on_change("value", _on_stats_bar_choice)
+
+
+def _reset_stats_bar_order() -> None:
+    """Restore the canonical stats-bar order. Triggered by the
+    "Reset to default" button in the Settings tab."""
+    default_labels = [STATS_BAR_CELL_LABELS[k]
+                      for k in STATS_BAR_DEFAULT_ORDER]
+    stats_bar_choice.value = default_labels
+    # `on_change` fires automatically — state + stats_div both update.
+
+
+stats_bar_reset_btn = Button(
+    label="Reset to default order",
+    button_type="default",
+    width=SIDEBAR_W - 20,
+)
+stats_bar_reset_btn.on_click(_reset_stats_bar_order)
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -6785,6 +6889,10 @@ pick_tab = TabPanel(title="Settings", child=column(
     overlay_layer_select,
     overlay_alpha_slider,
     overlay_stroke_slider,
+    Div(text="<b>Top stats bar</b> "
+             "<small style='color:#5a6b85'>(above the figure)</small>"),
+    stats_bar_choice,
+    stats_bar_reset_btn,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
     width=SIDEBAR_W - 20,
