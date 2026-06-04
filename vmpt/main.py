@@ -170,6 +170,28 @@ FIG_H_HINT = 800     # initial canvas height hint
 SIDEBAR_W = 340      # left tab panel (Input / Pointing / Setting / MPT)
 HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 
+# Inline styles for the header bar at the top of every modal dialog.
+# Applied via `styles=` on the header `row()` so they survive Bokeh's
+# per-model shadow root (document-level CSS doesn't reach inside
+# shadow DOMs — that's why GlobalInlineStyleSheet doesn't work here).
+# The `vmpt-modal-header` css_class is still needed for the drag JS
+# (which queries by class), but the visual style is set here.
+_MODAL_HEADER_STYLES = {
+    "cursor": "move",
+    "user-select": "none",
+    "background": "#d6e4f5",
+    "border-bottom": "1px solid #b9c8dc",
+    "border-radius": "6px 6px 0 0",
+    "padding": "6px 12px 6px 14px",
+    # Extend the header to the modal card's edges by negating its
+    # internal padding (cards use 16px 18px).
+    "margin": "-16px -18px 12px -18px",
+    "display": "flex",
+    "align-items": "center",
+    "justify-content": "space-between",
+    "min-height": "36px",
+}
+
 # Color palette for catalog markers when multiple catalogs are loaded.
 # Cycled by load order (entry 0 → palette[0], entry 1 → palette[1], …).
 # Picked to (a) read clearly on a dark astronomical image, (b) avoid
@@ -479,6 +501,11 @@ opt_theta_input = TextInput(
 )
 opt_advanced_modal_close_btn = Button(label="Done", button_type="primary",
                                       width=80)
+opt_advanced_modal_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+)
 
 opt_advanced_modal_backdrop = Div(
     text="", width=0, height=0, visible=False,
@@ -494,9 +521,15 @@ opt_advanced_modal_backdrop = Div(
     },
 )
 opt_advanced_modal_card = column(
-    Div(text="<h3 style='margin:0 0 6px 0; color:#1a3b66'>"
-             "Advanced optimizer settings</h3>"
-             "<div style='font-size:12px; color:#5a6b85'>"
+    row(
+        Div(text="<h3>Advanced optimizer settings</h3>",
+            sizing_mode="stretch_width"),
+        opt_advanced_modal_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    Div(text="<div style='font-size:12px; color:#5a6b85'>"
              "Tune only if the defaults don't fit. Values stick after Done. "
              "<i>Drag the header to reposition.</i></div>",
         width=520),
@@ -509,7 +542,7 @@ opt_advanced_modal_card = column(
     spacing=10,
     width=540,
     visible=False,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -734,14 +767,6 @@ cat_edit_top_close_btn = Button(
     button_type="default",
     width=32, height=28,
     css_classes=["vmpt-modal-x"],
-    # Inline styles work even when the modal's stylesheet doesn't
-    # penetrate Bokeh's nested wrappers; pinning the wrapper div to
-    # the corner of the modal card via absolute positioning.
-    styles={
-        "position": "absolute",
-        "top": "6px", "right": "8px",
-        "z-index": "5",
-    },
 )
 
 cat_edit_modal_backdrop = Div(
@@ -754,14 +779,15 @@ cat_edit_modal_backdrop = Div(
     },
 )
 cat_edit_modal_card = column(
-    # Top-right × dismiss. CSS in `_cat_edit_css` floats it into the
-    # corner of the modal card — Bokeh layouts don't support absolute
-    # positioning natively, so the button sits at the top of the
-    # column and CSS does the rest.
-    cat_edit_top_close_btn,
-    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
-             "Edit catalog</h3>"
-             "<div style='font-size:12px; color:#5a6b85'>"
+    row(
+        Div(text="<h3>Edit catalog</h3>",
+            sizing_mode="stretch_width"),
+        cat_edit_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    Div(text="<div style='font-size:12px; color:#5a6b85'>"
              "Click a column header to sort. Double-click a cell to edit. "
              "Click 🗑️ in a row to delete it. <b>↶ Undo / ↷ Redo</b> "
              "revert / replay your edits. "
@@ -785,7 +811,7 @@ cat_edit_modal_card = column(
     spacing=10,
     width=860,
     visible=False,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -819,16 +845,9 @@ cat_constraints_top_close_btn = Button(
     label="×", button_type="default",
     width=32, height=28,
     css_classes=["vmpt-modal-x"],
-    styles={
-        "position": "absolute",
-        "top": "6px", "right": "8px",
-        "z-index": "5",
-    },
 )
 cat_constraints_title_div = Div(
-    text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
-         "Per-target spectral constraints</h3>"
-         "<div style='font-size:12px; color:#5a6b85'>"
+    text="<div style='font-size:12px; color:#5a6b85'>"
          "These constraints apply only when the optimizer evaluates "
          "this source. Empty / unchecked = no constraint.</div>",
     width=420,
@@ -898,7 +917,14 @@ cat_constraints_modal_backdrop = Div(
     },
 )
 cat_constraints_modal_card = column(
-    cat_constraints_top_close_btn,
+    row(
+        Div(text="<h3>Per-target spectral constraints</h3>",
+            sizing_mode="stretch_width"),
+        cat_constraints_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
     cat_constraints_title_div,
     cat_constraints_row_label,
     cat_constraints_lam_input,
@@ -910,7 +936,7 @@ cat_constraints_modal_card = column(
     spacing=10,
     width=460,
     visible=False,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -957,11 +983,6 @@ opt_config_top_close_btn = Button(
     label="×", button_type="default",
     width=32, height=28,
     css_classes=["vmpt-modal-x"],
-    styles={
-        "position": "absolute",
-        "top": "6px", "right": "8px",
-        "z-index": "5",
-    },
 )
 opt_config_modal_backdrop = Div(
     text="", width=0, height=0, visible=False,
@@ -979,10 +1000,15 @@ opt_config_modal_backdrop = Div(
 # status) live here. The Pointing tab now just shows a single
 # "Open optimizer…" button that flips this card's `visible`.
 opt_config_modal_card = column(
-    opt_config_top_close_btn,
-    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
-             "MSA pointing optimizer</h3>"
-             "<div style='font-size:12px; color:#5a6b85'>"
+    row(
+        Div(text="<h3>MSA pointing optimizer</h3>",
+            sizing_mode="stretch_width"),
+        opt_config_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    Div(text="<div style='font-size:12px; color:#5a6b85'>"
              "Searches (RA, Dec, V3 PA) within the box below for the "
              "best placement. Adjust the inputs, then <b>Run</b>.</div>",
         width=SIDEBAR_W + 30),
@@ -1005,7 +1031,7 @@ opt_config_modal_card = column(
     spacing=10,
     width=SIDEBAR_W + 70,
     visible=False,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -1126,9 +1152,21 @@ opt_modal_results_box = column(
 )
 
 opt_modal_close_btn = Button(label="Close", button_type="default", width=80)
+opt_modal_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
+)
 
 opt_modal_card = column(
-    opt_modal_title,
+    row(
+        Div(text="<h3>MSA pointing optimization</h3>",
+            sizing_mode="stretch_width"),
+        opt_modal_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
     opt_modal_progress_box,
     opt_modal_results_box,
     opt_modal_close_btn,
@@ -1139,7 +1177,7 @@ opt_modal_card = column(
     # ~200 px) plus the rest of the row (~480 px) and the modal's
     # inner padding (~36 px).
     width=740,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -1361,16 +1399,17 @@ def on_help_toggle():
     help_panel.width = HELPPANEL_W if showing else 130
 
 
-# Collapsed by default — the Quick guide + rotating tip are useful
-# for first-run users but eat ~340 px of horizontal real estate every
-# session. Returning users get a wider workspace; one click on
-# "Show help" brings the panel back.
-help_div.visible = False
-tip_div.visible = False
+# Expanded by default (v1.3.3+) — first-run users get the Quick
+# guide + rotating tip without having to discover the "Show help"
+# button. Returning users can collapse the panel with one click;
+# the button label flips to "Hide help" when expanded.
+help_div.visible = True
+tip_div.visible = True
+help_toggle_btn.label = "Hide help"
 help_toggle_btn.on_click(on_help_toggle)
 help_panel = column(
     help_toggle_btn, tip_div, help_div,
-    width=130,
+    width=HELPPANEL_W,
     # The Quick guide is long. Make the help panel scroll vertically
     # within whatever height it gets in the page layout, so users on
     # smaller screens can still reach the bottom of the guide.
@@ -1659,11 +1698,6 @@ stats_bar_modal_top_close_btn = Button(
     label="×", button_type="default",
     width=32, height=28,
     css_classes=["vmpt-modal-x"],
-    styles={
-        "position": "absolute",
-        "top": "6px", "right": "8px",
-        "z-index": "5",
-    },
 )
 stats_bar_modal_backdrop = Div(
     text="", width=0, height=0, visible=False,
@@ -1686,11 +1720,6 @@ catalog_hover_modal_top_close_btn = Button(
     label="×", button_type="default",
     width=32, height=28,
     css_classes=["vmpt-modal-x"],
-    styles={
-        "position": "absolute",
-        "top": "6px", "right": "8px",
-        "z-index": "5",
-    },
 )
 catalog_hover_modal_backdrop = Div(
     text="", width=0, height=0, visible=False,
@@ -4883,6 +4912,7 @@ def _close_advanced_modal():
 
 opt_advanced_btn.on_click(_open_advanced_modal)
 opt_advanced_modal_close_btn.on_click(_close_advanced_modal)
+opt_advanced_modal_top_close_btn.on_click(_close_advanced_modal)
 
 
 def _refresh_opt_status_div() -> None:
@@ -6029,71 +6059,62 @@ _cat_edit_source.js_on_change("data", _cat_edit_install_js)
 
 
 # ── Draggable modal dialogs (v1.3.3+) ────────────────────────────────────
-# Every pop-up card (optimizer config / results / advanced, catalog
-# editor, per-target constraints, customise stats-bar / catalog-hover)
-# carries the css_class "vmpt-draggable-modal". The JS below attaches a
-# mousedown→mousemove→mouseup drag handler to each so the user can
-# reposition any dialog anywhere on the browser page. Useful when a
-# dialog covers something the user wants to inspect (e.g., the canvas
-# under the optimizer-results modal).
+# Every pop-up card has TWO css classes that work together:
+#   * .vmpt-modal-card    on the modal column itself
+#   * .vmpt-modal-header  on a header row at the top of the card
+#                         (contains the title + a clearly-visible ×
+#                         close button)
 #
-# Guard rules:
-#   * Mousedown on a form control (input / button / select / textarea
-#     / option) → fall through to the control, no drag.
-#   * Mousedown on a Bokeh widget shell (.bk-input-group, .bk-btn,
-#     .bk-slider-handle, .bk-MultiChoice) → fall through, no drag.
-#   * Mousedown on a SlickGrid cell / header → fall through (sort,
-#     edit, scroll all keep working).
-#   * Mousedown elsewhere (title text, padding, the modal background
-#     itself) → start drag.
+# Only the **header** is a drag handle — `cursor: move` is on the
+# header only, and the drag JS targets ONLY `.vmpt-modal-header`. The
+# body of the modal is fully interactive: form controls, SlickGrid
+# cells, sliders, buttons all receive their clicks normally with no
+# skip-list logic to maintain.
 #
-# On the FIRST drag of a session the card's centered transform
+# On the FIRST drag of a session the card's centred transform
 # (`translate(-50%, -50%)`) is converted to absolute top/left so
-# subsequent drags can do straight arithmetic. The transform is
-# preserved on the first call to `__vmpt_init_drag` (idempotent),
-# but cleared on the first mousedown — that way modals still open
-# centred on first display, but stay where the user put them after.
+# subsequent drags do straight arithmetic. The transform stays in
+# place on modal open (so dialogs open centred on first display),
+# but is cleared on the first header-mousedown — they stay where
+# the user puts them after that.
 _vmpt_drag_init_js = CustomJS(code=r"""
-    if (window.__vmpt_init_drag) {
-        // Re-fire to catch newly-rendered cards. The per-element
-        // dataset.vmptDraggable flag makes re-wiring a no-op.
-        window.__vmpt_init_drag();
-        return;
-    }
+    if (window.__vmpt_drag_installed) return;
+    window.__vmpt_drag_installed = true;
+
     let isDragging = false;
     let target = null;
     let startX = 0, startY = 0;
     let origLeft = 0, origTop = 0;
 
-    function shouldSkipDrag(e) {
-        // Walk up from the click target looking for "interactive" hits.
-        // If any matches before we reach the modal card itself, skip
-        // drag and let the control receive the click normally.
-        const tag = (e.target.tagName || "").toLowerCase();
-        if (["input", "button", "select", "textarea", "option",
-             "a", "label"].includes(tag)) {
-            return true;
+    // Walk the event's composedPath — that's the only way to "see"
+    // through Bokeh's per-model shadow DOMs from a document-level
+    // listener. Returns the first ancestor matching `selector` or
+    // null when none of the path elements match.
+    function pathFind(path, predicate) {
+        for (const el of path) {
+            if (el && el.classList && predicate(el)) return el;
         }
-        // Bokeh widget shells + SlickGrid hit-zones.
-        const closestInteractive = e.target.closest(
-            ".bk-input, .bk-input-group, .bk-btn, .bk-slider-handle, " +
-            ".bk-MultiChoice, .bk-Choices, .choices, " +
-            ".slick-cell, .slick-header, .slick-header-column, " +
-            ".slick-viewport"
-        );
-        if (closestInteractive) return true;
-        return false;
+        return null;
     }
 
     function onMouseDown(e) {
         if (e.button !== 0) return;  // left-click only
-        if (shouldSkipDrag(e)) return;
-        const card = e.currentTarget;
+        const path = e.composedPath ? e.composedPath() : [];
+        // Don't drag when the user clicks on a Bokeh button (× close,
+        // Done, Apply, etc.) or any focusable form control.
+        const btn = pathFind(path, el => el.classList.contains("bk-btn"));
+        if (btn) return;
+        // The header is the drag handle. Find the header in the
+        // event path; bail if the click started outside any header.
+        const header = pathFind(path, el =>
+            el.classList.contains("vmpt-modal-header"));
+        if (!header) return;
+        // The MODAL CARD is what we move. Find it in the same path —
+        // it's an ancestor of the header in the shadow tree.
+        const card = pathFind(path, el =>
+            el.classList.contains("vmpt-modal-card"));
+        if (!card) return;
         const rect = card.getBoundingClientRect();
-        // Promote centred-transform card to absolute coordinates so
-        // subsequent drags do straightforward arithmetic. Safe to
-        // re-run; once `transform: none` is set the position is
-        // already absolute.
         card.style.top = rect.top + "px";
         card.style.left = rect.left + "px";
         card.style.transform = "none";
@@ -6103,7 +6124,6 @@ _vmpt_drag_init_js = CustomJS(code=r"""
         startY = e.clientY;
         origLeft = rect.left;
         origTop = rect.top;
-        // Block text selection / focus migrations during the drag.
         e.preventDefault();
     }
 
@@ -6111,10 +6131,8 @@ _vmpt_drag_init_js = CustomJS(code=r"""
         if (!isDragging || target === null) return;
         const newLeft = origLeft + (e.clientX - startX);
         const newTop = origTop + (e.clientY - startY);
-        // Loose clamp so the user can't drag the card entirely
-        // off-screen (top-left corner of the card must remain inside
-        // the viewport). Lets dragging across most of the page but
-        // prevents accidental "lost the dialog" surprises.
+        // Loose off-screen clamp — keep the top-left corner inside
+        // the viewport so the user can always grab the dialog back.
         target.style.left = Math.max(
             -Math.max(0, target.offsetWidth - 80),
             Math.min(window.innerWidth - 80, newLeft)
@@ -6130,54 +6148,26 @@ _vmpt_drag_init_js = CustomJS(code=r"""
         target = null;
     }
 
+    // Document-level capture so we see mousedowns on elements inside
+    // every Bokeh shadow root. Capture phase + composedPath is the
+    // only way to "look into" shadow trees from outside.
+    document.addEventListener("mousedown", onMouseDown, true);
     document.addEventListener("mousemove", onMouseMove);
     document.addEventListener("mouseup", onMouseUp);
-
-    window.__vmpt_init_drag = function () {
-        document.querySelectorAll(".vmpt-draggable-modal").forEach((el) => {
-            if (el.dataset.vmptDraggable === "1") return;
-            el.dataset.vmptDraggable = "1";
-            el.addEventListener("mousedown", onMouseDown);
-        });
-    };
-    window.__vmpt_init_drag();
-
-    // Some modals are created after DocumentReady (e.g., the catalog-
-    // editor table re-binds when a catalog is added). A short-lived
-    // MutationObserver catches any draggable card injected later.
-    const obs = new MutationObserver(() => window.__vmpt_init_drag());
-    obs.observe(document.body, {childList: true, subtree: true});
 """)
 curdoc().js_on_event(DocumentReady, _vmpt_drag_init_js)
 
-# Cursor cue: any draggable modal shows the "move" cursor over its
-# non-interactive padding, while form controls inside keep their
-# default cursors. The :not(...) selectors mirror the JS shouldSkipDrag.
-_vmpt_drag_styles = GlobalInlineStyleSheet(css="""
-.vmpt-draggable-modal {
-  cursor: move;
-  user-select: none;
-}
-.vmpt-draggable-modal input,
-.vmpt-draggable-modal button,
-.vmpt-draggable-modal select,
-.vmpt-draggable-modal textarea,
-.vmpt-draggable-modal .bk-input,
-.vmpt-draggable-modal .bk-btn,
-.vmpt-draggable-modal .bk-slider-handle,
-.vmpt-draggable-modal .bk-MultiChoice,
-.vmpt-draggable-modal .slick-cell,
-.vmpt-draggable-modal .slick-header,
-.vmpt-draggable-modal .slick-header-column {
-  cursor: default;
-  user-select: text;
-}
-""")
+# `_MODAL_HEADER_STYLES` is defined near the top of the file
+# (alongside SIDEBAR_W) so it's available before any modal card is
+# built. The drag JS above only relies on the css_class for
+# targeting; the visual styling lives there.
 # Attach the GlobalInlineStyleSheet to the main figure's stylesheets
 # list — Bokeh emits it into <head> for the whole document. (Adding
 # it as a root via curdoc().add_root() isn't the documented API for
 # stylesheets; `stylesheets=` on any LayoutDOM is.)
-fig.stylesheets = list(fig.stylesheets) + [_vmpt_drag_styles]
+# Header bar visuals are now inline on each header row via
+# `_MODAL_HEADER_STYLES` — see the modal definitions above. No
+# document-level CSS to attach here.
 
 # SlickGrid intercepts Cmd-C / Ctrl-C at the grid container level and
 # copies the entire selected column / row from its internal data
@@ -7447,6 +7437,7 @@ def _on_modal_close() -> None:
 
 
 opt_modal_close_btn.on_click(_on_modal_close)
+opt_modal_top_close_btn.on_click(_on_modal_close)
 opt_run_btn.on_click(on_optimize)
 
 
@@ -7600,10 +7591,15 @@ _CUSTOMISE_MODAL_CSS = GlobalInlineStyleSheet(css="""
 """)
 
 stats_bar_modal_card = column(
-    stats_bar_modal_top_close_btn,
-    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
-             "Customise top stats bar</h3>"
-             "<div style='font-size:12px; color:#5a6b85'>"
+    row(
+        Div(text="<h3>Customise top stats bar</h3>",
+            sizing_mode="stretch_width"),
+        stats_bar_modal_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    Div(text="<div style='font-size:12px; color:#5a6b85'>"
              "Pick which cells appear in the bar above the figure, "
              "and in what order. Drop a chip with its × to hide that "
              "cell; click in the dropdown to re-add. The order of "
@@ -7616,15 +7612,20 @@ stats_bar_modal_card = column(
     width=SIDEBAR_W + 130,
     visible=False,
     styles=_CUSTOMISE_MODAL_STYLES,
-    css_classes=["vmpt-customise-modal", "vmpt-draggable-modal"],
+    css_classes=["vmpt-customise-modal", "vmpt-modal-card"],
     stylesheets=[_CUSTOMISE_MODAL_CSS],
 )
 
 catalog_hover_modal_card = column(
-    catalog_hover_modal_top_close_btn,
-    Div(text="<h3 style='margin:0 0 4px 0; color:#1a3b66'>"
-             "Customise catalog hover</h3>"
-             "<div style='font-size:12px; color:#5a6b85'>"
+    row(
+        Div(text="<h3>Customise catalog hover</h3>",
+            sizing_mode="stretch_width"),
+        catalog_hover_modal_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    Div(text="<div style='font-size:12px; color:#5a6b85'>"
              "Pick which fields show up in the tooltip when you "
              "hover a catalog target marker on the canvas, and in "
              "what order. The Constraints field renders a compact "
@@ -7638,7 +7639,7 @@ catalog_hover_modal_card = column(
     width=SIDEBAR_W + 130,
     visible=False,
     styles=_CUSTOMISE_MODAL_STYLES,
-    css_classes=["vmpt-customise-modal", "vmpt-draggable-modal"],
+    css_classes=["vmpt-customise-modal", "vmpt-modal-card"],
     stylesheets=[_CUSTOMISE_MODAL_CSS],
 )
 
@@ -7661,10 +7662,10 @@ overwrite_modal_backdrop = Div(
         "z-index": "1020",
     },
 )
-overwrite_modal_title = Div(
-    text="<h3 style='margin:0 0 4px 0; color:#a04030'>"
-         "Overwrite existing file?</h3>",
-    width=520,
+overwrite_modal_top_close_btn = Button(
+    label="×", button_type="default",
+    width=32, height=28,
+    css_classes=["vmpt-modal-x"],
 )
 overwrite_modal_body = Div(text="", width=520)
 overwrite_modal_yes_btn = Button(
@@ -7674,13 +7675,21 @@ overwrite_modal_no_btn = Button(
     label="Cancel", button_type="default", width=80,
 )
 overwrite_modal_card = column(
-    overwrite_modal_title,
+    row(
+        Div(text="<h3 style='color:#a04030'>"
+                 "Overwrite existing file?</h3>",
+            sizing_mode="stretch_width"),
+        overwrite_modal_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
     overwrite_modal_body,
     row(overwrite_modal_yes_btn, overwrite_modal_no_btn, spacing=10),
     spacing=10,
     width=560,
     visible=False,
-    css_classes=["vmpt-draggable-modal"],
+    css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -7764,6 +7773,7 @@ def _on_overwrite_no() -> None:
 
 overwrite_modal_yes_btn.on_click(_on_overwrite_yes)
 overwrite_modal_no_btn.on_click(_on_overwrite_no)
+overwrite_modal_top_close_btn.on_click(_on_overwrite_no)
 
 
 def _open_stats_bar_modal(_e=None) -> None:
