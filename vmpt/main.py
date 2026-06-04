@@ -1518,6 +1518,46 @@ stats_bar_choice = MultiChoice(
     width=SIDEBAR_W - 20,
 )
 
+# ── Catalog hover tooltip — order + visibility (v1.3.0+) ────────────
+# The HoverTool's tooltip HTML for the catalog-target glyph is built
+# from a per-field list, picked via Settings → Catalog hover. Each
+# entry below maps a stable key → (display label for the picker,
+# tooltip-fragment template). The template references the columns
+# carried in `src_targets.data` (which `refresh_overlays` populates).
+# Adding a new hover field = add an entry here + populate the column
+# in src_targets.data.
+CATALOG_HOVER_FIELDS: dict[str, tuple[str, str]] = {
+    "id": ("ID", '<b>@id</b>'),
+    "radec": (
+        "RA, Dec",
+        '@ra{0.0000}, @dec{0.0000}',
+    ),
+    "priority": ("Priority", '<span style="color:#888">Pr </span>@pr'),
+    "weight": ("Weight", '<span style="color:#888">W </span>@wt'),
+    "mag": ("Magnitude", '<span style="color:#888">Mag </span>@mag'),
+    "z": ("Redshift", '<span style="color:#888">z </span>@z'),
+    "label": ("Label", '<span style="color:#888">L </span>@label'),
+    "constraints": (
+        "Constraints (λ·G·B·R·🛡)",
+        '<span style="color:#888">C </span>@constr',
+    ),
+}
+CATALOG_HOVER_DEFAULT_ORDER: tuple[str, ...] = (
+    "id", "radec", "priority",
+)
+_CATALOG_HOVER_LABEL_TO_KEY: dict[str, str] = {
+    v[0]: k for k, v in CATALOG_HOVER_FIELDS.items()
+}
+catalog_hover_choice = MultiChoice(
+    title="Catalog hover — pick which fields show in the target "
+          "tooltip (drag chips or click in pick order to reorder)",
+    options=[CATALOG_HOVER_FIELDS[k][0]
+             for k in CATALOG_HOVER_FIELDS],
+    value=[CATALOG_HOVER_FIELDS[k][0]
+           for k in CATALOG_HOVER_DEFAULT_ORDER],
+    width=SIDEBAR_W - 20,
+)
+
 # Glyph data sources
 src_image = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
 src_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[]))
@@ -1537,6 +1577,11 @@ src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
 src_targets = ColumnDataSource(data=dict(
     x=[], y=[], id=[], ra=[], dec=[], pr=[],
+    # Extra per-target columns for the customisable hover tooltip
+    # (Settings → Catalog hover, v1.3.0+). Defaults are empty so any
+    # row without a value renders blank in the tooltip rather than
+    # throwing.
+    wt=[], mag=[], z=[], label=[], constr=[],
     # Per-target rendering. `line_color`: matched sources (id == an
     # open-shutter's target_id) flip to green; unmatched take their
     # per-catalog palette colour. `line_alpha`: decays with the
@@ -1716,7 +1761,12 @@ fig.add_tools(HoverTool(
         f'</div>'
     ),
 ))
-fig.add_tools(HoverTool(
+# Catalog hover tool — tooltip content is rebuilt at runtime by
+# `_refresh_catalog_hover_tooltip` whenever the user reorders / toggles
+# the Settings → Catalog hover picker. Field list is small enough that
+# we just store the HoverTool on the module so the callback can mutate
+# its `tooltips` attribute in place.
+catalog_hover = HoverTool(
     renderers=[target_glyph],
     tooltips=(
         f'<div style="{_TIP_BASE_STYLE} color:#1a3b66;">'
@@ -1725,7 +1775,8 @@ fig.add_tools(HoverTool(
         f'  <span style="color:#888;"> · Pr </span>@pr'
         f'</div>'
     ),
-))
+)
+fig.add_tools(catalog_hover)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -2319,6 +2370,60 @@ def refresh_overlays() -> None:
             1.0 if tid in matched_target_ids else a
             for tid, a in zip(ids, base_alphas)
         ]
+        # Per-target hover fields beyond ID / RA / Dec / Pr. NaN /
+        # missing → empty string in the tooltip rather than "nan".
+        def _fmt_num(v):
+            try:
+                f = float(v)
+                if not np.isfinite(f):
+                    return ""
+                # Trim trailing zeros — keeps `Mag 23` rather than
+                # `Mag 23.000000`.
+                return f"{f:g}"
+            except (TypeError, ValueError):
+                return ""
+        wt_arr = (np.asarray(cat.weight, dtype=float)
+                  if cat.weight is not None
+                  and len(cat.weight) == len(cat.ra_deg)
+                  else np.full(len(cat.ra_deg), np.nan))
+        mag_arr = (np.asarray(cat.mag, dtype=float)
+                   if cat.mag is not None else
+                   np.full(len(cat.ra_deg), np.nan))
+        z_arr = (np.asarray(cat.z, dtype=float)
+                 if cat.z is not None
+                 else np.full(len(cat.ra_deg), np.nan))
+        label_arr = (np.asarray(cat.label, dtype=object)
+                     if cat.label is not None
+                     else np.array([""] * len(cat.ra_deg), dtype=object))
+        # Compact "constraint" indicator: a comma-list of single-
+        # letter flags (G=no_gap, B=extend_blue, R=extend_red,
+        # P=protect) plus "λ:N" when N required-λ ranges are set.
+        # Blank when no constraint applies to this row.
+        req_lam = getattr(cat, "required_lam", None)
+        no_gap = np.asarray(getattr(cat, "no_gap", []), dtype=bool)
+        ext_b = np.asarray(getattr(cat, "extend_blue", []), dtype=bool)
+        ext_r = np.asarray(getattr(cat, "extend_red", []), dtype=bool)
+        prot = np.asarray(getattr(cat, "protect", []), dtype=bool)
+
+        def _constr_glyph(i: int) -> str:
+            tags: list[str] = []
+            n_req = (len(req_lam[i]) if req_lam is not None
+                     and i < len(req_lam)
+                     and req_lam[i] is not None
+                     else 0)
+            if n_req > 0:
+                tags.append(f"λ:{n_req}")
+            if no_gap.size > i and bool(no_gap[i]):
+                tags.append("G")
+            if ext_b.size > i and bool(ext_b[i]):
+                tags.append("B")
+            if ext_r.size > i and bool(ext_r[i]):
+                tags.append("R")
+            if prot.size > i and bool(prot[i]):
+                tags.append("🛡")
+            return "·".join(tags)
+
+        rows_mask = np.where(mask)[0]
         src_targets.data = dict(
             x=x[mask].tolist(),
             y=y[mask].tolist(),
@@ -2326,6 +2431,11 @@ def refresh_overlays() -> None:
             ra=cat.ra_deg[mask].tolist(),
             dec=cat.dec_deg[mask].tolist(),
             pr=cat.priority[mask].tolist(),
+            wt=[_fmt_num(wt_arr[i]) for i in rows_mask],
+            mag=[_fmt_num(mag_arr[i]) for i in rows_mask],
+            z=[_fmt_num(z_arr[i]) for i in rows_mask],
+            label=[str(label_arr[i]) for i in rows_mask],
+            constr=[_constr_glyph(i) for i in rows_mask],
             line_color=line_colors,
             line_width=line_widths,
             line_alpha=line_alphas,
@@ -2333,6 +2443,7 @@ def refresh_overlays() -> None:
     else:
         src_targets.data = dict(
             x=[], y=[], id=[], ra=[], dec=[], pr=[],
+            wt=[], mag=[], z=[], label=[], constr=[],
             line_color=[], line_width=[], line_alpha=[],
         )
 
@@ -6821,6 +6932,58 @@ stats_bar_reset_btn = Button(
 )
 stats_bar_reset_btn.on_click(_reset_stats_bar_order)
 
+
+def _refresh_catalog_hover_tooltip() -> None:
+    """Rebuild ``catalog_hover.tooltips`` from the picker's value list.
+
+    Each selected field contributes one of the template fragments
+    from :data:`CATALOG_HOVER_FIELDS`, joined by a thin grey middle-
+    dot separator. The result replaces the HoverTool's `.tooltips`
+    in place (Bokeh propagates the change to the browser without
+    re-creating the tool, so the user can keep their hover state).
+    """
+    keys = [
+        _CATALOG_HOVER_LABEL_TO_KEY[label]
+        for label in (catalog_hover_choice.value or [])
+        if label in _CATALOG_HOVER_LABEL_TO_KEY
+    ]
+    if not keys:
+        catalog_hover.tooltips = ""
+        return
+    fragments = [CATALOG_HOVER_FIELDS[k][1] for k in keys]
+    sep = '<span style="color:#888;"> · </span>'
+    catalog_hover.tooltips = (
+        f'<div style="{_TIP_BASE_STYLE} color:#1a3b66;">'
+        + sep.join(fragments)
+        + '</div>'
+    )
+
+
+def _on_catalog_hover_choice(attr, old, new):
+    _refresh_catalog_hover_tooltip()
+
+
+catalog_hover_choice.on_change("value", _on_catalog_hover_choice)
+
+
+def _reset_catalog_hover_order() -> None:
+    catalog_hover_choice.value = [
+        CATALOG_HOVER_FIELDS[k][0] for k in CATALOG_HOVER_DEFAULT_ORDER
+    ]
+
+
+catalog_hover_reset_btn = Button(
+    label="Reset hover to default",
+    button_type="default",
+    width=SIDEBAR_W - 20,
+)
+catalog_hover_reset_btn.on_click(_reset_catalog_hover_order)
+
+# Apply the initial tooltip so the hover matches the picker on first
+# load (the picker's default value is CATALOG_HOVER_DEFAULT_ORDER,
+# which maps to "id · ra/dec · priority" — same content as v1.0).
+_refresh_catalog_hover_tooltip()
+
 # ---------------------------------------------------------------------------
 # Layout
 # ---------------------------------------------------------------------------
@@ -6900,6 +7063,11 @@ pick_tab = TabPanel(title="Settings", child=column(
              "<small style='color:#5a6b85'>(above the figure)</small>"),
     stats_bar_choice,
     stats_bar_reset_btn,
+    Div(text="<b>Catalog hover</b> "
+             "<small style='color:#5a6b85'>"
+             "(tooltip on each target marker)</small>"),
+    catalog_hover_choice,
+    catalog_hover_reset_btn,
     Div(text="<b>Actions</b>"),
     row(undo_btn, clear_btn),
     width=SIDEBAR_W - 20,
