@@ -4,6 +4,51 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### MPT-style spec-overlap colors
+
+vMPT now uses the three-colour encoding that APT MPT shows on its
+shutter map. The single orange "spec-overlap" layer from v1.0–v1.3.0
+is split into three independent layers, each with its own colour
+and its own slider in **Settings → Overlay appearance**:
+
+- **Mask Stuck (pink)** — a shutter whose spectrum overlaps with
+  a **stuck-open** shutter's dispersion. Computed once per
+  (disperser, PA) — visible even before the user picks anything.
+- **Masked (orange)** — overlap with a **user-open** shutter's
+  dispersion. Updates on every shutter pick.
+- **Mask Conflict (purple)** — overlap with **both** at once. A
+  shutter that was pink turns purple when a user pick adds a
+  second overlap source.
+
+Per-polygon alpha now stacks with the conflict count:
+`alpha = min(1, base × n_conflicts)`. Base is 0.20 (= the alpha
+of a shutter overlapping a single dispersion source). A shutter
+hit by 2 sources renders at 0.40; 5+ saturates at 1.0. The base
+per category is adjustable in Settings and persists via the
+preferences system (`~/.vmpt/preferences.json`); migration from
+the old `Overlapping shutters` prefs key drops the saved value
+onto all three new categories.
+
+Implementation: `src_spec_overlap_stuck` / `_user` / `_both`
+ColumnDataSources with a `fill_alpha` field column; three
+`multi_polygons` glyphs read it field-referenced
+(`fill_alpha="fill_alpha"`). The overlap calculation now tracks
+per-shutter source counts in `stuck_counts` / `user_counts` dicts
+rather than the previous `np.unique(idx)` flatten — so the
+"alpha compositing stacks" comment that lived in the v1.0 code
+finally has its intent realised.
+
+The top stats-bar "Conflict shutters" cell counts the union of all
+three categories. The aggregate `overlap_idx` is still computed
+for the silver-edge layer's "exclude affected shutters" filter.
+
+The pre-existing `src_spec_overlap` and `spec_overlap_glyph`
+module symbols are kept as backwards-compat aliases pointing at
+the orange (user-overlap) source/glyph, so external scripts and
+tests that imported them keep working.
+
 ## [1.3.0] — 2026-06-04
 
 Big feature release. Adds per-target spectral constraints (a whole

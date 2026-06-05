@@ -1759,7 +1759,30 @@ src_open_shutters = ColumnDataSource(
               gap_label=[])
 )
 src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
-src_spec_overlap = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
+# Spec-overlap shutters, split into three categories that follow
+# APT MPT's color encoding (v1.3.1+ change — was a single src_spec_
+# overlap orange layer in v1.0–v1.3.0):
+#   * stuck  → pink   (shutter's spectrum overlaps with a stuck-open
+#                      shutter's dispersion only)
+#   * user   → orange (overlaps with a user-open shutter's dispersion
+#                      only — the "Masked" category in APT MPT)
+#   * both   → purple (overlaps with BOTH stuck-open AND user-open;
+#                      this is "Mask Conflict" in APT MPT)
+# Per-polygon fill_alpha column lets the alpha stack with the number
+# of overlapping sources: base × n, capped at 1.0.
+src_spec_overlap_stuck = ColumnDataSource(
+    data=dict(xs=[], ys=[], q=[], s=[], d=[], fill_alpha=[])
+)
+src_spec_overlap_user = ColumnDataSource(
+    data=dict(xs=[], ys=[], q=[], s=[], d=[], fill_alpha=[])
+)
+src_spec_overlap_both = ColumnDataSource(
+    data=dict(xs=[], ys=[], q=[], s=[], d=[], fill_alpha=[])
+)
+# Backwards-compatibility alias: the old `src_spec_overlap` symbol
+# pointed at the user-overlap source. Anything still importing it
+# (tests / external scripts) keeps working.
+src_spec_overlap = src_spec_overlap_user
 src_fixed_slits = ColumnDataSource(data=dict(xs=[], ys=[], name=[]))
 src_targets = ColumnDataSource(data=dict(
     x=[], y=[], id=[], ra=[], dec=[], pr=[],
@@ -1853,20 +1876,38 @@ stuck_open_glyph = fig.multi_polygons(
     line_color="#b30000", line_alpha=1.0, line_width=2.5,
     fill_color="#ff2222", fill_alpha=0.15,
 )
-# Spectral-overlap shutters: any operable shutter in the same s row of the
-# same quadrant as a currently-open shutter. If opened, their dispersed
-# spectra would overlap on the detector (MPT-style spectral conflict).
-spec_overlap_glyph = fig.multi_polygons(
-    xs="xs", ys="ys", source=src_spec_overlap,
-    # No edge by default — overlap shutters are fill-only, alpha 0.2
-    # per conflict so the colour intensifies where multiple open
-    # shutters' spectra contribute (alpha compositing stacks). The
-    # stroke slider in the appearance picker reveals the edge by
-    # bumping line_alpha; line_color is set to orange here so the
-    # outline matches the fill (default would be Bokeh's blue-grey).
-    line_color="#d97a00", line_alpha=0.0, line_width=0,
-    fill_color="orange", fill_alpha=0.20,
+# Spec-overlap shutters in three MPT-faithful colors (v1.3.1+).
+# Each glyph has `fill_alpha="fill_alpha"` so the source's per-
+# polygon alpha column drives transparency — alpha stacks with the
+# number of overlapping dispersion sources (base × n, capped at 1).
+# Edge defaults off; the appearance picker's stroke slider can
+# reveal it.
+spec_overlap_stuck_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_spec_overlap_stuck,
+    line_color="#d96272", line_alpha=0.0, line_width=0,
+    # Pink (APT MPT "Mask Stuck" colour): a shutter whose
+    # spectrum overlaps with a stuck-open's dispersion.
+    fill_color="#ff9aa0", fill_alpha="fill_alpha",
 )
+spec_overlap_user_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_spec_overlap_user,
+    line_color="#d97a00", line_alpha=0.0, line_width=0,
+    # Orange (APT MPT "Masked" colour): a shutter whose spectrum
+    # overlaps with a user-opened shutter's dispersion.
+    fill_color="orange", fill_alpha="fill_alpha",
+)
+spec_overlap_both_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_spec_overlap_both,
+    line_color="#6f3a8a", line_alpha=0.0, line_width=0,
+    # Purple (APT MPT "Mask Conflict" colour): a shutter whose
+    # spectrum overlaps with BOTH stuck-open AND user-open
+    # dispersion sources.
+    fill_color="#a050b8", fill_alpha="fill_alpha",
+)
+# Backwards-compatibility alias: the old `spec_overlap_glyph` symbol
+# pointed at the orange (now: user-overlap) glyph. The overlay-
+# appearance config below still references it under the old key.
+spec_overlap_glyph = spec_overlap_user_glyph
 open_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_open_shutters,
     line_color="#ff3333", line_width=1.5,
@@ -2440,31 +2481,101 @@ def refresh_overlays() -> None:
          int(f % 365) + 1)
         for f in stuck_flat
     ]
-    dispersion_sources = user_opens + stuck_keys
-    if dispersion_sources:
+
+    # Per-affected-shutter conflict COUNTS, split by source type
+    # (stuck-open vs user-open). The same shutter can be hit by
+    # several dispersing sources of either type, and the per-polygon
+    # alpha = min(1, base × n_total) lets the colour saturate where
+    # the contamination is multi-source. Splitting by source type
+    # also drives the three MPT-faithful colours:
+    #   stuck-only (n_user==0)   → pink   (Mask Stuck)
+    #   user-only  (n_stuck==0)  → orange (Masked)
+    #   both                     → purple (Mask Conflict)
+    stuck_counts: dict[int, int] = {}
+    user_counts: dict[int, int] = {}
+    if user_opens or stuck_keys:
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
         q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365) + 1
         in_view_op = in_view & (_FLAT_REASON == 0)
-        chunks: list[np.ndarray] = []
-        for q_o, s_o, d_o in dispersion_sources:
-            open_flat = (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
-            v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
-            # Only the matching detector half can share a y-row.
-            partners = NRS1_QUADS if q_o in NRS1_QUADS else NRS2_QUADS
-            same_det = np.isin(q_arr, list(partners))
-            same_row = np.abs(s_arr - (s_o - 1)) <= SHVAL_S_TOLERANCE
-            near_v2 = np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o) < v2_overlap
-            idx_this = np.where(in_view_op & same_det & same_row & near_v2)[0]
-            idx_this = idx_this[idx_this != open_flat]
-            if idx_this.size:
-                chunks.append(idx_this)
-        overlap_idx = (
-            np.unique(np.concatenate(chunks)) if chunks else np.empty(0, dtype=np.int64)
-        )
-    else:
-        overlap_idx = np.empty(0, dtype=np.int64)
-    src_spec_overlap.data = _project_indices_to_cds(overlap_idx, pa_v3, fid_pix, jinv)
+
+        def _accumulate(sources, dst_counts: dict[int, int]) -> None:
+            for q_o, s_o, d_o in sources:
+                open_flat = (
+                    (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
+                )
+                v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
+                partners = NRS1_QUADS if q_o in NRS1_QUADS else NRS2_QUADS
+                same_det = np.isin(q_arr, list(partners))
+                same_row = np.abs(s_arr - (s_o - 1)) <= SHVAL_S_TOLERANCE
+                near_v2 = (
+                    np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o)
+                    < v2_overlap
+                )
+                idx_this = np.where(
+                    in_view_op & same_det & same_row & near_v2
+                )[0]
+                # An open shutter doesn't contaminate itself.
+                idx_this = idx_this[idx_this != open_flat]
+                for i in idx_this.tolist():
+                    dst_counts[i] = dst_counts.get(i, 0) + 1
+
+        _accumulate(user_opens, user_counts)
+        _accumulate(stuck_keys, stuck_counts)
+
+    # Base alpha per category — slider-controlled in Settings →
+    # Overlay appearance, persisted via the prefs system, stashed
+    # on `state`. Per-polygon alpha = min(1, base × n_conflicts)
+    # where n_conflicts is the total dispersing-source count
+    # overlapping that shutter.
+    base_alpha_stuck = float(state.get("overlap_base_alpha_stuck", 0.20))
+    base_alpha_user = float(state.get("overlap_base_alpha_user", 0.20))
+    base_alpha_both = float(state.get("overlap_base_alpha_both", 0.20))
+
+    def _partition_and_project(
+        idx_to_alpha: dict[int, float],
+    ) -> dict:
+        """Project the chosen indices to polygons + emit a fill_alpha
+        column parallel to xs / ys / q / s / d."""
+        if not idx_to_alpha:
+            return dict(xs=[], ys=[], q=[], s=[], d=[], fill_alpha=[])
+        idx_arr = np.fromiter(idx_to_alpha.keys(), dtype=np.int64)
+        cds = _project_indices_to_cds(idx_arr, pa_v3, fid_pix, jinv)
+        cds["fill_alpha"] = [
+            float(idx_to_alpha[i]) for i in idx_arr.tolist()
+        ]
+        return cds
+
+    # Build the three partitioned index→alpha maps. Each category
+    # gets its own base — the user can tune them independently in
+    # the Settings appearance picker (e.g., dim the pink and
+    # darken the purple).
+    stuck_only_alpha: dict[int, float] = {}
+    user_only_alpha: dict[int, float] = {}
+    both_alpha: dict[int, float] = {}
+    all_idx = set(stuck_counts.keys()) | set(user_counts.keys())
+    for i in all_idx:
+        n_s = stuck_counts.get(i, 0)
+        n_u = user_counts.get(i, 0)
+        n_total = n_s + n_u
+        if n_s > 0 and n_u > 0:
+            both_alpha[i] = min(1.0, base_alpha_both * max(1, n_total))
+        elif n_s > 0:
+            stuck_only_alpha[i] = min(1.0, base_alpha_stuck * max(1, n_total))
+        elif n_u > 0:
+            user_only_alpha[i] = min(1.0, base_alpha_user * max(1, n_total))
+
+    src_spec_overlap_stuck.data = _partition_and_project(stuck_only_alpha)
+    src_spec_overlap_user.data = _partition_and_project(user_only_alpha)
+    src_spec_overlap_both.data = _partition_and_project(both_alpha)
+
+    # Aggregate index set for the "operable silver-edge" filter
+    # below — every shutter that's affected by ANY overlap (any of
+    # the three colours) gets excluded from the silver layer.
+    overlap_idx = (
+        np.fromiter(all_idx, dtype=np.int64) if all_idx
+        else np.empty(0, dtype=np.int64)
+    )
 
     # ── Unaffected operable (silver-edge) layer.
     # Show only shutters that are operable, in view, NOT currently open
@@ -4637,6 +4748,27 @@ snap_box.on_change("active", on_snap)
 #
 # `stroke_attr` is normally "line_width" but for catalog markers we use
 # "size" (marker diameter in screen px) since stroke is data-driven there.
+# Spec-overlap base alpha per category. Each per-polygon alpha is
+# `min(1, base × n_conflicts)`, where n_conflicts is the total
+# count of dispersing sources overlapping that shutter. The base
+# values live on `state` so the Settings → Overlay appearance
+# slider can rewrite them and trigger a re-render via
+# `refresh_overlays()`.
+state["overlap_base_alpha_stuck"] = 0.20
+state["overlap_base_alpha_user"] = 0.20
+state["overlap_base_alpha_both"] = 0.20
+
+
+def _set_overlap_base_alpha(category: str, value: float) -> None:
+    """Update the base alpha for one spec-overlap colour and refresh
+    the canvas so the per-polygon alphas pick up the new base."""
+    state[f"overlap_base_alpha_{category}"] = float(value)
+    try:
+        refresh_overlays()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 _OVERLAY_LAYER_CONFIG = {
     "Operable shutters":     {
         "glyph": bg_shutters_glyph,
@@ -4644,15 +4776,52 @@ _OVERLAY_LAYER_CONFIG = {
         "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 3.0, 0.05),
         "stroke_label": "Stroke (px)",
     },
-    "Overlapping shutters":  {
-        "glyph": spec_overlap_glyph,
-        "alpha_attr": "fill_alpha", "stroke_attr": "line_width",
-        "alpha_range": (0.0, 0.8, 0.02), "stroke_range": (0.0, 3.0, 0.05),
+    # APT MPT-style overlap layers (v1.3.1+). Each carries a
+    # field-referenced fill_alpha (`fill_alpha="fill_alpha"` on the
+    # glyph), so the per-layer alpha slider can't write directly to
+    # the glyph attribute — it goes through `_set_overlap_base_alpha`
+    # which stashes the base on state and triggers refresh_overlays
+    # to recompute the per-polygon alphas.
+    "Mask Stuck (pink)":     {
+        "glyph": spec_overlap_stuck_glyph,
+        "alpha_attr": None,
+        "alpha_state_key": "overlap_base_alpha_stuck",
+        "alpha_setter": lambda v: _set_overlap_base_alpha("stuck", v),
+        "stroke_attr": "line_width",
+        "alpha_range": (0.0, 0.8, 0.02),
+        "stroke_range": (0.0, 3.0, 0.05),
         "stroke_label": "Stroke (px)",
-        # When the user moves stroke off 0, also reveal line_alpha so the
-        # outline actually shows.
         "stroke_extra": lambda v: setattr(
-            spec_overlap_glyph.glyph, "line_alpha", 0.6 if v > 0 else 0.0
+            spec_overlap_stuck_glyph.glyph, "line_alpha",
+            0.6 if v > 0 else 0.0,
+        ),
+    },
+    "Masked (orange)":       {
+        "glyph": spec_overlap_user_glyph,
+        "alpha_attr": None,
+        "alpha_state_key": "overlap_base_alpha_user",
+        "alpha_setter": lambda v: _set_overlap_base_alpha("user", v),
+        "stroke_attr": "line_width",
+        "alpha_range": (0.0, 0.8, 0.02),
+        "stroke_range": (0.0, 3.0, 0.05),
+        "stroke_label": "Stroke (px)",
+        "stroke_extra": lambda v: setattr(
+            spec_overlap_user_glyph.glyph, "line_alpha",
+            0.6 if v > 0 else 0.0,
+        ),
+    },
+    "Mask Conflict (purple)":{
+        "glyph": spec_overlap_both_glyph,
+        "alpha_attr": None,
+        "alpha_state_key": "overlap_base_alpha_both",
+        "alpha_setter": lambda v: _set_overlap_base_alpha("both", v),
+        "stroke_attr": "line_width",
+        "alpha_range": (0.0, 0.8, 0.02),
+        "stroke_range": (0.0, 3.0, 0.05),
+        "stroke_label": "Stroke (px)",
+        "stroke_extra": lambda v: setattr(
+            spec_overlap_both_glyph.glyph, "line_alpha",
+            0.6 if v > 0 else 0.0,
         ),
     },
     "Picked shutters":       {
@@ -4693,8 +4862,13 @@ def _on_overlay_layer(attr, old, new):
         overlay_stroke_slider.update(
             start=s_lo, end=s_hi, step=s_step, title=cfg["stroke_label"],
         )
-        # Read current values from the glyph and reflect them.
-        cur_alpha = getattr(cfg["glyph"].glyph, cfg["alpha_attr"])
+        # Read the current alpha value either from the glyph (scalar
+        # property) or from `state` (when the layer uses a field-
+        # referenced fill_alpha — see the MPT-style overlap layers).
+        if cfg.get("alpha_attr") is not None:
+            cur_alpha = getattr(cfg["glyph"].glyph, cfg["alpha_attr"])
+        else:
+            cur_alpha = state.get(cfg["alpha_state_key"], a_lo)
         cur_stroke = getattr(cfg["glyph"].glyph, cfg["stroke_attr"])
         # Bokeh string-field references aren't numbers — fall back to a
         # sensible default if the property is data-driven.
@@ -4715,6 +4889,14 @@ def _on_overlay_alpha(attr, old, new):
         return
     cfg = _OVERLAY_LAYER_CONFIG.get(overlay_layer_select.value)
     if cfg is None:
+        return
+    # Layers with `alpha_attr=None` use a field-referenced fill_alpha;
+    # the slider's value goes to `alpha_setter` (which updates state
+    # and re-renders) instead of writing the glyph attribute directly.
+    if cfg.get("alpha_attr") is None:
+        setter = cfg.get("alpha_setter")
+        if setter is not None:
+            setter(float(new))
         return
     setattr(cfg["glyph"].glyph, cfg["alpha_attr"], float(new))
 
@@ -8109,12 +8291,24 @@ def _collect_prefs() -> dict:
     overlay_strokes: dict = {}
     for name, cfg in _OVERLAY_LAYER_CONFIG.items():
         glyph = cfg["glyph"].glyph
-        try:
-            overlay_alphas[name] = float(
-                getattr(glyph, cfg["alpha_attr"])
-            )
-        except (AttributeError, TypeError, ValueError):
-            pass
+        # Field-referenced alpha (the MPT-style overlap layers) lives
+        # on `state` — `alpha_attr` is None there. Use the state key
+        # instead of trying to read the glyph attribute (which would
+        # be the field-name string, not a number).
+        if cfg.get("alpha_attr") is None:
+            key = cfg.get("alpha_state_key")
+            if key and key in state:
+                try:
+                    overlay_alphas[name] = float(state[key])
+                except (TypeError, ValueError):
+                    pass
+        else:
+            try:
+                overlay_alphas[name] = float(
+                    getattr(glyph, cfg["alpha_attr"])
+                )
+            except (AttributeError, TypeError, ValueError):
+                pass
         try:
             overlay_strokes[name] = float(
                 getattr(glyph, cfg["stroke_attr"])
@@ -8173,13 +8367,27 @@ def _apply_prefs(prefs: dict) -> None:
         # Per-layer overlay properties — set glyph attrs directly so
         # `_on_overlay_layer` then re-syncs the sliders' visible
         # values to whichever layer is currently selected.
-        for name, alpha in (prefs.get("overlay_alphas") or {}).items():
+        # v1.3.0→v1.3.1 migration: the old "Overlapping shutters"
+        # key (one orange layer with scalar fill_alpha) became three
+        # field-referenced layers driven by state. Map the legacy
+        # key onto all three new state buckets so existing prefs
+        # files don't lose their setting on first launch.
+        prefs_alphas = dict(prefs.get("overlay_alphas") or {})
+        if "Overlapping shutters" in prefs_alphas:
+            legacy_a = prefs_alphas.pop("Overlapping shutters")
+            for legacy_name in ("Mask Stuck (pink)", "Masked (orange)",
+                                "Mask Conflict (purple)"):
+                prefs_alphas.setdefault(legacy_name, legacy_a)
+        for name, alpha in prefs_alphas.items():
             cfg = _OVERLAY_LAYER_CONFIG.get(name)
             if cfg is None:
                 continue
             try:
-                setattr(cfg["glyph"].glyph, cfg["alpha_attr"],
-                        float(alpha))
+                if cfg.get("alpha_attr") is not None:
+                    setattr(cfg["glyph"].glyph, cfg["alpha_attr"],
+                            float(alpha))
+                elif cfg.get("alpha_state_key"):
+                    state[cfg["alpha_state_key"]] = float(alpha)
             except (AttributeError, ValueError, TypeError):
                 pass
         for name, stroke in (prefs.get("overlay_strokes") or {}).items():
@@ -8300,7 +8508,10 @@ def _on_reset_prefs():
         # values they had at module import.
         for name, cfg in _OVERLAY_LAYER_CONFIG.items():
             try:
-                setattr(cfg["glyph"].glyph, cfg["alpha_attr"], 0.20)
+                if cfg.get("alpha_attr") is not None:
+                    setattr(cfg["glyph"].glyph, cfg["alpha_attr"], 0.20)
+                elif cfg.get("alpha_state_key"):
+                    state[cfg["alpha_state_key"]] = 0.20
                 setattr(cfg["glyph"].glyph, cfg["stroke_attr"], 1.0)
                 extra = cfg.get("stroke_extra")
                 if extra is not None:
