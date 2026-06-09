@@ -1358,7 +1358,13 @@ help_div = Div(
       <li><span style='background:silver;padding:0 4px'>silver</span> = operable</li>
       <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
       <li><span style='color:#b30000;font-weight:700'>dark red</span> = stuck-open</li>
-      <li><span style='color:#e26a00;font-weight:700'>orange</span> = spec-overlap warning</li>
+      <li>Spec-overlap (MPT colours; alpha stacks with #sources):
+        <ul>
+          <li><span style='color:#d96272;font-weight:700'>pink</span> = <b>Mask Stuck</b> — operable shutter where only stuck-open spectra land (no collision).</li>
+          <li><span style='color:#e26a00;font-weight:700'>orange</span> = <b>Masked</b> — operable shutter where at least one user-open's spectrum lands (no collision).</li>
+          <li><span style='color:#a050b8;font-weight:700'>purple</span> = <b>Mask Conflict</b> — either a user-pick that's touching another open shutter, OR an operable shutter sitting in the dispersion band of a slitlet that's in a touching collision. Opens a chain: every shutter downstream of a colliding slitlet is purple.</li>
+        </ul>
+      </li>
       <li><span style='color:gold;font-weight:700'>gold</span> = fixed slits</li>
       <li><span style='color:#ddd200;font-weight:700'>yellow ○</span> = catalog target · <span style='color:#2e9b3f;font-weight:700'>green ○</span> = matched to an open shutter</li>
     </ul>
@@ -1876,12 +1882,27 @@ stuck_open_glyph = fig.multi_polygons(
     line_color="#b30000", line_alpha=1.0, line_width=2.5,
     fill_color="#ff2222", fill_alpha=0.15,
 )
+# User-opens render BELOW spec-overlap so contamination on a
+# user-opened shutter is visible — without this z-order the red
+# user-open fill would hide the pink/orange/purple stripe that
+# flags "your own pick is contaminated by another open shutter".
+open_shutters_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_open_shutters,
+    line_color="#ff3333", line_width=1.5,
+    fill_color="#ff8888", fill_alpha=0.35,
+)
 # Spec-overlap shutters in three MPT-faithful colors (v1.3.1+).
 # Each glyph has `fill_alpha="fill_alpha"` so the source's per-
 # polygon alpha column drives transparency — alpha stacks with the
 # number of overlapping dispersion sources (base × n, capped at 1).
 # Edge defaults off; the appearance picker's stroke slider can
 # reveal it.
+#
+# Rendered AFTER `open_shutters_glyph` so contamination on a
+# user-opened shutter (open-vs-open and open-vs-stuck conflicts)
+# overlays the red fill — making mutual conflicts among picked
+# shutters visible. The user-open's red still shows through under
+# the spec-overlap's alpha.
 spec_overlap_stuck_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap_stuck,
     line_color="#d96272", line_alpha=0.0, line_width=0,
@@ -1908,11 +1929,6 @@ spec_overlap_both_glyph = fig.multi_polygons(
 # pointed at the orange (now: user-overlap) glyph. The overlay-
 # appearance config below still references it under the old key.
 spec_overlap_glyph = spec_overlap_user_glyph
-open_shutters_glyph = fig.multi_polygons(
-    xs="xs", ys="ys", source=src_open_shutters,
-    line_color="#ff3333", line_width=1.5,
-    fill_color="#ff8888", fill_alpha=0.35,
-)
 highlighted_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_highlighted,
     line_color="cyan", line_width=2.0, fill_alpha=0.0,
@@ -2473,7 +2489,26 @@ def refresh_overlays() -> None:
     # rows above/below disperse onto overlapping detector pixels. Wider
     # tolerances over-paint inconvenient (eMPT uses shval ≈ s exactly).
     SHVAL_S_TOLERANCE = 1
-    user_opens = list(state["open_shutters"].keys())
+    # Group user-opens into slitlets. An N-shutter slitlet opened on
+    # one source (same target_id, same (q, d), N consecutive s rows)
+    # disperses one continuous spectrum onto the detector — not N
+    # independent ones. Without this grouping a 3-shutter slitlet
+    # would increment its candidates' conflict count by 3 instead of
+    # 1, tripling the alpha and producing a darker stripe than MPT
+    # shows.
+    #
+    # Group key is `(q, d, target_id_or_anon)`: all shutters at the
+    # same column with the same target id (or all anonymous opens at
+    # the same column when there's no target id) form one slitlet.
+    # An anonymous slitlet auto-created by clicking on a non-target
+    # operable shutter still groups its N shutters together because
+    # they all share `target_id=None` and the same `(q, d)`.
+    user_groups: dict[tuple, list[tuple[int, int, int]]] = {}
+    for (q, s, d), sh in state["open_shutters"].items():
+        tid = getattr(sh, "target_id", None)
+        key = (q, d, tid if tid is not None else "_anon_")
+        user_groups.setdefault(key, []).append((q, s, d))
+
     stuck_flat = np.where(_FLAT_REASON == 2)[0]
     stuck_keys = [
         (int(f // (171 * 365)) + 1,
@@ -2481,47 +2516,346 @@ def refresh_overlays() -> None:
          int(f % 365) + 1)
         for f in stuck_flat
     ]
+    # Stuck shutters are individual physical defects, not slitlets —
+    # each one is its own dispersion source.
+    stuck_groups: list[list[tuple[int, int, int]]] = [[k] for k in stuck_keys]
 
-    # Per-affected-shutter conflict COUNTS, split by source type
-    # (stuck-open vs user-open). The same shutter can be hit by
-    # several dispersing sources of either type, and the per-polygon
-    # alpha = min(1, base × n_total) lets the colour saturate where
-    # the contamination is multi-source. Splitting by source type
-    # also drives the three MPT-faithful colours:
-    #   stuck-only (n_user==0)   → pink   (Mask Stuck)
-    #   user-only  (n_stuck==0)  → orange (Masked)
-    #   both                     → purple (Mask Conflict)
+    # Per-affected-shutter conflict counts, split FOUR ways:
+    #   user_direct, user_buffer, stuck_direct, stuck_buffer.
+    #
+    # DIRECT means the candidate row lies in the slitlet's actual
+    # row range (i.e. the spectrum's true cross-dispersion path
+    # lands on this row). BUFFER means the candidate is at the ±1
+    # tolerance edge — a conservative safety margin, NOT an actual
+    # contamination. Only direct hits count as "real" overlap; the
+    # buffer rows are warnings for diagnostic display.
+    #
+    # The total counts (user_counts, stuck_counts) sum direct + buffer
+    # and are used by the silver-edge filter and the stats bar.
+    user_direct: dict[int, int] = {}
+    user_buffer: dict[int, int] = {}
+    stuck_direct: dict[int, int] = {}
+    stuck_buffer: dict[int, int] = {}
     stuck_counts: dict[int, int] = {}
     user_counts: dict[int, int] = {}
-    if user_opens or stuck_keys:
+    if user_groups or stuck_keys:
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
         q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365) + 1
         in_view_op = in_view & (_FLAT_REASON == 0)
 
-        def _accumulate(sources, dst_counts: dict[int, int]) -> None:
-            for q_o, s_o, d_o in sources:
-                open_flat = (
-                    (q_o - 1) * 171 * 365 + (s_o - 1) * 365 + (d_o - 1)
+        # Per-shutter on-detector x/y range (loaded lazily by combo).
+        # Two complementary uses:
+        #
+        #   1. SUBTRACTIVE x-range filter — drops candidates whose
+        #      spectrum doesn't share any detector x with the open
+        #      shutter (e.g. G140M/F070LP at ΔV2 ≈ 84″: spectra are
+        #      only ~60″ wide on detector, so the V2-distance check's
+        #      "potentially overlapping" verdict is wrong).
+        #
+        #   2. ADDITIVE cross-quadrant detector-y check — catches
+        #      cross-quadrant pairs whose spectrum y-stripes coincide
+        #      at the x-overlap region even though MSA s differs
+        #      (e.g. G140M/F100LP Q4 s=34 ↔ Q2 s=33: MSA-row + tilt
+        #      predicts a row offset that excludes the candidate, but
+        #      detector y at the x-overlap is essentially identical).
+        #      Same-quadrant pairs keep their existing MSA-row + tilt
+        #      behaviour (so the tilt-jump-at-open-shutter visual is
+        #      preserved).
+        #
+        # If the precomputed xy grids aren't shipped for this combo
+        # the filter passes everything through unchanged (legacy V2
+        # distance + MSA-row behaviour).
+        from .wavelengths import shutter_xy_grids as _xy_grids
+        from .wavelengths import tilt_slope_grid as _slope_grid
+        _xy = _xy_grids(state["disperser"], state["filter"])
+        if _xy is not None:
+            _xlo_n1 = _xy["x_lo_nrs1"].reshape(-1)
+            _xhi_n1 = _xy["x_hi_nrs1"].reshape(-1)
+            _y_n1   = _xy["y_nrs1"  ].reshape(-1)
+            _xlo_n2 = _xy["x_lo_nrs2"].reshape(-1)
+            _xhi_n2 = _xy["x_hi_nrs2"].reshape(-1)
+            _y_n2   = _xy["y_nrs2"  ].reshape(-1)
+            _on_n1 = np.isfinite(_xlo_n1) & np.isfinite(_xhi_n1) & np.isfinite(_y_n1)
+            _on_n2 = np.isfinite(_xlo_n2) & np.isfinite(_xhi_n2) & np.isfinite(_y_n2)
+            _sg = _slope_grid(state["disperser"], state["filter"])
+            # Convert slope (rows/arcsec) → detector px / detector px
+            # using the NIRSpec geometry constants 5 px/row (cross-
+            # dispersion) and ≈ 13 px/arcsec (dispersion).
+            _slope_det_flat = (
+                _sg.reshape(-1).astype(float) * (5.0 / 13.0)
+                if _sg is not None else np.zeros_like(_xlo_n1)
+            )
+        else:
+            _xlo_n1 = _xhi_n1 = _y_n1 = None
+            _xlo_n2 = _xhi_n2 = _y_n2 = None
+            _on_n1 = _on_n2 = None
+            _slope_det_flat = None
+
+        # Tilt-aware row check (MPT-faithful). NIRSpec spectral traces
+        # drift slightly in the cross-dispersion direction as you move
+        # along the dispersion direction — but in APT MPT the drift
+        # snaps in discrete row steps, with a clear breakpoint at the
+        # dispersing shutter: the spectrum stays on s_o until the
+        # cumulative drift |slope·Δv2| exceeds 0.5, then jumps to
+        # s_o ± 1, and so on.
+        #
+        # We implement that by rounding the predicted row offset to
+        # the nearest integer BEFORE the row check. For PRISM the
+        # rounded offset is 0 everywhere (sub-row tilt across the full
+        # V2 extent), so PRISM matches the flat-row v1.0–v1.3.0
+        # behaviour exactly. For the M and H gratings the discrete
+        # 1-row steps become visible at the spectrum's V2 edges.
+        #
+        # The tilt slope (rows per arcsec V2) is bilinearly
+        # interpolated from a 10×10-per-quadrant grid precomputed via
+        # jwst.assign_wcs (see scripts/precompute_trace_tilt.py).
+        # Missing combo → slope = 0 → identical to flat-row.
+        from .wavelengths import tilt_slope_for_shutter
+
+        v2_all = _V2_OFFSETS_ALL + MSA_V2_REF
+        # 0-based column index per flat element (length 4*171*365).
+        d_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % 365
+
+        # `hit_sources[i]` = the set of (source_type, source_idx)
+        # tuples that contribute a direct or buffer hit to candidate
+        # `i`. Used after both _accumulate passes to identify which
+        # source slitlets are in active collision (their own shutters
+        # have been hit by ANOTHER source) — those slitlets' entire
+        # contamination bands then propagate purple.
+        hit_sources: dict[int, set[tuple[str, int]]] = {}
+
+        # Broadened candidate mask: include stuck-open shutters too so
+        # we can detect user-pick ↔ stuck-open touching collisions.
+        # The silver-edge layer keeps its own `in_view_op` (operable
+        # only); this `in_view_candidates` is just for the contamination
+        # accumulator.
+        in_view_candidates = in_view & (_FLAT_REASON != 1)
+
+        def _accumulate(
+            source_type: str,
+            groups,
+            dst_direct: dict[int, int],
+            dst_buffer: dict[int, int],
+        ) -> None:
+            """Each `group` is a list of (q, s, d) shutters in one
+            dispersing slitlet (same column, consecutive rows). Records
+            per-candidate hits in TWO bins:
+
+            * ``dst_direct`` — candidate row lies in the slitlet's
+              actual row range (with row-offset tilt), i.e. the
+              spectrum's true cross-dispersion path lands on this row.
+              These are "real" contamination hits.
+
+            * ``dst_buffer`` — candidate row is at the ±1 tolerance
+              edge around the direct range (the safety buffer for the
+              ±1-row collision conservatism). The spectrum's TRUE row
+              doesn't actually hit this candidate; the buffer is for
+              edge cases (tilt fluctuation, mis-calibration).
+
+            The MPT-faithful purple ("Mask Conflict") classification
+            requires DIRECT overlap — buffer-only overlaps from two
+            sources at adjacent rows (e.g. stuck-opens at s=155 and
+            s=157 both ±1 to row 156) must not be treated as a real
+            collision.
+            """
+            for src_idx, group in enumerate(groups):
+                if not group:
+                    continue
+                qs = [g[0] for g in group]
+                ss = [g[1] for g in group]
+                ds = [g[2] for g in group]
+                q_o = qs[0]
+                d_o = ds[0]
+                s_center = int(np.round(np.mean(ss)))
+                slope_k = tilt_slope_for_shutter(
+                    state["disperser"], state["filter"],
+                    q_o, s_center, d_o,
                 )
-                v2_o = float(_V2_OFFSETS_ALL[open_flat] + MSA_V2_REF)
                 partners = NRS1_QUADS if q_o in NRS1_QUADS else NRS2_QUADS
                 same_det = np.isin(q_arr, list(partners))
-                same_row = np.abs(s_arr - (s_o - 1)) <= SHVAL_S_TOLERANCE
-                near_v2 = (
-                    np.abs((_V2_OFFSETS_ALL + MSA_V2_REF) - v2_o)
-                    < v2_overlap
+                anchor_flat = (
+                    (q_o - 1) * 171 * 365 + (s_center - 1) * 365 + (d_o - 1)
                 )
-                idx_this = np.where(
-                    in_view_op & same_det & same_row & near_v2
-                )[0]
-                # An open shutter doesn't contaminate itself.
-                idx_this = idx_this[idx_this != open_flat]
-                for i in idx_this.tolist():
-                    dst_counts[i] = dst_counts.get(i, 0) + 1
+                if not (0 <= anchor_flat < v2_all.size):
+                    continue
+                v2_o = float(v2_all[anchor_flat])
+                v2_open_row = V2_MSA[q_arr - 1, s_center - 1, d_arr]
+                dv2 = v2_open_row - v2_o
+                # Tilt-aware row prediction was tried (round-half-away-
+                # from-zero of slope×Δv2) but the resulting band shifts
+                # by ±1 row when |drift| crosses 0.5 — at far-d edges
+                # of v2_overlap the band's union becomes N+3 or N+4 rows
+                # instead of the expected N+2. Users found the diagonal
+                # jump visually distracting (see G140M Q1 s=115 d=37
+                # screenshot — band sticks out at d ≈ 153 transition).
+                # We clamp row_offset = 0 so the band stays exactly at
+                # s_o ± (half_extent + SHVAL_S_TOLERANCE) across the
+                # full v2_overlap range. Trade-off: at far-d candidates
+                # where the actual spectrum drift exceeds 0.5 rows, the
+                # rendered band doesn't follow the spectrum — but
+                # within typical M/H grating slopes and v2_overlap
+                # ranges, the dropped contamination at the wing edges
+                # is small.
+                row_offset = np.zeros_like(q_arr, dtype=np.int64)
+                # `drift` retained so any downstream debug tools can
+                # still read it; not used in the row check.
+                _drift_for_debug = slope_k * dv2  # noqa: F841
+                different_col = d_arr != (d_o - 1)
+                near_v2 = different_col & (np.abs(dv2) < v2_overlap)
+                half_extent = (max(ss) - min(ss)) // 2 + (max(ss) - min(ss)) % 2
+                s_pred = s_arr - ((s_center - 1) + row_offset)
+                direct_row = np.abs(s_pred) <= half_extent
+                buffer_row = (np.abs(s_pred) <= (half_extent + SHVAL_S_TOLERANCE)
+                               ) & (~direct_row)
 
-        _accumulate(user_opens, user_counts)
-        _accumulate(stuck_keys, stuck_counts)
+                # === SUBTRACTIVE: x-range filter ===
+                # Drops candidates whose spectrum doesn't physically
+                # share any detector x with the open (e.g. F070LP
+                # spectra at ΔV2≈84″).
+                if _xlo_n1 is not None:
+                    o_on_n1f = bool(_on_n1[anchor_flat])
+                    o_on_n2f = bool(_on_n2[anchor_flat])
+                    x_share_n1 = np.zeros_like(q_arr, dtype=bool)
+                    x_share_n2 = np.zeros_like(q_arr, dtype=bool)
+                    if o_on_n1f:
+                        o_xlo, o_xhi = float(_xlo_n1[anchor_flat]), float(_xhi_n1[anchor_flat])
+                        x_share_n1 = _on_n1 & (_xlo_n1 <= o_xhi) & (_xhi_n1 >= o_xlo)
+                    if o_on_n2f:
+                        o_xlo, o_xhi = float(_xlo_n2[anchor_flat]), float(_xhi_n2[anchor_flat])
+                        x_share_n2 = _on_n2 & (_xlo_n2 <= o_xhi) & (_xhi_n2 >= o_xlo)
+                    x_share = x_share_n1 | x_share_n2
+                    if not (o_on_n1f or o_on_n2f):
+                        x_share[:] = False
+                else:
+                    x_share = np.ones_like(q_arr, dtype=bool)
+
+                # === ADDITIVE: cross-quadrant detector-y check ===
+                # MSA s is local to each quadrant — candidates in
+                # other quadrants can have very different s yet land
+                # on essentially the same detector y as the open's
+                # spectrum at the x-overlap region (tilt brings the
+                # spectra together). The MSA-row + tilt check above
+                # would miss these. Compute local y at the x-overlap
+                # midpoint for each shutter using its own median y +
+                # slope, and OR in any candidate whose stripe meets
+                # the open's stripe in y at that x.
+                cross_q_direct = np.zeros_like(q_arr, dtype=bool)
+                cross_q_buffer = np.zeros_like(q_arr, dtype=bool)
+                if _xlo_n1 is not None and _slope_det_flat is not None:
+                    different_quad = q_arr != q_o
+                    SLIT_HALF_PX = 2.5   # → direct  (stripes co-aligned)
+                    SLIT_FULL_PX = 5.0   # → buffer  (stripes touching)
+                    # Minimum on-detector x-overlap width before a
+                    # cross-quadrant hit is reported. Filters out
+                    # cases where the spectra just clip each other's
+                    # edge by a few pixels (e.g. G235M Q4 d=335 s=34
+                    # ↔ Q2 d=280 s=33: only ~3 px x-overlap and
+                    # only ~2 nm of shared spectral content —
+                    # truly negligible).
+                    MIN_X_OVERLAP_PX = 10.0
+                    o_sd = float(_slope_det_flat[anchor_flat])
+                    for det_share, xlo_a, xhi_a, y_a, on_a in (
+                        (x_share_n1, _xlo_n1, _xhi_n1, _y_n1, _on_n1),
+                        (x_share_n2, _xlo_n2, _xhi_n2, _y_n2, _on_n2),
+                    ):
+                        if xlo_a is None:
+                            continue
+                        o_on = bool(on_a[anchor_flat])
+                        if not o_on:
+                            continue
+                        o_xlo_f = float(xlo_a[anchor_flat])
+                        o_xhi_f = float(xhi_a[anchor_flat])
+                        o_y_f   = float(y_a[anchor_flat])
+                        o_xc    = 0.5 * (o_xlo_f + o_xhi_f)
+                        x_int_lo = np.maximum(xlo_a, o_xlo_f)
+                        x_int_hi = np.minimum(xhi_a, o_xhi_f)
+                        x_mid    = 0.5 * (x_int_lo + x_int_hi)
+                        x_overlap_w = np.maximum(x_int_hi - x_int_lo, 0.0)
+                        y_o_local = o_y_f + o_sd * (x_mid - o_xc)
+                        c_xc      = 0.5 * (xlo_a + xhi_a)
+                        y_c_local = y_a + _slope_det_flat * (x_mid - c_xc)
+                        dy = np.abs(y_o_local - y_c_local)
+                        valid = (
+                            different_quad
+                            & on_a & det_share
+                            & (x_overlap_w >= MIN_X_OVERLAP_PX)
+                        )
+                        cross_q_direct |= valid & (dy <= SLIT_HALF_PX)
+                        cross_q_buffer |= valid & (dy > SLIT_HALF_PX) & (dy <= SLIT_FULL_PX)
+                    cross_q_buffer &= ~cross_q_direct
+                cross_q_direct &= different_col
+                cross_q_buffer &= different_col
+
+                # Combine MSA-row + tilt with cross-quadrant additions
+                final_direct = (same_det & direct_row & near_v2 & x_share) | cross_q_direct
+                final_buffer = (
+                    ((same_det & buffer_row & near_v2 & x_share) | cross_q_buffer)
+                    & ~final_direct
+                )
+
+                # Candidate mask = `in_view_candidates` (operable AND
+                # stuck-open) so we can also detect when a source's
+                # spectrum touches a stuck-open shutter.
+                idx_direct = np.where(in_view_candidates & final_direct)[0]
+                idx_buffer = np.where(in_view_candidates & final_buffer)[0]
+                slitlet_flat = {
+                    (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+                    for (q, s, d) in group
+                }
+                source_tag = (source_type, int(src_idx))
+                for i in idx_direct.tolist():
+                    if i in slitlet_flat:
+                        continue
+                    dst_direct[i] = dst_direct.get(i, 0) + 1
+                    hit_sources.setdefault(i, set()).add(source_tag)
+                for i in idx_buffer.tolist():
+                    if i in slitlet_flat:
+                        continue
+                    dst_buffer[i] = dst_buffer.get(i, 0) + 1
+                    hit_sources.setdefault(i, set()).add(source_tag)
+
+        user_groups_list = list(user_groups.values())
+        _accumulate("user", user_groups_list, user_direct, user_buffer)
+        _accumulate("stuck", stuck_groups, stuck_direct, stuck_buffer)
+
+        # Identify "conflicted" sources: any open whose own shutters
+        # have been hit by a DIFFERENT source. Both touching slitlets
+        # in such a pair get flagged — and their downstream
+        # contamination bands later promote to purple (chain
+        # propagation only when the slitlets themselves collide).
+        conflicted_user: set[int] = set()
+        conflicted_stuck: set[int] = set()
+        for src_idx, group in enumerate(user_groups_list):
+            for (q, s, d) in group:
+                flat = (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+                others = hit_sources.get(flat, set()) - {("user", src_idx)}
+                if others:
+                    conflicted_user.add(src_idx)
+                    for (otype, oi) in others:
+                        if otype == "user":
+                            conflicted_user.add(oi)
+                        else:
+                            conflicted_stuck.add(oi)
+                    break
+        for src_idx, group in enumerate(stuck_groups):
+            for (q, s, d) in group:
+                flat = (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+                others = hit_sources.get(flat, set()) - {("stuck", src_idx)}
+                if others:
+                    conflicted_stuck.add(src_idx)
+                    for (otype, oi) in others:
+                        if otype == "user":
+                            conflicted_user.add(oi)
+                        else:
+                            conflicted_stuck.add(oi)
+                    break
+        # Total counts (direct + buffer) drive the silver-edge filter
+        # and the stats bar's "Conflict shutters" cell.
+        for i in set(user_direct) | set(user_buffer):
+            user_counts[i] = user_direct.get(i, 0) + user_buffer.get(i, 0)
+        for i in set(stuck_direct) | set(stuck_buffer):
+            stuck_counts[i] = stuck_direct.get(i, 0) + stuck_buffer.get(i, 0)
 
     # Base alpha per category — slider-controlled in Settings →
     # Overlay appearance, persisted via the prefs system, stashed
@@ -2546,24 +2880,74 @@ def refresh_overlays() -> None:
         ]
         return cds
 
-    # Build the three partitioned index→alpha maps. Each category
-    # gets its own base — the user can tune them independently in
-    # the Settings appearance picker (e.g., dim the pink and
-    # darken the purple).
+    # Colour rule, branching by candidate type:
+    #
+    # PURPLE (Mask Conflict) marks an active collision and applies
+    # ONLY to user-open shutters that the user has already picked.
+    # An operable candidate is NEVER purple — opening a brand-new
+    # slitlet on a clean (silver-edged) row can only ever convert
+    # operable shutters to pink/orange warnings, with alpha stacked
+    # by the number of contaminating sources.
+    #
+    # For USER-OPEN candidates:
+    #   any hit (direct or buffer) from another open  → PURPLE
+    #   no hits                                       → stays red
+    # The "any hit" rule captures touching slitlets: a buffer hit
+    # on a user-open by construction means the other source is at
+    # most 1 row away with no intervening operable row.
+    #
+    # For OPERABLE candidates:
+    #   any user-source hit (direct or buffer)   → ORANGE
+    #   any stuck-source hit, no user            → PINK
+    #   no hits                                  → silver (untouched)
+    # Alpha stacks by the count of contaminating sources, so a
+    # shutter hit by N sources is N× as opaque as one hit by 1.
+    # When both user and stuck sources hit the same operable
+    # shutter we render orange (user-actionable) with the combined
+    # count contributing to the alpha — matching APT MPT, where
+    # opening a new slitlet only ever intensifies the existing
+    # "Masked" warning, never escalates an operable shutter to
+    # "Mask Conflict".
+    user_open_flat = {
+        (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+        for (q, s, d) in state["open_shutters"].keys()
+    }
     stuck_only_alpha: dict[int, float] = {}
     user_only_alpha: dict[int, float] = {}
     both_alpha: dict[int, float] = {}
-    all_idx = set(stuck_counts.keys()) | set(user_counts.keys())
+    all_idx = (
+        set(user_direct) | set(user_buffer)
+        | set(stuck_direct) | set(stuck_buffer)
+    )
     for i in all_idx:
-        n_s = stuck_counts.get(i, 0)
-        n_u = user_counts.get(i, 0)
-        n_total = n_s + n_u
-        if n_s > 0 and n_u > 0:
-            both_alpha[i] = min(1.0, base_alpha_both * max(1, n_total))
-        elif n_s > 0:
-            stuck_only_alpha[i] = min(1.0, base_alpha_stuck * max(1, n_total))
-        elif n_u > 0:
-            user_only_alpha[i] = min(1.0, base_alpha_user * max(1, n_total))
+        n_ud = user_direct.get(i, 0)
+        n_ub = user_buffer.get(i, 0)
+        n_sd = stuck_direct.get(i, 0)
+        n_sb = stuck_buffer.get(i, 0)
+        n_total_u = n_ud + n_ub
+        n_total_s = n_sd + n_sb
+        n_total = n_total_u + n_total_s
+        if i in user_open_flat:
+            if n_total >= 1:
+                both_alpha[i] = min(1.0, base_alpha_both * n_total)
+            continue
+        # Operable candidate. Purple ONLY if it's downstream of a
+        # source slitlet that is itself in collision (touching another
+        # open). Otherwise the warning colours (orange/pink) just
+        # stack alpha with the contamination count — opening a clean
+        # new slitlet never escalates an operable shutter to purple.
+        sources_here = hit_sources.get(i, set())
+        from_conflicted = any(
+            (t == "user" and si in conflicted_user)
+            or (t == "stuck" and si in conflicted_stuck)
+            for (t, si) in sources_here
+        )
+        if from_conflicted:
+            both_alpha[i] = min(1.0, base_alpha_both * n_total)
+        elif n_total_u >= 1:
+            user_only_alpha[i] = min(1.0, base_alpha_user * n_total)
+        elif n_total_s >= 1:
+            stuck_only_alpha[i] = min(1.0, base_alpha_stuck * n_total_s)
 
     src_spec_overlap_stuck.data = _partition_and_project(stuck_only_alpha)
     src_spec_overlap_user.data = _partition_and_project(user_only_alpha)
@@ -4419,7 +4803,40 @@ session_load_btn.on_click(on_session_load)
 # ---------------------------------------------------------------------------
 
 
-_EX_DIR = Path(__file__).resolve().parent.parent
+# Locations searched (in priority order) for the example_a370/ and
+# example_r0600/ folders. Built lazily on every click so the user can
+# `vmpt examples download` AFTER opening the app and the buttons pick
+# them up without restarting.
+_EX_DEV_DIR = Path(__file__).resolve().parent.parent  # source checkout layout
+_EX_USER_DIR = Path.home() / ".vmpt" / "examples"     # standard cache location
+                                                       # (matches vmpt cli default)
+
+
+def _find_example_root() -> Path | None:
+    """Return the first directory under which ``example_a370/`` or
+    ``example_r0600/`` is found, or ``None`` if neither location has
+    them. Order: ``~/.vmpt/examples`` → source-checkout parent → CWD.
+    """
+    candidates = [
+        _EX_USER_DIR,
+        _EX_DEV_DIR,
+        Path.cwd(),
+    ]
+    for d in candidates:
+        if (d / "example_a370").exists() or (d / "example_r0600").exists():
+            return d
+    return None
+
+
+def _example_missing_msg(which: str) -> str:
+    """Format a helpful status line when an example folder isn't found,
+    pointing the user at the CLI command they need to run."""
+    return (
+        f"Example {which} not found. Run `vmpt examples download` in "
+        f"your terminal to fetch it into {_EX_USER_DIR}, then click "
+        "the button again (no restart needed)."
+    )
+
 
 def _reset_pointing_inputs() -> None:
     """Clear RA/Dec inputs so the next image-load auto-recenters."""
@@ -4428,9 +4845,10 @@ def _reset_pointing_inputs() -> None:
 
 
 def on_example_a370():
-    p = _EX_DIR / "example_a370" / "a370_f182m_f200w_f210m.fits"
-    if not p.exists():
-        _set_status(f"Example missing: {p}", "err")
+    root = _find_example_root()
+    p = (root / "example_a370" / "a370_f182m_f200w_f210m.fits") if root else None
+    if p is None or not p.exists():
+        _set_status(_example_missing_msg("Abell 370"), "err")
         return
     # Example buttons are a hard reset: clear pointing so the new image
     # auto-recenters (otherwise loading R0600 after A370 leaves pointing
@@ -4440,10 +4858,11 @@ def on_example_a370():
 
 
 def on_example_r0600():
-    jpg = _EX_DIR / "example_r0600" / "JWST_F090W_F200W_F444W.jpg"
-    wcs = _EX_DIR / "example_r0600" / "wcs.fits"
-    if not (jpg.exists() and wcs.exists()):
-        _set_status("Example r0600 files missing.", "err")
+    root = _find_example_root()
+    jpg = (root / "example_r0600" / "JWST_F090W_F200W_F444W.jpg") if root else None
+    wcs = (root / "example_r0600" / "wcs.fits") if root else None
+    if jpg is None or not (jpg.exists() and wcs.exists()):
+        _set_status(_example_missing_msg("RXCJ0600"), "err")
         return
     _reset_pointing_inputs()
     sidecar_path_input.value = str(wcs)

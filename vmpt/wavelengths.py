@@ -75,36 +75,200 @@ LAMBDA_PER_ARCSEC: float = (5.30 - 0.60) / V2_DISP_EXTENT  # ~0.026 μm/arcsec
 # behaviours with a single (large) V2 half-extent below.
 #
 # IMPORTANT — what the visualisation actually shows. We compute the
-# orange spectral-conflict shutters as "same q AND same s in the MSA grid,
-# within `v2_overlap_distance` of the open shutter in V2." So:
+# spectral-conflict shutters as "same s row AND share a primary
+# detector AND within `v2_overlap_distance` of the open shutter in V2."
+# So `v2_overlap_distance(disperser, filt)` must return the *full*
+# V2 extent of the dispersed spectrum on the detector — when two
+# same-detector spectra of length L are offset by ΔV2, they share at
+# least one detector pixel iff |ΔV2| < L.
 #
-#   - PRISM at a center shutter (d ~ 200): ~94 % of the row in the same
-#     quadrant. (Yes, "most of the row" — physical: PRISM spectrum on
-#     detector is ~70" wide in V2, the row is 73" wide.)
-#   - PRISM at an edge shutter (d ~ 10): only ~51 % of the row. (The
-#     spectrum runs off the end.)
-#   - M / H gratings: ~100 % of the row in same quadrant.
+# Values measured directly from `slit_frame → detector` traces in
+# stenv: detector x span of the spectrum × ≈ 0.077 ″/V2-px. Per-combo
+# because the filter sets the usable wavelength range, which the
+# spectrum's x-span follows.
 #
-# Not yet modelled: cross-quadrant collisions for grating modes. Two
-# shutters in different quadrants but at the same detector y can collide;
-# we'd need the eMPT shval tables to do this exactly. Reasonable
-# enhancement for a future release.
-SPECTRUM_V2_HALFEXTENT: dict[str, float] = {
-    "PRISM": 35.0,
-    "G140M": 200.0,
-    "G235M": 200.0,
-    "G395M": 200.0,
-    "G140H": 500.0,
-    "G235H": 500.0,
-    "G395H": 500.0,
+# Cross-detector pairs (e.g. Q4 G395M on NRS1 vs Q2 G395M on NRS2 at
+# same d) are filtered out by the primary-detector lookup BEFORE this
+# distance check fires — so two spectra at ΔV2 ≈ 87″ that live on
+# different detector halves correctly report no overlap, even though
+# 87″ < the 103″ full extent.
+SPECTRUM_V2_EXTENT: dict[tuple[str, str], float] = {
+    ("PRISM", "CLEAR"):   32.0,
+    ("G140M", "F070LP"):  98.0,
+    ("G140M", "F100LP"): 109.0,
+    ("G235M", "F170LP"): 110.0,
+    ("G395M", "F290LP"): 103.0,
+    ("G140H", "F070LP"): 185.0,
+    ("G140H", "F100LP"): 307.0,
+    ("G235H", "F170LP"): 300.0,
+    ("G395H", "F290LP"): 281.0,
 }
+# Fallback by disperser only, for unrecognised filter combos.
+_FALLBACK_V2_EXTENT: dict[str, float] = {
+    "PRISM": 32.0,
+    "G140M": 109.0,
+    "G235M": 110.0,
+    "G395M": 103.0,
+    "G140H": 307.0,
+    "G235H": 300.0,
+    "G395H": 281.0,
+}
+# Backwards-compatibility aliases for the old "half-extent" names —
+# downstream code (optimizer, tests) that imports them just gets the
+# (now full) values.
+SPECTRUM_V2_HALFEXTENT = SPECTRUM_V2_EXTENT
+_FALLBACK_V2_HALFEXTENT = _FALLBACK_V2_EXTENT
 
 
 def v2_overlap_distance(disperser: str, filt: str) -> float:
-    """V2 half-extent (arcsec) of the spectrum on the detector. Two same-row
-    shutters whose V2 separation is less than this value collide on the
-    detector. See module-level comment for the eMPT reference."""
-    return SPECTRUM_V2_HALFEXTENT.get(disperser.upper(), 180.0)
+    """Full V2 extent (arcsec) of the spectrum on the detector. Two
+    same-row shutters whose spectra land on the SAME detector and
+    whose V2 separation is less than this value share at least one
+    detector pixel — i.e. their spectra collide on the pipeline.
+
+    The same-detector test is the responsibility of the caller (use
+    :func:`primary_detector`). This function only returns the distance.
+
+    Looked up per (disperser, filter) combo because the filter sets
+    the usable wavelength range, which controls the spectrum's
+    detector x-span. Falls back to the disperser-only value if the
+    combo isn't in the measured table, and to a safe upper bound
+    (300″) for unknown dispersers."""
+    d = disperser.upper()
+    f = filt.upper()
+    if (d, f) in SPECTRUM_V2_EXTENT:
+        return SPECTRUM_V2_EXTENT[(d, f)]
+    if d in _FALLBACK_V2_EXTENT:
+        return _FALLBACK_V2_EXTENT[d]
+    return 300.0
+
+
+def tilt_slope_map(
+    disperser: str, filt: str,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+    """Return the precomputed tilt-slope map for a (disperser, filter)
+    combo, or ``None`` if the table doesn't ship it.
+
+    The map describes how much the spectrum's cross-dispersion row
+    drifts as a function of V2 distance from the open shutter:
+
+        s_expected(ΔV2_arcsec) = s_open + slope * ΔV2_arcsec
+
+    where `s_open` is the MSA s-row (1-based) of the dispersing
+    shutter and `ΔV2_arcsec` is the candidate shutter's V2 offset
+    from it. The slope is in [MSA rows per arcsec V2] and is computed
+    from `slit_frame → detector` traces on a 10×10 grid per MSA
+    quadrant (see ``scripts/precompute_trace_tilt.py``).
+
+    Returns
+    -------
+    (grid_rows, grid_cols, slope) or None
+        grid_rows: shape (Ngrid_r,) int16 — vMPT row centres (1..171)
+        grid_cols: shape (Ngrid_c,) int16 — vMPT col centres (1..365)
+        slope:     shape (4, Ngrid_r, Ngrid_c) float32 — tilt slope
+                   in rows per arcsec V2. NaN entries mean the shutter
+                   doesn't project onto either detector for this combo.
+
+        ``None`` when the precomputed table is missing or doesn't
+        ship tilt arrays for this combo (older builds) — callers
+        should fall back to slope = 0 (flat-row overlap check).
+    """
+    tbl = _load_dispersion_table()
+    if tbl is None:
+        return None
+    d = disperser.upper()
+    f = filt.upper()
+    key_r = f"{d}_{f}_tilt_grid_rows"
+    key_c = f"{d}_{f}_tilt_grid_cols"
+    key_s = f"{d}_{f}_tilt_slope"
+    if key_r not in tbl or key_c not in tbl or key_s not in tbl:
+        return None
+    return tbl[key_r], tbl[key_c], tbl[key_s]
+
+
+def tilt_slope_grid(disperser: str, filt: str) -> np.ndarray | None:
+    """Return the full (4, 171, 365) tilt slope grid for (disperser,
+    filter), bilinearly interpolated from the 10×10 quadrant sample.
+    Returns ``None`` if the table or this combo isn't available; the
+    caller is expected to fall back to 0-slope (flat) in that case.
+
+    The cached interpolated grid lets the runtime overlap check
+    estimate each candidate shutter's spectrum-y-drift (used to widen
+    the y tolerance for cross-quadrant pairs), without recomputing
+    the per-shutter bilinear from scratch."""
+    cache_key = (disperser.upper(), filt.upper())
+    if cache_key in _TILT_SLOPE_GRID_CACHE:
+        return _TILT_SLOPE_GRID_CACHE[cache_key]
+    m = tilt_slope_map(disperser, filt)
+    if m is None:
+        _TILT_SLOPE_GRID_CACHE[cache_key] = None
+        return None
+    grid_rows, grid_cols, slope = m
+    s_targets = np.arange(1, 172, dtype=float)
+    d_targets = np.arange(1, 366, dtype=float)
+    s_mesh, d_mesh = np.meshgrid(s_targets, d_targets, indexing="ij")
+    out = np.full((4, 171, 365), np.nan, dtype=np.float32)
+    for qi in range(4):
+        out[qi] = _bilinear_finite_aware(
+            np.asarray(grid_rows, dtype=float),
+            np.asarray(grid_cols, dtype=float),
+            slope[qi],
+            s_mesh, d_mesh,
+        )
+    # NaN cells (all-NaN neighbourhoods) → 0 so callers can use the
+    # value unconditionally; same convention as `tilt_slope_for_shutter`.
+    out = np.where(np.isnan(out), 0.0, out)
+    _TILT_SLOPE_GRID_CACHE[cache_key] = out
+    return out
+
+
+_TILT_SLOPE_GRID_CACHE: dict[tuple[str, str], np.ndarray | None] = {}
+
+
+def tilt_slope_for_shutter(
+    disperser: str, filt: str, q: int, s: int, d: int,
+) -> float:
+    """Bilinear-interpolated tilt slope (rows/arcsec V2) for a single
+    open shutter at (quadrant, s-row, d-col). Returns 0.0 if the table
+    is unavailable, the combo isn't covered, or all four grid corners
+    around (s, d) are NaN. Callers can use the returned value
+    unconditionally — a zero slope reduces the tilt-aware check back
+    to the flat row check.
+    """
+    m = tilt_slope_map(disperser, filt)
+    if m is None:
+        return 0.0
+    grid_rows, grid_cols, slope = m
+    qi = int(q) - 1
+    if not (0 <= qi < slope.shape[0]):
+        return 0.0
+    s_clamped = float(max(grid_rows[0], min(grid_rows[-1], s)))
+    d_clamped = float(max(grid_cols[0], min(grid_cols[-1], d)))
+    # Bracket indices for the input (s, d) along each grid axis.
+    ri = int(np.searchsorted(grid_rows, s_clamped, side="right") - 1)
+    ri = max(0, min(ri, len(grid_rows) - 2))
+    ci = int(np.searchsorted(grid_cols, d_clamped, side="right") - 1)
+    ci = max(0, min(ci, len(grid_cols) - 2))
+    fr = (s_clamped - grid_rows[ri]) / (grid_rows[ri + 1] - grid_rows[ri])
+    fc = (d_clamped - grid_cols[ci]) / (grid_cols[ci + 1] - grid_cols[ci])
+    # Bilinear over the 4 corners — finite-aware: any NaN corner is
+    # given a zero weight; result is normalised by the surviving
+    # weights. If all four are NaN we return 0 (flat-row fallback).
+    corners = [
+        ((1 - fr) * (1 - fc), slope[qi, ri,     ci    ]),
+        ((1 - fr) *      fc , slope[qi, ri,     ci + 1]),
+        (     fr  * (1 - fc), slope[qi, ri + 1, ci    ]),
+        (     fr  *      fc , slope[qi, ri + 1, ci + 1]),
+    ]
+    num = 0.0
+    den = 0.0
+    for w, v in corners:
+        if np.isfinite(v):
+            num += w * float(v)
+            den += w
+    if den <= 0:
+        return 0.0
+    return float(num / den)
 
 
 def disperser_range(disperser: str, filt: str) -> tuple[float, float] | None:
@@ -258,6 +422,198 @@ def _table_lookup(
         float(tbl[key_ghi][qi, si, di]),
         float(tbl[key_red][qi, si, di]),
     )
+
+
+# Cache of per-(disperser, filter) interpolated (4, 171, 365) arrays
+# for the spec-overlap detector-pixel check. Computed lazily on first
+# lookup so import stays cheap.
+_SHUTTER_XY_CACHE: dict[tuple[str, str], dict | None] = {}
+
+
+def shutter_xy_grids(disperser: str, filt: str) -> dict | None:
+    """Return interpolated per-shutter on-detector x/y ranges for the
+    given (disperser, filter), or ``None`` if the precomputed sample
+    grid isn't present.
+
+    Result is a dict of six (4, 171, 365) float32 arrays:
+
+        ``x_lo_nrs1, x_hi_nrs1, y_nrs1``
+        ``x_lo_nrs2, x_hi_nrs2, y_nrs2``
+
+    NaN at a shutter index means the spectrum doesn't reach that
+    detector. The 10×10 quadrant grid samples from
+    ``precompute_trace_tilt.py`` are bilinearly interpolated to every
+    (s, d) so the spec-overlap check can do detector-pixel-accurate
+    interval intersection without re-running ``AssignWcsStep``.
+
+    Cached per (disperser, filter); call cost is one quick bilinear
+    pass the first time and then a dict lookup."""
+    key = (disperser.upper(), filt.upper())
+    if key in _SHUTTER_XY_CACHE:
+        return _SHUTTER_XY_CACHE[key]
+
+    tbl = _load_dispersion_table()
+    if tbl is None:
+        _SHUTTER_XY_CACHE[key] = None
+        return None
+    d_up, f_up = key
+    needed = [f"{d_up}_{f_up}_x_lo_nrs1", f"{d_up}_{f_up}_x_hi_nrs1",
+              f"{d_up}_{f_up}_y_nrs1",
+              f"{d_up}_{f_up}_x_lo_nrs2", f"{d_up}_{f_up}_x_hi_nrs2",
+              f"{d_up}_{f_up}_y_nrs2",
+              f"{d_up}_{f_up}_tilt_grid_rows",
+              f"{d_up}_{f_up}_tilt_grid_cols"]
+    if any(k not in tbl for k in needed):
+        _SHUTTER_XY_CACHE[key] = None
+        return None
+
+    grid_rows = np.asarray(tbl[f"{d_up}_{f_up}_tilt_grid_rows"], dtype=float)
+    grid_cols = np.asarray(tbl[f"{d_up}_{f_up}_tilt_grid_cols"], dtype=float)
+
+    # All-shutter (s, d) target grid (1-based to match the table).
+    s_all = np.arange(1, 172, dtype=float)
+    d_all = np.arange(1, 366, dtype=float)
+    s_mesh, d_mesh = np.meshgrid(s_all, d_all, indexing="ij")  # (171, 365)
+
+    out: dict[str, np.ndarray] = {}
+    for arr_name in ("x_lo_nrs1", "x_hi_nrs1", "y_nrs1",
+                     "x_lo_nrs2", "x_hi_nrs2", "y_nrs2"):
+        src = np.asarray(tbl[f"{d_up}_{f_up}_{arr_name}"], dtype=float)
+        interp_full = np.full((4, 171, 365), np.nan, dtype=np.float32)
+        for qi in range(4):
+            interp_full[qi] = _bilinear_finite_aware(
+                grid_rows, grid_cols, src[qi], s_mesh, d_mesh,
+            )
+        out[arr_name] = interp_full
+    _SHUTTER_XY_CACHE[key] = out
+    return out
+
+
+def _bilinear_finite_aware(
+    grid_rows: np.ndarray, grid_cols: np.ndarray,
+    src: np.ndarray, s_targets: np.ndarray, d_targets: np.ndarray,
+) -> np.ndarray:
+    """Bilinear interpolation that drops NaN corners by re-normalising
+    the surviving weights — so an interior NaN in the 10×10 sample
+    grid (e.g. a shutter where AssignWcsStep returned no on-detector
+    samples) doesn't poison the whole neighbourhood."""
+    s_clamped = np.clip(s_targets, grid_rows[0], grid_rows[-1])
+    d_clamped = np.clip(d_targets, grid_cols[0], grid_cols[-1])
+    ri = np.clip(
+        np.searchsorted(grid_rows, s_clamped, side="right") - 1,
+        0, len(grid_rows) - 2,
+    )
+    ci = np.clip(
+        np.searchsorted(grid_cols, d_clamped, side="right") - 1,
+        0, len(grid_cols) - 2,
+    )
+    fr = (s_clamped - grid_rows[ri]) / (grid_rows[ri + 1] - grid_rows[ri])
+    fc = (d_clamped - grid_cols[ci]) / (grid_cols[ci + 1] - grid_cols[ci])
+    fr = fr[..., None] if fr.ndim < s_targets.ndim else fr
+    fc = fc[..., None] if fc.ndim < d_targets.ndim else fc
+    fr = np.broadcast_to(fr, s_targets.shape)
+    fc = np.broadcast_to(fc, d_targets.shape)
+    # Four corner values + weights.
+    v00 = src[ri,     ci    ]
+    v01 = src[ri,     ci + 1]
+    v10 = src[ri + 1, ci    ]
+    v11 = src[ri + 1, ci + 1]
+    w00 = (1 - fr) * (1 - fc)
+    w01 = (1 - fr) *      fc
+    w10 =      fr  * (1 - fc)
+    w11 =      fr  *      fc
+    num = np.zeros_like(s_targets, dtype=float)
+    den = np.zeros_like(s_targets, dtype=float)
+    for v, w in ((v00, w00), (v01, w01), (v10, w10), (v11, w11)):
+        m = np.isfinite(v)
+        num = num + np.where(m, w * np.where(m, v, 0.0), 0.0)
+        den = den + np.where(m, w, 0.0)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = num / den
+    out = np.where(den > 0, out, np.nan)
+    return out.astype(np.float32)
+
+
+def primary_detector(
+    disperser: str, filt: str, q: int, s: int, d: int,
+) -> int:
+    """Per-shutter "primary detector" lookup. Returns:
+
+        0  → spectrum's main body is on NRS1
+        1  → spectrum's main body is on NRS2
+       -1  → table not loaded / not in shipped combo / off-detector
+
+    The main body is the detector that carries the larger wavelength
+    range of the dispersed spectrum. For shutters whose spectrum is
+    fully on one detector this is trivially that detector; for
+    gap-spanning shutters it's whichever side covers more wavelength.
+
+    Derived from the per-detector wavelength bounds in
+    ``data/dispersion_cutoffs.npz`` (populated by
+    ``scripts/precompute_dispersion_cutoffs.py``).
+
+    The spec-overlap check uses this lookup to skip cross-detector
+    pairs — two shutters whose spectra don't share a detector main
+    body cannot collide on the pipeline, regardless of how close they
+    are in V2."""
+    tbl = _load_dispersion_table()
+    if tbl is None:
+        return -1
+    qi, si, di = q - 1, s - 1, d - 1
+    if not (0 <= qi < 4 and 0 <= si < 171 and 0 <= di < 365):
+        return -1
+    d_up = disperser.upper()
+    f_up = filt.upper()
+    key1_lo = f"{d_up}_{f_up}_nrs1_lo"
+    key1_hi = f"{d_up}_{f_up}_nrs1_hi"
+    key2_lo = f"{d_up}_{f_up}_nrs2_lo"
+    key2_hi = f"{d_up}_{f_up}_nrs2_hi"
+    if key1_lo not in tbl or key2_lo not in tbl:
+        return -1
+    n1_lo = float(tbl[key1_lo][qi, si, di])
+    n1_hi = float(tbl[key1_hi][qi, si, di])
+    n2_lo = float(tbl[key2_lo][qi, si, di])
+    n2_hi = float(tbl[key2_hi][qi, si, di])
+    n1_span = (n1_hi - n1_lo) if (np.isfinite(n1_lo) and np.isfinite(n1_hi)) else -1.0
+    n2_span = (n2_hi - n2_lo) if (np.isfinite(n2_lo) and np.isfinite(n2_hi)) else -1.0
+    if n1_span < 0 and n2_span < 0:
+        return -1
+    return 0 if n1_span >= n2_span else 1
+
+
+def primary_detector_grid(disperser: str, filt: str) -> np.ndarray | None:
+    """Return the full (4, 171, 365) int8 array of primary detectors
+    for the (disperser, filter) combo. 0=NRS1, 1=NRS2, -1=neither/unknown.
+
+    Returns ``None`` if the table or per-detector arrays aren't
+    available; the live overlay falls back to static quadrant-pairing
+    in that case."""
+    tbl = _load_dispersion_table()
+    if tbl is None:
+        return None
+    d_up = disperser.upper()
+    f_up = filt.upper()
+    key1_lo = f"{d_up}_{f_up}_nrs1_lo"
+    key1_hi = f"{d_up}_{f_up}_nrs1_hi"
+    key2_lo = f"{d_up}_{f_up}_nrs2_lo"
+    key2_hi = f"{d_up}_{f_up}_nrs2_hi"
+    if any(k not in tbl for k in (key1_lo, key1_hi, key2_lo, key2_hi)):
+        return None
+    n1_lo = tbl[key1_lo]
+    n1_hi = tbl[key1_hi]
+    n2_lo = tbl[key2_lo]
+    n2_hi = tbl[key2_hi]
+    n1_span = np.where(
+        np.isfinite(n1_lo) & np.isfinite(n1_hi),
+        n1_hi - n1_lo, -1.0,
+    )
+    n2_span = np.where(
+        np.isfinite(n2_lo) & np.isfinite(n2_hi),
+        n2_hi - n2_lo, -1.0,
+    )
+    out = np.where(n1_span >= n2_span, 0, 1).astype(np.int8)
+    out[(n1_span < 0) & (n2_span < 0)] = -1
+    return out
 
 
 def cutoffs(

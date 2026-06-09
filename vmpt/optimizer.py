@@ -86,13 +86,24 @@ SHUTTER_Y_ARCSEC = 0.5294
 # safe side. Matches `SHVAL_S_TOLERANCE` in `vmpt/main.py`
 # (live-canvas orange overlap).
 #
-# NOTE: this is the *per-shutter* tolerance. The optimizer's
+# NOTE 1: this is the *per-shutter* tolerance. The optimizer's
 # collision protection compares two source positions (each opens an
 # N-shutter slitlet centred on the source row), so it uses a wider
 # slitlet-aware tolerance computed once in
 # `PointingEvaluator._init_protection`: `half + 1` for protected ↔
 # stuck-open and `2·half + 1` for protected ↔ slitlet-source, with
 # `half = slit_length // 2`.
+#
+# NOTE 2: vMPT's *visualization* layer (see `_emit_overlay_layers`
+# in `vmpt/main.py`) extends this with a tilt-aware row check using
+# `wavelengths.tilt_slope_for_shutter` (a precomputed slope drawn
+# from `slit_frame → detector` traces). The optimizer's collision
+# check intentionally stays flat-row: protected-source decisions
+# should be conservative (over-count, never under-count) and the
+# tilt is always sub-row for PRISM and < 1–2 rows for the highest-R
+# H-grating modes at the spectrum's V2 limit. If a future release
+# wants the optimizer to mirror the viz, broadcast a slope-per-
+# open-shutter into the three collision rules below.
 SHVAL_S_TOLERANCE: int = 1
 
 # Detector-half assignment: Q1+Q3 → NRS1, Q2+Q4 → NRS2. Cross-half

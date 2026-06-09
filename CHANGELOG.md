@@ -4,6 +4,82 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.3.1] — 2026-06-09
+
+The spec-overlap renderer is now matched against direct
+`jwst.assign_wcs` ground truth for all 9 supported (disperser, filter)
+combos and 20+ user-supplied test cases. Three changes underpin the
+release.
+
+### MPT-style three-colour spec-overlap (pink / orange / purple)
+
+The single orange overlay from v1.0–v1.3.0 is split into the three
+APT-MPT colours, each with its own slider in **Settings → Overlay
+appearance**. Per-shutter alpha now stacks with the conflict count
+(`alpha = min(1, base × n_conflicts)`) so a shutter contaminated by
+multiple dispersion sources darkens visibly. Purple ("Mask Conflict")
+applies only when the contributing slitlets are themselves touching
+(no operable row between them), with chain propagation along their
+full dispersion bands — matching APT.
+
+### Detector-pixel-accurate spec-overlap
+
+A new per-shutter on-detector x/y range table (added to
+`data/dispersion_cutoffs.npz` for every combo) lets the live overlay
+do **exact** detector-pixel intersection checks instead of the
+v1.3.0 V2-distance heuristic. Two structural improvements:
+
+* **Subtractive x-range filter** — drops false positives from the
+  V2-distance check when the two spectra don't actually share
+  detector pixels (e.g. G140M/F070LP at ΔV2 ≈ 84″: spectra are only
+  ~60″ wide on detector so they don't reach each other even though
+  the V2-distance check would say they could).
+* **Additive cross-quadrant detector-y check** — flags
+  cross-quadrant pairs whose spectrum y-stripes coincide at the
+  x-overlap region even when MSA s differs (e.g. G140M/F100LP
+  Q4 s=34 ↔ Q2 s=33: the MSA-row check predicts a row offset that
+  misses the candidate, but the actual detector y is essentially
+  identical). Restricted to cross-quadrant pairs with x-overlap
+  ≥ 10 px and |Δy_local| ≤ slit thickness.
+
+`v2_overlap_distance(d, f)` is now a measured per-combo value
+(PRISM 32″, G140M F070LP 98″, G140M F100LP 109″, G235M 110″,
+G395M 103″, G140H F070LP 185″, G140H F100LP 307″, G235H 300″,
+G395H 281″) derived from direct slit_frame→detector traces.
+
+### Orange band clamped to N+2 rows
+
+For an N-shutter slitlet the rendered band is now exactly N+2 rows
+wide across the full dispersion range (e.g. N=3 → rows
+`s_o − 2 … s_o + 2`, sharp edges). Earlier behaviour let the band
+shift by ±1 row when the spectrum tilt accumulated past 0.5 rows,
+producing a visible diagonal jump that users found distracting.
+`row_offset` is now clamped to 0; the tilt-slope grid is kept in the
+data file for future use.
+
+### Examples auto-load fix
+
+`vmpt examples download` now defaults to `~/.vmpt/examples/` (the
+stable per-user cache) instead of CWD. The in-app "Load Abell 370
+example" / "Load RXCJ0600 example" buttons search this directory
+first, then the dev source-checkout parent, then CWD — so a
+pip-installed copy of vMPT picks up the freshly-downloaded examples
+without restarting. Missing-example error messages now point at the
+exact CLI command to run. Honours `$VMPT_EXAMPLES_DIR` for
+sysadmin/test overrides.
+
+### Other
+
+* All 9 (disperser, filter) combos now ship per-shutter x/y ranges
+  in `data/dispersion_cutoffs.npz`. Total 144 keys, 36 MB.
+* `tests/test_spec_overlap_purple.py` — new regression suite for the
+  three-colour classification rule (chain propagation, touching
+  slitlets, anonymous slitlet grouping).
+* `scripts/precompute_shutter_xy.py` — fast parallel-friendly
+  precompute for the xy data (drops the reference shutters that
+  `precompute_trace_tilt.py` needs but the x-range check doesn't,
+  ~6× faster per combo).
+
 ## [Unreleased]
 
 ### MPT-style spec-overlap colors
@@ -48,6 +124,339 @@ The pre-existing `src_spec_overlap` and `spec_overlap_glyph`
 module symbols are kept as backwards-compat aliases pointing at
 the orange (user-overlap) source/glyph, so external scripts and
 tests that imported them keep working.
+
+### Tilt-aware spec-overlap
+
+The same MPT-faithful upgrade: NIRSpec spectral traces aren't
+exactly flat — the cross-dispersion row drifts linearly with V2
+distance from the open shutter (a small NIRSpec optical aberration
+that varies with disperser/filter and field position).
+v1.0–v1.3.0 used a flat-row check (`|Δs| ≤ 1`); APT MPT shows the
+tilt, especially clear in PRISM where the spectrum can drift by
+~1 row at the V2 edge.
+
+vMPT now applies a per-shutter tilt slope to the row check, with
+**MPT-faithful discrete row snapping** — the trace stays at the
+dispersing shutter's row until the cumulative drift exceeds 0.5,
+then jumps by exactly 1 MSA row:
+
+```
+row_offset = round(slope * Δv2_arcsec)          # 0, ±1, ±2, ...
+s_expected = s_open + row_offset
+same_row   = |s_candidate - s_expected| ≤ 1
+```
+
+The breakpoint at the open shutter is exactly what APT MPT shows:
+flat through the shutter, with discrete 1-row jumps at the V2
+extents where the drift accumulates past half a row.
+
+The slope (rows per arcsec V2) is **bilinearly interpolated from a
+10×10 per-quadrant grid** of representative shutters, precomputed
+once via `jwst.assign_wcs.AssignWcsStep` on synthesised MSA
+metadata. The new precompute script
+`scripts/precompute_trace_tilt.py` ships the slope tables in
+`vmpt/data/dispersion_cutoffs.npz` under the key pattern
+`{DISP}_{FILT}_tilt_slope` (shape (4, 10, 10) float32). Loaded
+lazily via `vmpt.wavelengths.tilt_slope_for_shutter()`.
+
+Per-combo magnitudes (max |slope| × V2 half-extent):
+
+- PRISM/CLEAR:  ~ 0.6 row max tilt at V2 edge  → typically 0 snap
+- M gratings :  ~ 1–2 rows max                 → snaps at ~56″
+- H gratings :  ~ 5 rows max                   → multiple snaps
+
+For PRISM the change relative to flat-row is barely visible; for
+the H gratings the orange/pink/purple bands now step by ±1 row at
+distinct breakpoints as you scan along V2, matching MPT exactly.
+The optimizer's collision check stays flat-row by design —
+protected-source decisions should be conservative, and the slope's
+max contribution is < 2 rows for the gratings the optimizer is
+most commonly run against (PRISM, G395M).
+
+When the tilt table is missing (older builds), slope = 0 is used
+and the row check reduces to the original flat-row form.
+
+### Column-consistent V2 cutoff for the contamination band
+
+The MSA's s-shear puts adjacent same-d shutters at slightly different
+V2 angles (≈0.36″/row at fixed d). When the contamination band
+spans 5 rows (e.g. an N=3 slitlet's union of per-shutter ±1
+windows), each row's V2 cutoff used to fire at a slightly different
+column, producing a visible staircase at the band edge — every row
+ending at a different MSA d-column, off by ~1 column per row.
+
+The runtime now projects every candidate's V2 onto the OPEN
+shutter's row before computing Δv2 for the cutoff check:
+`V2[q_c, s_open, d_c]` instead of `V2[q_c, s_c, d_c]`. The cutoff
+fires at the same column for every row in the band, matching APT
+MPT's geometric behaviour.
+
+The same column-V2 also feeds the tilt drift calc so the band's
+row-snap shifts coherently across the 5 rows instead of varying
+per-row.
+
+### Slitlet-grouped overlap count
+
+An N-shutter slitlet (N ≥ 2) used to count as N independent
+dispersion sources in the spec-overlap calc — every shutter in the
+slitlet incremented the candidate's conflict counter by 1, so the
+downstream stripe came out with alpha = base × N (e.g. 3× for the
+default N=3 slitlet) instead of 1×. The colour darkened by a
+factor of N even though only ONE physical spectrum was dispersing.
+
+The overlap calc now groups user-opens by `(quadrant, column,
+target_id)`. A slitlet contributes **+1 per candidate**, regardless
+of how many shutters it spans; the row tolerance widens to cover
+the union of all its shutters' per-shutter row windows
+(`tolerance = 1 + slitlet_half_extent`). Standalone clicks without
+a target id stay as 1-shutter groups (their own legacy behaviour).
+
+Stuck-opens are individual physical defects, not slitlets — each
+one remains its own group of 1.
+
+### Purple requires direct spectral overlap, not buffer-zone coincidence
+
+The contamination check uses a ±1-row tolerance around each
+slitlet's actual rows as a CONSERVATIVE safety margin. That margin
+must NOT count as a real collision when classifying purple.
+
+Concrete case: two stuck-opens on Q3 at `s=155, d=44` and
+`s=157, d=157`. Each contaminates ±1 row (so rows 154/155/156 from
+the first, and 156/157/158 from the second). Row 156 falls in
+both buffers, but neither spectrum's *actual* row reaches 156. The
+old rule (any 2 hits → purple) painted row 156 purple along their
+joint dispersion bands; the new rule keeps it as pink (single-
+source warning).
+
+Asymmetric purple rule, by candidate type:
+
+  - **Operable candidate (not yet picked):** purple iff ≥ 2 other
+    open shutters' DIRECT traces collide on this row. Buffer-only
+    coincidences (two ±1 buffers crossing through an empty
+    operable row) stay pink/orange.
+
+  - **User-open candidate (already picked):** purple iff ANY hit
+    — direct or buffer — lands on this shutter from another open
+    source. With ±1-row tolerance, a buffer hit can only come
+    from a source that is at most 1 row away — i.e. there's no
+    operable row between the two slitlets, which is the
+    "touching" case the user has explicitly asked to be flagged
+    as a collision. A buffer hit from a far-away source is
+    geometrically impossible.
+
+Concrete cases:
+
+  - Two slitlets at A=[100,102]/d=322 and B=[97,99]/d=323
+    (touching at the boundary — A's lowest = 100, B's highest =
+    99, no gap): A's s=100 and B's s=99 each get one buffer hit
+    from the other. Both are USER-OPEN → both render purple.
+    The other four user-opens (A=101,102; B=97,98) are too far
+    to feel the other slitlet → stay red.
+
+  - Two stuck-opens at s=155 and s=157 (gap of 1 operable row,
+    s=156, between them): row 156 is OPERABLE and gets two
+    buffer hits, no direct → stays pink (single-source warning),
+    not purple.
+
+  - Single 3-shutter slitlet with no other opens: no shutter
+    has any hits → no purple anywhere.
+
+Implementation: `_accumulate` records per-candidate hits in two
+separate dicts per source type — `direct` (spectrum's true row,
+with tilt, lands on the candidate) and `buffer` (the ±1 tolerance
+edge). The classifier branches on candidate type — `i in
+user_open_flat` triggers the asymmetric "any hit" rule, otherwise
+the strict `n_direct ≥ 2` rule.
+
+### Purple propagates from a collision's dispersion band (chain rule)
+
+When two open shutters (user-picks or stuck-opens) collide
+directly — their row ranges touch with no operable row between
+them — both slitlets are flagged "in conflict" and the **entire
+contamination band of both slitlets** is painted purple. This
+mirrors APT MPT's behaviour where "Mask Conflict" follows the
+spectra of the colliding slitlets all the way across the
+detector.
+
+Two slitlets that *don't* touch — even if their dispersion bands
+happen to share an operable shutter through the trace tilt — keep
+their operable contaminations as orange/pink with alpha stacked
+by source count.
+
+Implementation: `_accumulate` now tags every per-candidate hit
+with the (source_type, source_index) tuple that produced it
+(`hit_sources` dict). After the contamination pass, a slitlet is
+marked "conflicted" if any of its OWN shutters appears in
+`hit_sources` (i.e. a different source hit it). The classifier
+then promotes any operable candidate whose `hit_sources`
+intersects the conflicted set to purple; non-conflicted-source
+operable candidates remain orange/pink with stacked alpha.
+
+The candidate mask was also broadened to include stuck-open
+shutters (REASON==2), not just operable shutters (REASON==0), so
+that a user-pick touching a stuck-open correctly flags the stuck-
+open as a conflicted source — propagating purple along the stuck-
+open's contamination band too.
+
+### Purple is reserved for user-picks that touch another open shutter
+
+Per user feedback aligning with APT MPT, **operable shutters are
+never coloured purple**, no matter how many spectra contaminate
+them. Opening a new slitlet on a clean row only ever:
+
+  - turns nearby operable shutters from silver to pink (stuck
+    contamination only) or orange (any user contamination), and
+  - intensifies the alpha of already-warning shutters by the
+    total number of sources hitting them.
+
+Purple (Mask Conflict) overlays only a user-pick that is *itself*
+touching another open shutter — i.e. the user-pick's row is within
+±1 of another open's row, with no operable row between them. This
+matches MPT's "Mask Conflict" semantic where the conflict lives on
+the picked shutter, not on operable candidates downstream.
+
+The previous "operable + ≥ 2 direct hits → purple" branch is
+removed. Two slitlets that happen to share a dispersion target via
+the trace tilt (e.g. PRISM Q1 d=86 and d=91, tilt causing direct
+overlap at d ≈ 10 and 165) now correctly leave those operable
+shutters as orange (× 2 sources = double alpha), not purple. Only
+the boundary shutters where the two slitlets touch render purple.
+
+### `v2_overlap_distance` is now the FULL V2 extent + per-shutter primary detector
+
+Spec-overlap classification gets a structural fix that addresses
+two underlying problems at once:
+
+1. **The static `Q1+Q3 → NRS1, Q2+Q4 → NRS2` pairing is wrong for
+   grating modes.** Direct traces show that e.g. Q4 G395M spectra
+   actually land on NRS1 for most shutters (not NRS2 as the static
+   map assumes). The pairing was approximately right for PRISM but
+   produced spurious cross-quadrant flags for M/H gratings.
+
+2. **The V2 distance check needs the FULL spectrum extent, not
+   half.** Two same-row spectra of length L share at least one
+   detector pixel iff their start positions differ by < L — so
+   `|ΔV2| < L` (full extent). Earlier values were sometimes called
+   "half-extent" and sometimes treated as full; the table is now
+   unambiguously the full V2 extent measured from `slit_frame →
+   detector` traces.
+
+The fix has two parts:
+
+**A. Per-shutter primary-detector lookup.**
+`scripts/precompute_dispersion_cutoffs.py` now also records, per
+shutter, the wavelength range on each detector
+(`{combo}_nrs1_lo/_hi`, `{combo}_nrs2_lo/_hi`). At runtime,
+`wavelengths.primary_detector_grid(d, f)` returns a (4, 171, 365)
+int8 array where each cell is 0 (main body on NRS1), 1 (NRS2), or
+-1 (off-detector). `vmpt/main.py`'s spec-overlap pass replaces the
+static `NRS1_QUADS`/`NRS2_QUADS` pairing with this per-shutter
+lookup. Pairs whose spectra live on different primaries cannot
+collide and are skipped, regardless of how close they are in V2.
+
+**B. Full V2 extent values** (renamed `SPECTRUM_V2_EXTENT`):
+
+| Disperser | Filter | Full extent |
+|---|---|---|
+| PRISM | CLEAR | 32″ |
+| G140M | F070LP | 98″ |
+| G140M | F100LP | 109″ |
+| G235M | F170LP | 110″ |
+| G395M | F290LP | 103″ |
+| G140H | F070LP | 185″ |
+| G140H | F100LP | 307″ |
+| G235H | F170LP | 300″ |
+| G395H | F290LP | 281″ |
+
+**Net effect for the user-reported G395M case:** opening Q4 d=349
+no longer flags Q2 shutters at the same d, even though their V2
+separation (≈ 87″) is well inside the 103″ G395M extent — Q4 d=349's
+G395M spectrum lives entirely on NRS1, while Q2 d=349's main body
+is on NRS2, so the primary-detector check correctly suppresses the
+flag. Same-quadrant pairs (Q4 d=349 ↔ Q4 d=50, ΔV2 ≈ 60″) ARE
+flagged because their spectra share NRS1 and overlap by ≈ 557 px.
+
+The previous releases of this rule went through several iterations
+(35″ → 18″ → 55″ "half-extents" then back to full); the new code
+backs `SPECTRUM_V2_HALFEXTENT` as an alias to the new `_EXTENT`
+table for backwards compatibility, but the optimizer's collision
+protection picks up the corrected (smaller) values automatically.
+
+Re-run the precompute (`python scripts/precompute_dispersion_cutoffs.py`,
+requires `PYTHONPATH=/tmp/msaviz`) to populate the new
+per-detector arrays — without them, the live overlay falls back to
+the old static quadrant pairing and emits no warning.
+
+### Two fixes that made anonymous slitlets render as purple
+
+When the user opened a slitlet on an operable shutter with no
+nearby catalog target, the spec-overlap stripe rendered as purple
+all along the dispersion direction even though only one slitlet
+was open. Two independent bugs caused this:
+
+1. **Anonymous slitlets weren't grouped together.** The
+   group-key included the s coordinate when `target_id` was
+   `None`, so a 3-shutter slitlet with no target became 3
+   separate "sources" instead of one slitlet. Their mutual ±1-row
+   tolerance then triple-counted every downstream operable
+   candidate. Fix: anonymous opens at the same `(quadrant, column)`
+   now collapse to one group keyed `(q, d, "_anon_")`.
+
+2. **Same-column candidates were being checked for contamination.**
+   An open shutter A's spectrum disperses along the V2 direction —
+   away from A's column. It does NOT contaminate other shutters
+   in A's OWN column at neighbouring rows: the spectrum at d=A
+   sits exactly at A's row, not at A's row ± 1 elsewhere in the
+   same column. The same-row tolerance was over-flagging those
+   intra-column neighbours. Fix: `near_v2` now also requires the
+   candidate to be in a different column (`d_arr != d_o - 1`).
+
+After the fix, opening a single 3-shutter slitlet produces an
+orange stripe (single-source warning) — never purple. Purple
+appears only when ≥ 2 sources actually overlap on the same
+operable shutter.
+
+### Mask Conflict (purple) means "real overlap zone", not chain propagation
+
+The three-colour spec-overlap classification matches APT MPT's
+"warning vs active overlap" semantic. The three spec-overlap colours
+apply **only to operable shutters the user has not yet picked** —
+user-open shutters keep their red user-pick rendering, and
+stuck-opens keep their dark-red outline. The spec-overlap stripe
+describes what would happen if you opened each operable shutter.
+
+The rule for an operable candidate (where `n_s` is the count of
+stuck-open spectra hitting it and `n_u` is the count of user-open
+slitlets hitting it):
+
+| Case                                | Colour | Meaning              |
+|-------------------------------------|--------|----------------------|
+| `n_s + n_u >= 2`                    | purple | actual overlap zone  |
+| `n_u == 1`, `n_s == 0`              | orange | single-user warning  |
+| `n_s == 1`, `n_u == 0`              | pink   | single-stuck warning |
+
+Critically, purple does **not** propagate down a contamination
+chain. If two opened slitlets mutually contaminate each other
+somewhere on the detector, operable shutters in *only one* of
+their bands stay orange — they're not part of the overlap, just
+in the path of a single (admittedly conflicted) spectrum. Only
+shutters in the actual overlap zone (≥ 2 sources hitting them)
+turn purple. This avoids the over-painting where every shutter
+the user opens after the first one had the area around it
+incorrectly classified as a collision.
+
+### Open-shutter ↔ open-shutter conflict visibility
+
+A subtle bug surfaced once tilt landed: the spec-overlap calc
+*did* count conflicts where one open shutter's spectrum
+contaminates another open shutter's row, but the z-order rendered
+the red user-open fill *on top of* the pink/orange/purple stripe,
+hiding the conflict. Z-order is now reordered so the three
+spec-overlap glyphs render after `open_shutters_glyph`, making
+mutual contamination between picked shutters visible — the
+spec-overlap colour now overlays the red user-open fill (the red
+shows through under the stripe's alpha). This was always a bug;
+v1.0–v1.3.0 silently hid every open-vs-open contamination.
 
 ## [1.3.0] — 2026-06-04
 

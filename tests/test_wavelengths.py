@@ -186,6 +186,85 @@ def test_grating_table_returns_in_range_endpoints(disp, filt):
     assert found_any, f"{disp}/{filt} returned None for all quadrants tested"
 
 
+# ── Tilt-slope map (cross-dispersion tilt of spectral traces) ──
+
+
+def _has_tilt(disp: str, filt: str) -> bool:
+    """The precompute may have run partially; tolerate that."""
+    if not _has_table():
+        return False
+    import numpy as np
+    keys = np.load(_TABLE_PATH).files
+    return f"{disp}_{filt}_tilt_slope" in keys
+
+
+def test_tilt_slope_for_missing_table_returns_zero():
+    """When the table doesn't ship tilt arrays for a combo, the
+    helper returns slope = 0 so the runtime overlap check falls back
+    to the original flat-row behaviour."""
+    from vmpt.wavelengths import tilt_slope_for_shutter
+    # An obviously fake combo — the lookup must not raise.
+    k = tilt_slope_for_shutter("FAKE", "FAKE", 1, 86, 183)
+    assert k == 0.0
+
+
+def test_tilt_slope_within_expected_magnitude():
+    """For PRISM, the tilt slope should be small (sub-row at the
+    spectrum edge). v2_overlap_distance(PRISM, CLEAR) is 18″, so a
+    bound of ±0.05 rows/arcsec gives ±0.9 rows max tilt — well above
+    what the precompute reports (|slope| < 0.02)."""
+    if not _has_tilt("PRISM", "CLEAR"):
+        pytest.skip("tilt arrays not built — run scripts/precompute_trace_tilt.py")
+    from vmpt.wavelengths import tilt_slope_for_shutter
+    for q in (1, 2, 3, 4):
+        for (s, d) in [(86, 183), (40, 80), (140, 280), (170, 50)]:
+            k = tilt_slope_for_shutter("PRISM", "CLEAR", q, s, d)
+            assert abs(k) < 0.05, (
+                f"PRISM/Q{q} s={s} d={d}: slope {k} too large; "
+                "the precompute may need re-running"
+            )
+
+
+def test_tilt_slope_varies_across_field():
+    """The tilt slope is field-dependent — its sign or magnitude must
+    vary across well-separated grid corners of a quadrant."""
+    if not _has_tilt("PRISM", "CLEAR"):
+        pytest.skip("tilt arrays not built")
+    from vmpt.wavelengths import tilt_slope_for_shutter
+    slopes = []
+    for q in (1, 2, 3, 4):
+        for (s, d) in [(16, 34), (16, 331), (155, 34), (155, 331)]:
+            slopes.append(tilt_slope_for_shutter("PRISM", "CLEAR", q, s, d))
+    # Range across the 16 sampled positions must exceed 0.005 rows/arcsec
+    # (PRISM has a smooth gradient of ~0.02 across the full field).
+    spread = max(slopes) - min(slopes)
+    assert spread > 0.005, (
+        f"PRISM tilt slope range = {spread} rows/arcsec — expected "
+        f"> 0.005; slopes={slopes}"
+    )
+
+
+def test_tilt_slope_bilinear_at_grid_corner_matches_table():
+    """Sampling the slope helper at an exact grid corner should
+    return the table value directly (no interpolation artefacts)."""
+    if not _has_tilt("PRISM", "CLEAR"):
+        pytest.skip("tilt arrays not built")
+    import numpy as np
+    from vmpt.wavelengths import tilt_slope_for_shutter, tilt_slope_map
+    m = tilt_slope_map("PRISM", "CLEAR")
+    assert m is not None
+    grid_rows, grid_cols, slope = m
+    q = 3  # Q3 is fully on NRS1 for PRISM
+    ri, ci = 5, 5
+    sval = int(grid_rows[ri])
+    dval = int(grid_cols[ci])
+    k = tilt_slope_for_shutter("PRISM", "CLEAR", q, sval, dval)
+    expected = float(slope[q - 1, ri, ci])
+    if not np.isfinite(expected):
+        pytest.skip("table NaN at chosen corner")
+    assert k == pytest.approx(expected, abs=1e-6)
+
+
 @pytest.mark.parametrize("disp,filt", GRATING_COMBOS)
 def test_grating_gap_varies_across_msa(disp, filt):
     """For every grating combo, the per-shutter gap_lo should vary
@@ -206,4 +285,58 @@ def test_grating_gap_varies_across_msa(disp, filt):
         pytest.skip(f"{disp}/{filt}: too few gap-spanning shutters in sample")
     assert max(gap_los) - min(gap_los) > 0.05, (
         f"{disp}/{filt} gap_lo should vary > 0.05 μm, got {gap_los}"
+    )
+
+
+# ----------------------------------------------------------------------
+# v2_overlap_distance — per-combo table & realism checks
+
+
+def test_v2_overlap_distance_per_combo_table_loaded():
+    """The (disperser, filter) lookup table should populate at import
+    and return finite, positive *full* V2 extents for every supported
+    combo. Catches typos / dict-key mismatches. Full extent is the
+    detector x-span of the spectrum × ~0.077 ″/V2-px; the spec-overlap
+    rule uses |ΔV2| < full_extent on a SAME-detector check."""
+    from vmpt.wavelengths import v2_overlap_distance
+    for d, f in [
+        ("PRISM", "CLEAR"),
+        ("G140M", "F070LP"), ("G140M", "F100LP"),
+        ("G235M", "F170LP"), ("G395M", "F290LP"),
+        ("G140H", "F070LP"), ("G140H", "F100LP"),
+        ("G235H", "F170LP"), ("G395H", "F290LP"),
+    ]:
+        v = v2_overlap_distance(d, f)
+        assert 20.0 <= v <= 400.0, f"{d}/{f}: full extent {v} out of plausible range"
+    # PRISM is the most compact spectrum; H-gratings the longest.
+    assert v2_overlap_distance("PRISM", "CLEAR") < v2_overlap_distance("G395M", "F290LP")
+    assert v2_overlap_distance("G395M", "F290LP") < v2_overlap_distance("G395H", "F290LP")
+
+
+def test_v2_overlap_distance_unknown_filter_falls_back_per_disperser():
+    """An unknown filter under a known disperser should still return
+    a usable value — the disperser-only fallback."""
+    from vmpt.wavelengths import v2_overlap_distance
+    assert v2_overlap_distance("G395M", "FAKE_FILTER") == v2_overlap_distance("G395M", "F290LP")
+    # Unknown disperser → safe upper bound 300″
+    assert v2_overlap_distance("FAKE", "FAKE") == 300.0
+
+
+def test_v2_overlap_distance_g395m_full_extent():
+    """G395M's full V2 extent on detector is ~103″. Same-detector pairs
+    within this V2 separation collide; cross-detector pairs (e.g. Q4↔Q2
+    G395M at same d) are filtered by the primary_detector lookup, not
+    by this distance value."""
+    from vmpt.wavelengths import v2_overlap_distance
+    full = v2_overlap_distance("G395M", "F290LP")
+    # Same-quadrant max ΔV2 ≈ 60″ — must always be inside the extent.
+    assert 60.0 < full, f"G395M full extent {full}\" too small to catch same-q overlaps"
+    # User case Q4 d=349 vs Q2 d=349 ΔV2 ≈ 87″ is *inside* the V2 distance,
+    # but the cross-detector check (primary_detector) is what suppresses
+    # the false flag for that pair, NOT this distance.
+    delta_v2_q4_to_q2 = 86.9
+    assert delta_v2_q4_to_q2 < full, (
+        f"Q4↔Q2 ΔV2={delta_v2_q4_to_q2}\" should be inside the V2 distance "
+        f"({full}\"); the suppression of Q2 flagging comes from the "
+        "primary-detector check, not the distance check"
     )

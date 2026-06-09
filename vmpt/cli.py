@@ -26,7 +26,7 @@ from pathlib import Path
 # runs ``vmpt examples download``. The GitHub release page hosts a
 # tarball asset of the same name; ``v1.2.1`` is set explicitly so
 # upgrading vMPT doesn't invalidate cached example downloads.
-EXAMPLES_RELEASE_TAG = "v1.3.0"
+EXAMPLES_RELEASE_TAG = "v1.3.1"
 EXAMPLES_TARBALL_URL = (
     "https://github.com/fengwusun/vMPT/releases/download/"
     f"{EXAMPLES_RELEASE_TAG}/vmpt-examples.tar.gz"
@@ -87,11 +87,24 @@ def _serve(argv: list[str]) -> int:
         return 2
 
 
+def _default_examples_dir() -> Path:
+    """Stable per-user cache location for downloaded examples.
+    Matches `_EX_USER_DIR` in vmpt.main so the in-app "Load Abell 370"
+    / "Load RXCJ0600" buttons find what `vmpt examples download`
+    fetched, regardless of which directory the user ran the command
+    from. Honours $VMPT_EXAMPLES_DIR for tests / sysadmin overrides."""
+    env = os.environ.get("VMPT_EXAMPLES_DIR")
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.home() / ".vmpt" / "examples"
+
+
 def _examples_download(target_dir: str | None = None) -> int:
     """Fetch the example_a370 / example_r0600 tarball from the
-    matching GitHub release into the current directory (or an
-    explicit ``target_dir`` if given)."""
-    dest = Path(target_dir or os.getcwd()).resolve()
+    matching GitHub release into ``~/.vmpt/examples/`` (the
+    per-user cache) by default, or an explicit ``target_dir``
+    if given."""
+    dest = Path(target_dir).resolve() if target_dir else _default_examples_dir()
     dest.mkdir(parents=True, exist_ok=True)
     print(f"vmpt: downloading examples for {EXAMPLES_RELEASE_TAG}…")
     print(f"      source: {EXAMPLES_TARBALL_URL}")
@@ -118,10 +131,20 @@ def _examples_download(target_dir: str | None = None) -> int:
             os.unlink(tmp_path)
         except OSError:
             pass
-    print("vmpt: examples downloaded. Try `vmpt --jpg "
-          "example_r0600/JWST_F090W_F200W_F444W.jpg "
-          "--wcs example_r0600/wcs.fits "
-          "--catalog example_r0600/v01_fsun.cat`.")
+    n_a = len(list((dest / "example_a370").glob("*"))) if (dest / "example_a370").exists() else 0
+    n_r = len(list((dest / "example_r0600").glob("*"))) if (dest / "example_r0600").exists() else 0
+    print(
+        f"vmpt: examples downloaded to {dest}\n"
+        f"      example_a370/  ({n_a} files)\n"
+        f"      example_r0600/ ({n_r} files)\n"
+        "\n"
+        "Open vmpt — the 'Load Abell 370 example' and 'Load RXCJ0600\n"
+        "example' buttons (Input tab) now find them automatically.\n"
+        "Or from the CLI:\n"
+        f"  vmpt --jpg {dest}/example_r0600/JWST_F090W_F200W_F444W.jpg \\\n"
+        f"       --wcs {dest}/example_r0600/wcs.fits \\\n"
+        f"       --catalog {dest}/example_r0600/v01_fsun.cat"
+    )
     return 0
 
 

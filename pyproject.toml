@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jwst-vmpt"
-version = "1.3.0"
+version = "1.3.1"
 description = "Visual MSA Planning Tool — interactive Bokeh app for JWST/NIRSpec MSA shutter configuration, with hMPT-derived pointing optimization and shutter-collision protection."
 readme = "README.md"
 # PEP 639 SPDX license expression. The OLD table form

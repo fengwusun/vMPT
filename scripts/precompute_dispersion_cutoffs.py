@@ -73,11 +73,19 @@ NQ, NS, ND = 4, 171, 365
 
 def _shutter_bounds_per_quadrant(msa: MSA, q1based: int) -> tuple[
     np.ndarray, np.ndarray, np.ndarray, np.ndarray,
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray,
 ]:
-    """Return four (NS, ND) arrays of (blue, gap_lo, gap_hi, red)
-    for every shutter in the given quadrant of the supplied MSA.
+    """Return eight (NS, ND) arrays for every shutter in the given
+    quadrant of the supplied MSA:
+      (blue, gap_lo, gap_hi, red,
+       nrs1_lo, nrs1_hi, nrs2_lo, nrs2_hi).
     NaN cells = the spectrum doesn't reach that detector for that
     shutter.
+
+    The per-detector bounds (the last four) enable a per-shutter
+    "primary detector" lookup for the spec-overlap check — two
+    shutters whose spectra don't share a detector cannot collide
+    on the pipeline.
     """
     sci_lo, sci_hi = msa.sci_range
 
@@ -97,6 +105,10 @@ def _shutter_bounds_per_quadrant(msa: MSA, q1based: int) -> tuple[
     gap_lo = np.full((NS, ND), np.nan, dtype=np.float32)
     gap_hi = np.full((NS, ND), np.nan, dtype=np.float32)
     red = np.full((NS, ND), np.nan, dtype=np.float32)
+    nrs1_lo = np.full((NS, ND), np.nan, dtype=np.float32)
+    nrs1_hi = np.full((NS, ND), np.nan, dtype=np.float32)
+    nrs2_lo = np.full((NS, ND), np.nan, dtype=np.float32)
+    nrs2_hi = np.full((NS, ND), np.nan, dtype=np.float32)
 
     if msa.disperser == "prism":
         # PRISM only integrates for the shutters in its lookup table;
@@ -109,7 +121,7 @@ def _shutter_bounds_per_quadrant(msa: MSA, q1based: int) -> tuple[
         mask[pop_idx] = True
         coords = coords[:, mask]
         if coords.shape[1] == 0:
-            return blue, gap_lo, gap_hi, red
+            return blue, gap_lo, gap_hi, red, nrs1_lo, nrs1_hi, nrs2_lo, nrs2_hi
 
     # Batch the integration. PRISM is per-shutter inside msaviz so
     # batching it large is fine; gratings batch the whole quadrant
@@ -154,8 +166,18 @@ def _shutter_bounds_per_quadrant(msa: MSA, q1based: int) -> tuple[
             if np.isfinite(v_r1) and np.isfinite(v_b2):
                 gap_lo[si, di] = v_r1
                 gap_hi[si, di] = v_b2
+            # Per-detector wavelength range, used by the spec-overlap
+            # check to determine each shutter's "primary detector".
+            if np.isfinite(v_b1):
+                nrs1_lo[si, di] = v_b1
+            if np.isfinite(v_r1):
+                nrs1_hi[si, di] = v_r1
+            if np.isfinite(v_b2):
+                nrs2_lo[si, di] = v_b2
+            if np.isfinite(v_r2):
+                nrs2_hi[si, di] = v_r2
 
-    return blue, gap_lo, gap_hi, red
+    return blue, gap_lo, gap_hi, red, nrs1_lo, nrs1_hi, nrs2_lo, nrs2_hi
 
 
 def main() -> None:
@@ -173,25 +195,48 @@ def main() -> None:
         gap_lo = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
         gap_hi = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
         red = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
+        nrs1_lo = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
+        nrs1_hi = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
+        nrs2_lo = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
+        nrs2_hi = np.full((NQ, NS, ND), np.nan, dtype=np.float32)
         for q in range(1, 5):
-            b, glo, ghi, r = _shutter_bounds_per_quadrant(msa, q)
+            b, glo, ghi, r, n1lo, n1hi, n2lo, n2hi = _shutter_bounds_per_quadrant(msa, q)
             blue[q - 1] = b
             gap_lo[q - 1] = glo
             gap_hi[q - 1] = ghi
             red[q - 1] = r
+            nrs1_lo[q - 1] = n1lo
+            nrs1_hi[q - 1] = n1hi
+            nrs2_lo[q - 1] = n2lo
+            nrs2_hi[q - 1] = n2hi
         n_any = int(np.isfinite(blue).sum())
         n_gap = int(np.isfinite(gap_lo).sum())
+        n_nrs1 = int(np.isfinite(nrs1_lo).sum())
+        n_nrs2 = int(np.isfinite(nrs2_lo).sum())
         elapsed = time.time() - t0
         print(f"  populated: {n_any}, gap-spanning: {n_gap}, "
-              f"time: {elapsed:.1f}s")
+              f"NRS1: {n_nrs1}, NRS2: {n_nrs2}, time: {elapsed:.1f}s")
 
         key = f"{vmpt_disp}_{vmpt_filt}"
         out[f"{key}_blue_edge"] = blue
         out[f"{key}_gap_lo"] = gap_lo
         out[f"{key}_gap_hi"] = gap_hi
         out[f"{key}_red_edge"] = red
+        out[f"{key}_nrs1_lo"] = nrs1_lo
+        out[f"{key}_nrs1_hi"] = nrs1_hi
+        out[f"{key}_nrs2_lo"] = nrs2_lo
+        out[f"{key}_nrs2_hi"] = nrs2_hi
 
     print(f"\nTotal: {time.time()-total_t0:.1f}s")
+    # Merge with existing keys (e.g. tilt info populated by
+    # precompute_trace_tilt.py) so re-running this script doesn't
+    # blow away unrelated data.
+    if OUTPUT.exists():
+        with np.load(OUTPUT) as existing:
+            for k in existing.files:
+                if k not in out:
+                    out[k] = existing[k]
+        print(f"Merged with existing keys; final count: {len(out)}")
     np.savez_compressed(OUTPUT, **out)
     print(f"Saved → {OUTPUT} ({OUTPUT.stat().st_size / 1e6:.2f} MB)")
 

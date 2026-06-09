@@ -21,9 +21,15 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   under the current Disperser / Filter. Slitlet-aware row buffer
   (`v1.2.1+`) reserves one row above and below each protected
   slitlet, including against stuck-open shutters.
-- **Hand-picking + live conflict feedback** — click any shutter to
-  open an N-shutter slitlet, watch the orange spec-overlap layer
-  light up in real time, undo / redo at will.
+- **Hand-picking + live MPT-faithful conflict feedback** — click any
+  shutter to open an N-shutter slitlet, watch the three-colour
+  spec-overlap layer light up in real time: **pink** (Mask Stuck)
+  where stuck-open spectra land on operable rows, **orange** (Masked)
+  where user-pick spectra land, **purple** (Mask Conflict) when two
+  open slitlets touch (boundary rows adjacent, no operable row
+  between) — the conflict propagates along the colliding slitlets'
+  entire dispersion bands. Alpha stacks with the number of dispersing
+  sources hitting each shutter. Undo / redo at will.
 - **APT / eMPT-ready export** — write an MPT_plan.json + .cat
   bundle that loads straight into APT, plus the three CSVs that
   feed the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
@@ -31,10 +37,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-183%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-188%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.3.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.3.1-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -43,9 +49,15 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 
 *The vMPT interface running against the RXCJ0600 example: target-field
 image (centre) with the 4 MSA quadrants overlaid at the chosen V3 PA,
-stuck-open shutters as dark-red outlines, user picks as red fills,
-spec-overlap rows in orange. Left sidebar: image / aim / pick / MPT
-tabs. Right panel: rotating tip card + quick-reference legend.*
+stuck-open shutters as dark-red outlines, user picks as red fills.
+Pink (Mask Stuck) and orange (Masked) are spec-overlap warnings on
+operable shutters — pink if only stuck-opens contaminate the row,
+orange if a user-pick does. Alpha stacks with the number of dispersing
+sources. Purple (Mask Conflict) fires when two open slitlets touch
+(boundary rows adjacent, no operable row between them) — the entire
+dispersion band of either slitlet promotes to purple. Left sidebar:
+image / aim / pick / MPT tabs. Right panel: rotating tip card +
+quick-reference legend.*
 
 ---
 
@@ -358,7 +370,9 @@ What each color means on the figure:
 | **Dark-red thick outline** | Stuck-open shutter (always visible) |
 | **Red-filled (#ff8888)** | User-opened shutter |
 | **Cyan edge** | Highlighted shutter (double-click marker) |
-| **Orange fill** (α=0.20, stackable) | Spectral-conflict warning — operable shutters whose spectra would overlap on the detector with an open or stuck-open shutter's. Darker orange = multiple opens contribute. ±1 row from each dispersion source; cross-quadrant via NRS1 (Q1↔Q3) and NRS2 (Q2↔Q4) detector pairing. |
+| **Pink fill** (α=0.20, stackable) — **Mask Stuck** | Operable shutter where one or more stuck-open shutters' spectra would land. No collision yet; opening this shutter would create one. Alpha stacks with the number of stuck sources hitting the row. |
+| **Orange fill** (α=0.20, stackable) — **Masked** | Operable shutter where at least one user-pick's spectrum lands. Same warning semantic as pink, but the source is a user-pick. Alpha stacks with the number of contaminating sources (user + stuck). |
+| **Purple fill** (α=0.20, stackable) — **Mask Conflict** | Real collision exists. Either (a) a user-pick whose row is touching another open shutter's row (no operable row between them), OR (b) an operable shutter sitting in the dispersion band of a slitlet that is itself in a touching collision (chain propagation along both colliding slitlets' bands). |
 | **Coloured circles** | Catalog targets — yellow by default, cycling through magenta / pale green / coral / lavender / sky-blue / white / salmon when multiple catalogs are loaded (toggle "Show catalog targets" in Setting → Layers; the colour matches the chip beside each catalog in the **Input** tab's catalog list). Earlier-loaded catalogs draw on top of later ones; deeper layers fade slightly via line_alpha. |
 
 Failed-closed shutters are not drawn at all — they don't exist for

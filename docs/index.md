@@ -33,9 +33,15 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   detector under the current Disperser / Filter. Slitlet-aware
   row buffer (`v1.2.1+`) reserves one row above and below each
   protected slitlet, including against stuck-open shutters.
-- **Hand-picking + live conflict feedback** — click any shutter
-  to open an N-shutter slitlet, watch the orange spec-overlap
-  layer light up in real time, undo / redo at will.
+- **Hand-picking + live MPT-faithful conflict feedback** — click
+  any shutter to open an N-shutter slitlet, watch the three-colour
+  spec-overlap layer light up in real time. **Pink** (Mask Stuck)
+  warns where a stuck-open's spectrum would land on an operable
+  shutter; **orange** (Masked) warns where a user-pick's spectrum
+  lands; **purple** (Mask Conflict) fires when two open slitlets
+  touch (boundary rows adjacent, no operable row between) — the
+  conflict propagates along both slitlets' entire dispersion
+  bands, matching APT MPT.
 - **APT- / eMPT-ready export** — write an MPT_plan.json + .cat
   bundle that loads straight into APT, plus the three CSVs that
   feed the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).

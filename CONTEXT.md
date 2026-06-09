@@ -212,8 +212,8 @@ For each dispersion source (every user-open + every stuck-open
 shutter), the set of overlap-affected operable shutters is:
 
 ```
-(s ∈ open ± SHVAL_S_TOLERANCE)   AND
-(q ∈ same_detector_half)         AND  // NRS1={Q1,Q3}; NRS2={Q2,Q4}
+(s ∈ open ± SHVAL_S_TOLERANCE)                       AND
+(primary_detector(q,s,d) == primary_detector(open))  AND
 (|ΔV2| < v2_overlap_distance(disperser, filter))
 ```
 
@@ -221,14 +221,76 @@ Current values:
 - `SHVAL_S_TOLERANCE = 1` — only the open shutter's row + immediate
   neighbours above/below disperse onto overlapping detector pixels
   (matches eMPT's `shval ≈ s` exactly).
-- `v2_overlap_distance`: PRISM = 35″, M-gratings = 200″,
-  H-gratings = 500″ (`wavelengths.SPECTRUM_V2_HALFEXTENT`).
-- Detector pairing prevents H-gratings (500″ window covers most of
-  the MSA in V2) from spuriously lighting up Q1↔Q2 or Q3↔Q4.
+- `primary_detector(disperser, filt, q, s, d)` is a per-shutter
+  lookup into the new per-detector wavelength arrays added to
+  `dispersion_cutoffs.npz` (`*_nrs1_lo/_hi`, `*_nrs2_lo/_hi`).
+  Returns the detector that carries the larger λ-range for that
+  shutter (0=NRS1, 1=NRS2, -1=off-detector). Replaces the v1.0–
+  v1.3.x static `NRS1_QUADS={1,3}` / `NRS2_QUADS={2,4}` pairing,
+  which was approximately right for PRISM but wrong for grating
+  modes where (e.g.) Q4 G395M actually lands on NRS1, not NRS2.
+- `v2_overlap_distance(disperser, filter)` is the *full* on-detector
+  V2 extent of the spectrum, measured from `slit_frame → detector`
+  traces in stenv: detector x-span × ≈ 0.077 ″/V2-px. Two same-row,
+  same-primary spectra of length L share a detector pixel iff
+  `|ΔV2| < L`.
 
-The overlap polygons are drawn fill-only (orange, α=0.10, **no
-edge**) so multiple dispersion sources stack and the colour
-intensifies where many spectra overlap.
+  | Disperser | Filter | Full extent |
+  |---|---|---|
+  | PRISM | CLEAR | 32″ |
+  | G140M | F070LP | 98″ |
+  | G140M | F100LP | 109″ |
+  | G235M | F170LP | 110″ |
+  | G395M | F290LP | 103″ |
+  | G140H | F070LP | 185″ |
+  | G140H | F100LP | 307″ |
+  | G235H | F170LP | 300″ |
+  | G395H | F290LP | 281″ |
+
+  Earlier values were sometimes treated as "half-extent" and
+  sometimes as full extent; the table is now unambiguously the full
+  V2 extent. The user-reported Q4 d=349 G395M case is correctly
+  suppressed by the new `primary_detector` check (Q4 → NRS1, Q2 →
+  NRS2) even though their V2 separation is well inside the 103″
+  extent — the distance check is just there to catch same-detector
+  same-quadrant collisions (Q4 d=349 ↔ Q4 d=50 same s, ΔV2 ≈ 60″,
+  real overlap ≈ 557 px on NRS1).
+
+### Three-colour MPT-faithful overlap classification
+
+`refresh_overlays` records two count dicts per source type — `direct`
+(candidate's row is in the slitlet's actual row range, with tilt) and
+`buffer` (candidate is at the ±1 tolerance edge) — across operable AND
+stuck-open candidates. After the contamination pass it derives:
+
+- `hit_sources[i]`: set of `(source_type, source_idx)` tuples that
+  produced a hit on candidate `i`. Used for chain-propagation.
+- `conflicted_user` / `conflicted_stuck`: sets of slitlet indices
+  whose OWN shutters are hit by another source. These are slitlets
+  in active touching collision (no operable row between them and
+  another open).
+
+Three CDS (`src_spec_overlap_stuck/_user/_both`) feed three
+`multi_polygons` glyphs. Per-polygon `fill_alpha` field; alpha is
+`min(1, base × n_total)` so contamination from multiple sources
+intensifies.
+
+Classification rule applied to every contaminated candidate:
+
+| Case | Colour |
+|---|---|
+| user-pick with any hit (direct or buffer) from another source | **purple** (Mask Conflict) |
+| operable hit by a CONFLICTED source (chain propagation) | **purple** |
+| operable hit by user-source(s), none conflicted | **orange** (Masked) |
+| operable hit by stuck-source(s) only, none conflicted | **pink** (Mask Stuck) |
+| no hit / hit only by an excluded path | no overlay |
+
+The chain rule means: opening a slitlet in a clean (silver-edged)
+area only ever produces orange/pink warnings, never purple — even
+across many shared dispersion targets. Purple appears only when at
+least one of the contributing slitlets is itself touching another
+open shutter (so its row ranges are adjacent, no operable row
+between them).
 
 ---
 
@@ -467,7 +529,10 @@ fiducial endpoints (used only by the old tests and a safety net for
 fresh checkouts that haven't run the precompute).
 
 `v2_overlap_distance(disperser, filter)` returns the V2 half-extent
-used by the spec-overlap calculation (35″ PRISM, 200″ M, 500″ H).
+used by the spec-overlap calculation. Looked up per (disperser, filter)
+combo — see the table in the dispersion-row tilt section above
+(18″ PRISM, 50–55″ M-gratings, 95–155″ H-gratings — depends on filter).
+All values measured from `slit_frame → detector` traces in stenv.
 
 ### Regenerating the table
 
@@ -550,8 +615,8 @@ visible on the canvas but invisible to that mode's optimizer.
 `PointingEvaluator` accepts optional `protect_mask`, `priorities`,
 `weights`, `disperser`, `filt`, `reason` kwargs. When `protect_mask`
 flags any source, three drop rules apply at every `evaluate()` call,
-reusing the **same** physics as the live canvas's orange spec-overlap
-layer (Q1/Q3 → NRS1 vs Q2/Q4 → NRS2 detector halves, V2 separation
+reusing the **same** physics as the live canvas's spec-overlap layer
+(Q1/Q3 → NRS1 vs Q2/Q4 → NRS2 detector halves, V2 separation
 < `v2_overlap_distance(disperser, filt)`). Row tolerance is
 **slitlet-aware** (v1.2.1+) — `SHVAL_S_TOLERANCE = 1` is the
 per-individual-shutter constant used by the live-canvas glyph, but
