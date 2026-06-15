@@ -52,11 +52,24 @@ filenames for that run. The general flow:
    type the **Catalog Name** (use the `.cat` stem — it matches
    `catalog.name` in the plan), and set **File Format** to **Whitespace
    Separated**. Click **Import**.
+
+   ![APT MSA Source Importer](apt_screenshot_load_catalog.png)
+
+   *APT's MSA Source Importer — set File Format to "Whitespace Separated"
+   for a vMPT v1.4.0 `<catalog>_APT_catalog.cat`.*
+
 2. **Import the plan.** Open the **MSA Planning Tool → Plans** tab and, in
    the **Plan Selection** box, click **Import Plan(s)** → choose
    `<catalog_stem>_MPT_plan.json`. Each configuration loads as its own
    **Pointings** entry. With the plan selected, click **Create
    Observation** (or **Update Observation**).
+
+   ![APT MSA Planning Tool — Plans](apt_screenshot_load_MPT_plan.png)
+
+   *The imported vMPT v1.4.0 plan in MPT's **Plans** tab — a 2-config plan
+   shows its two pointings (`c1e1`, `c2e1`) under **Pointings**; use
+   **Create / Update Observation** to turn it into an APT observation.*
+
 3. **Finish the design.** In the observation set the **Nod Pattern**
    column to **3-Shutter Slitlet** (vMPT plans 3-shutter slitlets), then
    set exposure parameters / dithers as your program needs.
