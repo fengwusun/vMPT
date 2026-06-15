@@ -158,10 +158,13 @@ even if the user hasn't opened them.
 | `pa_v3` | V3 PA in degrees (mod 360). APA = `pa_v3 + V3_IDL_Y_ANGLE`. |
 | `disperser`, `filter` | e.g. `"PRISM"`, `"CLEAR"`. |
 | `slitlet_height` | N ∈ {1, 2, 3, 5}. Determines `_slitlet_offsets` and toggle-off siblings. |
-| `open_shutters` | `dict[(q, s, d) → OpenShutter]`. The user's picks. |
-| `highlighted` | `set[(q, s, d)]` — cyan-edge visual flag, not exported. |
-| `history` | Undo stack (capped at 50 snapshots of `open_shutters`). |
-| `shutter_to_catids` | `dict[(q, s, d) → [source_id, …]]` — catalog sources whose footprint lands in each shutter. Rebuilt on pointing / PA / catalog change. |
+| `configs` | **(v1.4.0)** List of config dicts, each `{name, open_shutters, highlighted, history, ra_deg, dec_deg, pa_v3}`. One MPT configuration per entry; pointing is per-config (`None` = inherit current). |
+| `active_config` | **(v1.4.0)** Index into `configs` the user is editing. |
+| `n_configs` | **(v1.4.0)** How many configs are "live" (1 or 2). |
+| `open_shutters` | `dict[(q, s, d) → OpenShutter]`. **Live alias** of `configs[active_config]["open_shutters"]` — so the ~40 in-place readers are untouched. Wholesale reassignments MUST go through `_set_open_shutters()` to keep the alias and the config slot in sync. |
+| `highlighted` | `set[(q, s, d)]` — cyan-edge visual flag, not exported. Live alias of the active config (`_set_highlighted`). |
+| `history` | Undo stack (capped at 50). Per-config; live alias of the active config (`_set_history`). |
+| `shutter_to_catids` | `dict[(q, s, d) → [source_id, …]]` — catalog sources whose footprint lands in each shutter. Rebuilt on pointing / PA / catalog / config-switch change. `OpenShutter.target_ids` snapshots this list per open shutter so multi-source shutters survive a later pointing change. |
 | `snap_to_operable` | When a target click misses, snap to the nearest operable shutter. |
 | `catalog_alphas` | Per-source line_alpha (decayed by z-depth in the catalog stack so earlier-loaded catalogs read more strongly than later ones). |
 | `_autoload_active` | Guard flag set while `_autoload_from_args` is driving sequenced loads from `run.sh` args. The path-input on_change handlers no-op while it's True so they don't double-trigger loads. |

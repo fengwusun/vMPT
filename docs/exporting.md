@@ -6,29 +6,60 @@ your full session. Same writer for `Save session` and
 
 ## Files written
 
+The two **APT-facing** files are target-prefixed so it's obvious which
+file APT/MPT loads (`<catalog_stem>` is your loaded catalog's name):
+
 | File | Format | Consumed by |
 |---|---|---|
-| `MPT_plan.json` | JSON | APT MPT importer |
-| `<catalog_stem>.cat` | Text | APT MPT target list |
+| `<catalog_stem>_APT_catalog.cat` | Text (tab-sep) | APT *Import MSA Source Catalog* |
+| `<catalog_stem>_MPT_plan.json` | JSON | APT MPT *Import Plan(s)* |
+| `README.md` | Markdown | you — the import steps below, filled in for this bundle |
 | `vMPT_workspace.json` | JSON | vMPT-only (full state) |
-| `eMPT_pointings.txt` | Text | eMPT pipeline step 0 |
-| `eMPT_observed.cat` | Text | eMPT pipeline step 1 |
-| `eMPT_shutter_mask.csv` | CSV | eMPT pipeline step 2 |
+| `eMPT_observed_targets.cat` | Text | eMPT pipeline |
+| `eMPT_pointing_summary.txt` | Text | eMPT pipeline |
+| `eMPT_shutter_mask.csv` | CSV | eMPT pipeline |
+
+A multi-config plan also writes a `config_N/` subfolder per pointing
+with that config's own eMPT products.
 
 `vMPT_workspace.json` is the **canonical save**: every other file
 can be regenerated from it. The recipient just needs to point
-`Load session` at the workspace JSON (or `MPT_plan.json` — the
+`Load session` at the workspace JSON (or the `*_MPT_plan.json` — the
 sibling is auto-discovered).
 
-## Loading into APT
+### `.cat` columns
 
-1. Open APT, create or open a NIRSpec MOS observation.
-2. **File → Import MPT plan** → point at the `MPT_plan.json` from
-   your bundle.
-3. The pointing (RA, Dec, V3 PA), the disperser/filter, and the
-   open-shutter pattern all land in APT.
-4. Run `MPT-Verify` in APT to confirm vMPT's slitlets match APT's
-   expectations.
+`# ID  RA  DEC  Weight  Primary  [Magnitude]  [Redshift]  Label`
+
+- **Weight** — APT's ranking field. vMPT writes the source's *weight*,
+  falling back to its *priority* where no weight is set (APT's MSA
+  catalog format has a `Weight` column but no `Priority` column).
+- **Primary** — `1` = a source from your input catalog; `0` = a slitlet
+  vMPT opened that had no catalog source (a `vMPT_synth` row).
+- **Magnitude / Redshift** — carried from your input catalog when present
+  (a missing value is written as `99.9` mag / `-1` redshift, not `NaN`,
+  which APT rejects); the columns are omitted entirely if your catalog
+  has neither.
+- **Label** — your original source ID / label, preserved for traceability.
+
+## Loading into APT / MPT
+
+The bundle's generated `README.md` spells these steps out with the exact
+filenames for that run. The general flow:
+
+1. **Import the source catalog.** In APT click **Import MSA Source
+   Catalog**. Set **File to Import** to `<catalog_stem>_APT_catalog.cat`,
+   type the **Catalog Name** (use the `.cat` stem — it matches
+   `catalog.name` in the plan), and set **File Format** to **Whitespace
+   Separated**. Click **Import**.
+2. **Import the plan.** Open the **MSA Planning Tool → Plans** tab and, in
+   the **Plan Selection** box, click **Import Plan(s)** → choose
+   `<catalog_stem>_MPT_plan.json`. Each configuration loads as its own
+   **Pointings** entry. With the plan selected, click **Create
+   Observation** (or **Update Observation**).
+3. **Finish the design.** In the observation set the **Nod Pattern**
+   column to **3-Shutter Slitlet** (vMPT plans 3-shutter slitlets), then
+   set exposure parameters / dithers as your program needs.
 
 ## Loading into the eMPT pipeline
 

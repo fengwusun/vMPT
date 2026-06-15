@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 from dataclasses import dataclass, field
@@ -90,6 +91,16 @@ class Catalog:
     centration: np.ndarray = field(
         default_factory=lambda: np.array([], dtype=object)
     )
+    # max_configs[i] is a per-target cap on how many MPT configurations
+    # this source may be observed in (v1.4.0 multi-config). float64 with
+    # NaN = "no per-source override" → the optimizer falls back to the
+    # global default (blank global = unlimited). A finite value (e.g. 1.0)
+    # stops the source being re-picked once it has been placed in that
+    # many configs, which is what keeps a second config from duplicating
+    # the first when both could observe the same high-value targets.
+    max_configs: np.ndarray = field(
+        default_factory=lambda: np.array([], dtype=float)
+    )
 
     # Original-column → values for every column the loader did NOT
     # claim as one of the canonical fields above. Stored as object
@@ -155,6 +166,12 @@ _PROTECT_KEYS = (
 _CENTRATION_KEYS = (
     "centration", "centering", "sourcecentration", "sourcecentering",
     "centerclass", "centeringclass",
+)
+# Per-target multi-config cap (v1.4.0). Integer-valued column; NaN/blank
+# leaves it unset (inherit the optimizer's global default).
+_MAX_CONFIGS_KEYS = (
+    "maxconfigs", "maxconfig", "maxobservations", "maxobs", "nconfigs",
+    "numconfigs", "maxconfigsobserved", "configcap",
 )
 _VALID_CENTRATION_LEVELS = (
     "UNCONSTRAINED",
@@ -437,7 +454,14 @@ def _as_lam_req(table: Table, name: str | None) -> np.ndarray:
     result is wrapped in a `dtype=object` array (ragged-friendly)."""
     n = len(table)
     if name is None:
-        return np.array([[] for _ in range(n)], dtype=object)
+        # A true 1D object array of empty lists. `np.array([[], [], …],
+        # dtype=object)` collapses to a 2D shape-(n, 0) array whose
+        # `.size` is 0, which trips the optimizer's length check (and
+        # bool() ambiguity in save_catalog). Build it element-wise.
+        empty = np.empty(n, dtype=object)
+        for i in range(n):
+            empty[i] = []
+        return empty
     col = table[name]
     out = np.empty(n, dtype=object)
     mask = getattr(col, "mask", None)
@@ -535,6 +559,8 @@ def load_catalog(path: str) -> Catalog:
     protect_col = _find_col(table, _PROTECT_KEYS)
     # Per-target source-centering override (v1.3.1+).
     centration_col = _find_col(table, _CENTRATION_KEYS)
+    # Per-target multi-config cap (v1.4.0+).
+    max_configs_col = _find_col(table, _MAX_CONFIGS_KEYS)
     # If `name`/`label` was used as the ID fallback, don't ALSO claim it
     # as the label column — that would just duplicate the ID.
     label_candidates = _LABEL_KEYS
@@ -551,7 +577,7 @@ def load_catalog(path: str) -> Catalog:
                            mag_col, z_col, label_col,
                            lam_req_col, no_gap_col, extend_blue_col,
                            extend_red_col, protect_col,
-                           centration_col) if c}
+                           centration_col, max_configs_col) if c}
     extras: dict = {}
     for col_name in table.colnames:
         if col_name in claimed:
@@ -585,6 +611,7 @@ def load_catalog(path: str) -> Catalog:
         extend_red=_as_bool(table, extend_red_col),
         protect=_as_bool(table, protect_col),
         centration=_as_centration_str(table, centration_col),
+        max_configs=_as_float(table, max_configs_col),
         source_path=path,
         extras=extras,
     )
@@ -680,12 +707,17 @@ def save_catalog(cat: Catalog, path: str, *,
     extend_red = np.asarray(getattr(cat, "extend_red", []), dtype=bool)
     protect = np.asarray(getattr(cat, "protect", []), dtype=bool)
     centration = np.asarray(getattr(cat, "centration", []), dtype=object)
+    max_configs = np.asarray(getattr(cat, "max_configs", []), dtype=float)
     has_lam = (required_lam is not None
                and len(required_lam) == n
                and any(bool(r) and len(r) > 0 for r in required_lam))
     has_centration = (
         centration.size == n
         and any(bool(str(v).strip()) for v in centration)
+    )
+    has_max_configs = (
+        max_configs.size == n
+        and bool(np.isfinite(max_configs).any())
     )
     has_constraints = (
         has_lam
@@ -694,6 +726,7 @@ def save_catalog(cat: Catalog, path: str, *,
         or (extend_red.size == n and extend_red.any())
         or (protect.size == n and protect.any())
         or has_centration
+        or has_max_configs
     )
     emit_constraints = (
         include_constraints == "always"
@@ -703,7 +736,8 @@ def save_catalog(cat: Catalog, path: str, *,
     extras = getattr(cat, "extras", {}) or {}
 
     constraint_cols = (["lam_req", "no_gap", "extend_blue",
-                        "extend_red", "protect", "centration"]
+                        "extend_red", "protect", "centration",
+                        "max_configs"]
                        if emit_constraints else [])
     header = (["ID", "RA", "DEC", "priority", "weight", "mag", "z",
                "label", *constraint_cols, *extras.keys()])
@@ -747,6 +781,8 @@ def save_catalog(cat: Catalog, path: str, *,
                     row.append(c if c else "")
                 else:
                     row.append("")
+                row.append(_fmt_int_or_blank(max_configs[i])
+                           if max_configs.size > i else "")
             for k, vals in extras.items():
                 row.append(str(vals[i]) if i < len(vals) else "")
             w.writerow(row)
@@ -762,3 +798,113 @@ def catalog_in_view(cat: Catalog, ra_min, ra_max, dec_min, dec_max) -> np.ndarra
         # RA range wraps across 0/360
         in_ra = (ra >= ra_min) | (ra <= ra_max)
     return in_ra & in_dec
+
+
+# ── Safe row-selection conditions (catalog editor rules) ─────────────────
+# Users write a boolean expression over catalog columns to select sources
+# (e.g. "(mag_f444w > 27) & (z > 6)") for a bulk edit such as setting
+# max_configs. Evaluation is sandboxed: an AST whitelist rejects anything
+# but comparisons, arithmetic, &/|/~, and a few numpy element-wise funcs,
+# and the eval namespace has NO builtins — so a typed expression can never
+# run arbitrary code or touch attributes.
+_COND_ALLOWED_NODES = (
+    ast.Expression, ast.BoolOp, ast.And, ast.Or, ast.UnaryOp, ast.Not,
+    ast.Invert, ast.UAdd, ast.USub, ast.BinOp, ast.Add, ast.Sub, ast.Mult,
+    ast.Div, ast.Mod, ast.Pow, ast.BitAnd, ast.BitOr, ast.BitXor,
+    ast.Compare, ast.Lt, ast.LtE, ast.Gt, ast.GtE, ast.Eq, ast.NotEq,
+    ast.Name, ast.Load, ast.Constant, ast.List, ast.Tuple, ast.Call,
+)
+# numpy element-wise functions a condition may call. (`in` is NOT a
+# Python operator here — it doesn't broadcast over arrays — so set
+# membership is exposed as isin(col, (...)) instead.)
+_COND_FUNCS = {
+    "abs": np.abs, "log10": np.log10, "log": np.log, "log2": np.log2,
+    "sqrt": np.sqrt, "exp": np.exp, "isfinite": np.isfinite,
+    "isnan": np.isnan, "isin": np.isin,
+}
+
+
+def _coerce_column_array(values) -> np.ndarray:
+    """Return a numpy array for a catalog column: float when every
+    non-blank entry parses as a number (blanks → NaN), else string."""
+    floats: list[float] = []
+    numeric = True
+    for v in values:
+        s = str(v).strip()
+        if s == "" or s.lower() in ("nan", "none", "--"):
+            floats.append(np.nan)
+            continue
+        try:
+            floats.append(float(s))
+        except ValueError:
+            numeric = False
+            break
+    if numeric:
+        return np.asarray(floats, dtype=float)
+    return np.asarray([str(v) for v in values], dtype=object)
+
+
+def evaluate_catalog_condition(expr: str, columns: dict) -> np.ndarray:
+    """Evaluate a boolean row-selection expression over catalog columns.
+
+    ``columns`` maps column name → per-row values. Column names become
+    variables (numeric columns are floats, blanks → NaN; otherwise the
+    column stays string). Returns a boolean ``np.ndarray`` of length
+    ``n_rows``.
+
+    Raises :class:`ValueError` with a short, user-facing message on empty
+    input, syntax error, unknown column, a disallowed construct, an
+    evaluation error, or a non-boolean / wrong-length result.
+    """
+    text = (expr or "").strip()
+    if not text:
+        raise ValueError("Condition is empty.")
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Syntax error: {exc.msg}.") from None
+
+    arrays = {name: _coerce_column_array(vals)
+              for name, vals in columns.items()}
+    n_rows = len(next(iter(arrays.values()))) if arrays else 0
+    allowed_names = set(arrays) | set(_COND_FUNCS)
+
+    for node in ast.walk(tree):
+        if not isinstance(node, _COND_ALLOWED_NODES):
+            raise ValueError(
+                f"'{type(node).__name__}' is not allowed in a condition."
+            )
+        if isinstance(node, ast.Call) and not (
+            isinstance(node.func, ast.Name) and node.func.id in _COND_FUNCS
+        ):
+            raise ValueError(
+                "Only these functions are allowed: "
+                + ", ".join(sorted(_COND_FUNCS)) + "."
+            )
+        if isinstance(node, ast.Name) and node.id not in allowed_names:
+            avail = ", ".join(sorted(arrays)) or "(none)"
+            raise ValueError(f"Unknown column '{node.id}'. Available: {avail}.")
+
+    env = {"__builtins__": {}}
+    env.update(arrays)
+    env.update(_COND_FUNCS)
+    try:
+        with np.errstate(all="ignore"):
+            result = eval(compile(tree, "<condition>", "eval"), env)  # noqa: S307
+    except Exception as exc:  # noqa: BLE001
+        msg = str(exc)
+        if "truth value" in msg or "ambiguous" in msg:
+            msg = ("combine comparisons with '&' / '|' (not 'and' / 'or') "
+                   "and parenthesise each, e.g. (mag > 27) & (z > 6)")
+        raise ValueError(f"Could not evaluate: {msg}") from None
+
+    arr = np.asarray(result)
+    if arr.ndim == 0:
+        arr = np.full(n_rows, bool(arr))
+    if arr.shape[0] != n_rows:
+        raise ValueError("Condition must yield one value per source.")
+    # Require a genuine boolean result — a bare arithmetic expression
+    # (e.g. "mag + z") is not a selection and is rejected here.
+    if arr.dtype != bool:
+        raise ValueError("Condition must be boolean — use >, <, ==, &, |.")
+    return arr

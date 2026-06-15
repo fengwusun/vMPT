@@ -77,3 +77,14 @@ def test_history_undo():
     assert len(m.state["history"]) == 1
     m.state["open_shutters"] = m.state["history"].pop()
     assert m.state["open_shutters"] == {}
+
+
+def test_fmt_gap_label():
+    """MPT viewer's Gap column label: 'lo–hi' when the detector gap falls
+    in the spectrum, 'none' when gap-free, '' when there's no spectrum."""
+    m = _import_main()
+    assert m._fmt_gap(1.2, 1.45, True) == "1.200–1.450"
+    assert m._fmt_gap(None, None, True) == "none"
+    assert m._fmt_gap(None, None, False) == ""
+    # A partial/odd bound never crashes; falls back to the has-spectrum branch.
+    assert m._fmt_gap(1.2, None, True) == "none"

@@ -73,10 +73,157 @@ class Session:
     tool_version: str = SESSION_TOOL_VERSION
     created: Optional[str] = None
     name: Optional[str] = None
+    # vMPT 1.4+: multiple MPT configurations. Each entry is a dict:
+    #   {"name": str, "ra_deg": float|None, "dec_deg": float|None,
+    #    "pa_v3": float|None, "open_shutters": [OpenShutter, …],
+    #    "highlighted": [(q, s, d), …]}
+    # Empty list = single-config bundle (legacy); the top-level
+    # `open_shutters` / pointing then describe the one config.
+    configs: list = field(default_factory=list)
+    active_config: int = 0
 
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _compact_stamp(iso: str) -> str:
+    """"2026-06-15T12:19:06Z" → "20260615T12:19:06Z" (dash-free date,
+    used in the human-readable plan name)."""
+    try:
+        date_part, sep, rest = str(iso).partition("T")
+        if not sep:
+            return str(iso)
+        return date_part.replace("-", "") + "T" + rest
+    except Exception:  # noqa: BLE001
+        return str(iso)
+
+
+def _catalog_stem(catalog_path: str | None) -> str:
+    """Bare stem of the loaded catalog (e.g. 'rxcj2211_targets'); a stable
+    fallback when no catalog is loaded."""
+    if catalog_path:
+        return Path(catalog_path).stem
+    return "vMPT_targets"
+
+
+def apt_catalog_basename(catalog_path: str | None) -> str:
+    """Basename (no extension) shared by the APT-importable `.cat` file AND
+    the plan JSON's ``catalog.name`` / ``primariesName``, kept identical so
+    APT's filename-derived default lines up with the plan. Target-prefixed
+    and ``_APT_catalog``-suffixed so users see at a glance it's for APT."""
+    return f"{_catalog_stem(catalog_path)}_APT_catalog"
+
+
+def apt_plan_basename(catalog_path: str | None) -> str:
+    """Basename (no extension) for the MPT plan JSON — target-prefixed and
+    ``_MPT_plan``-suffixed, e.g. 'rxcj2211_targets_MPT_plan'."""
+    return f"{_catalog_stem(catalog_path)}_MPT_plan"
+
+
+def bundle_readme_text(
+    *,
+    catalog_filename: str,
+    catalog_name: str,
+    plan_filename: str,
+    n_configs: int = 1,
+) -> str:
+    """Markdown README placed at the root of an exported bundle, telling a
+    user exactly how to load it into APT / MPT. Filenames + catalog name
+    are filled in so the steps are copy-paste accurate for this bundle."""
+    config_row = ""
+    if n_configs > 1:
+        config_row = (
+            f"\n| `config_1/` … `config_{n_configs}/` | Per-configuration "
+            "eMPT products (one folder per pointing). |"
+        )
+    return f"""# Loading this vMPT bundle into APT / MPT
+
+This folder was produced by **vMPT** (visual MSA Planning Tool) for
+JWST/NIRSpec MOS planning. It contains everything APT's MSA Planning Tool
+(MPT) needs to reconstruct the plan, plus eMPT-pipeline products.
+
+## What's in here
+
+| File | Purpose |
+|------|---------|
+| `{catalog_filename}` | MSA **source catalog** — import into APT (Step 1). |
+| `{plan_filename}` | MSA **plan** (pointings + slitlets) — import into MPT (Step 2). |
+| `{WORKSPACE_FILENAME}` | Full vMPT session — reopen in vMPT (not needed for APT). |
+| `{EMPT_OBSERVED_FILENAME}`, `{EMPT_SHUTTER_MASK_FILENAME}`, `{EMPT_POINTING_FILENAME}` | eMPT-pipeline products (not needed for the APT steps below). |{config_row}
+
+## Step 1 — Import the source catalog into APT
+
+1. In APT, click **Import MSA Source Catalog**.
+2. **File to Import:** browse to `{catalog_filename}`.
+3. **Catalog Name:** enter `{catalog_name}` — this must match the name
+   stored in the plan, so keep it exactly.
+4. **File Format:** choose **Whitespace Separated**.
+5. Click **Import**.
+
+## Step 2 — Import the MSA plan into MPT
+
+1. Open the **MSA Planning Tool** and select the **Plans** tab.
+2. In the **Plan Selection** box, click **Import Plan(s)** and choose
+   `{plan_filename}`.
+3. The plan loads; each configuration appears as its own entry under
+   **Pointings**.
+4. With the plan selected, click **Create Observation** (or **Update
+   Observation**) to turn it into an APT observation.
+
+## Step 3 — Finish the observation in APT
+
+- In the observation, set the **Nod Pattern** column to **3-Shutter
+  Slitlet** — vMPT plans 3-shutter slitlets.
+- Set exposure parameters, dithers, etc. as your program requires.
+
+## Source-catalog columns
+
+- **ID** — integer source ID (the original token is kept in *Label*).
+- **RA / DEC** — decimal degrees.
+- **Weight** — APT's ranking field. vMPT writes the source weight, falling
+  back to its priority where no weight is set (APT has no Priority column).
+- **Primary** — `1` = a source from your input catalog; `0` = a slitlet
+  vMPT opened that had no catalog source.
+- **Magnitude / Redshift** — carried from your input catalog when present
+  (a missing value is written as `99.9` mag / `-1` redshift — APT rejects
+  `NaN`).
+- **Label** — your original source ID / label, for traceability.
+
+_Generated by vMPT {SESSION_TOOL_VERSION}._
+"""
+
+
+def _serialize_open_shutters(opens: list) -> list:
+    """Serialize a list of OpenShutter to JSON dicts, carrying both the
+    primary ``target_id`` and the full ``target_ids`` list (v1.4.0
+    multi-source shutters)."""
+    out = []
+    for sh in opens:
+        tids = [str(t) for t in (getattr(sh, "target_ids", None) or [])
+                if str(t) != ""]
+        out.append({
+            "q": int(sh.q), "d": int(sh.d), "s": int(sh.s),
+            "target_id": (str(sh.target_id)
+                          if sh.target_id is not None else None),
+            "target_ids": tids,
+            "role": sh.role,
+        })
+    return out
+
+
+def _deserialize_open_shutter(sh: dict) -> OpenShutter:
+    """Inverse of one :func:`_serialize_open_shutters` entry. Tolerates
+    pre-1.4.0 dicts with no ``target_ids`` (back-fills from target_id)."""
+    tids = [str(t) for t in (sh.get("target_ids") or []) if str(t) != ""]
+    tid = sh.get("target_id")
+    if not tids and tid is not None and str(tid) != "":
+        tids = [str(tid)]
+    return OpenShutter(
+        q=int(sh["q"]), s=int(sh["s"]), d=int(sh["d"]),
+        target_id=tid, role=sh.get("role", "target"),
+        target_ids=tids,
+    )
 
 
 def _group_into_slitlets(
@@ -162,41 +309,97 @@ def _build_mpt_payload(session: Session) -> dict:
     schema-wise (we don't reproduce the full plannerSpecification, but
     the top-level shape is identical)."""
     apa = (float(session.pa_v3_deg) + V3_IDL_Y_ANGLE) % 360.0
-    pairs = _group_into_slitlets(session.open_shutters)
-    slitlets = [sl for sl, _ in pairs]
-    primary_ids: list[int] = []
-    for _, tid in pairs:
-        if tid is None:
-            continue
-        try:
-            primary_ids.append(int(tid))
-        except (TypeError, ValueError):
-            # Non-numeric target_ids can't sit in primaryIds (APT uses int);
-            # silently skip — the workspace sidecar carries them losslessly.
-            pass
-
     grating_filter = f"{session.disperser}_{session.filter_name}"
     msa_slitlet = _MSA_SLITLET_ENUM.get(int(session.slitlet_height), "THREE_SHUTTER")
 
     created = session.created if session.created is not None else _utc_now_iso()
-    name = session.name or f"vMPT session — {created}"
+    # Human-readable plan name shown (un-editable) in APT/MPT. Informative
+    # form: vmpt-<target>-<timestamp>, e.g. vmpt-rxcj2211_targets-20260615T12:19:06Z.
+    name = session.name or (
+        f"vmpt-{_catalog_stem(session.catalog_path)}-{_compact_stamp(created)}"
+    )
 
-    # `catalog_basename` is the identifier APT will look for in its Target
-    # List database. We always export a primaries catalog file in the
-    # bundle whose name MATCHES this basename (so importing the .cat under
-    # its default name in APT lines up automatically with the plan).
-    # Default is the stem of MPT_CATALOG_FILENAME (e.g. "MPT_catalog");
-    # if a user-loaded catalog file is available we use its stem instead.
-    from pathlib import Path as _P
-    catalog_basename = _P(MPT_CATALOG_FILENAME).stem
-    if session.catalog_path:
-        catalog_basename = _P(session.catalog_path).stem
+    # `catalog_basename` is the identifier APT looks for in its Target List
+    # database; we export a `.cat` whose stem MATCHES it so APT's
+    # filename-derived default lines up with the plan automatically.
+    catalog_basename = apt_catalog_basename(session.catalog_path)
 
-    n_targets = len(primary_ids)
+    # One MPT config block per live vMPT config (v1.4.0). Single-config
+    # bundles (session.configs empty) emit exactly one block from the
+    # top-level open_shutters + pointing.
+    if session.configs and len(session.configs) > 1:
+        cfg_specs = [
+            (c.get("open_shutters") or [],
+             (c.get("ra_deg") if c.get("ra_deg") is not None
+              else session.pointing_ra_deg),
+             (c.get("dec_deg") if c.get("dec_deg") is not None
+              else session.pointing_dec_deg))
+            for c in session.configs
+        ]
+    else:
+        cfg_specs = [(session.open_shutters,
+                      session.pointing_ra_deg, session.pointing_dec_deg)]
+
+    config_blocks: list = []
+    primary_ids_all: list[int] = []
+    for ci, (opens, cra, cdec) in enumerate(cfg_specs):
+        pairs = _group_into_slitlets(opens)
+        slitlets = [sl for sl, _ in pairs]
+        primary_ids: list[int] = []
+        for _, tid in pairs:
+            if tid is None:
+                continue
+            try:
+                primary_ids.append(int(tid))
+            except (TypeError, ValueError):
+                # Non-numeric ids can't sit in primaryIds (APT uses int);
+                # the workspace sidecar carries them losslessly.
+                pass
+        # Every observed source — including a second source sharing a
+        # shutter (v1.4.0) — goes into sourceIds so the plan records them.
+        source_ids: list[int] = []
+        seen_src: set = set()
+        for sh in opens:
+            tids = list(getattr(sh, "target_ids", None) or [])
+            if not tids and sh.target_id is not None:
+                tids = [sh.target_id]
+            for t in tids:
+                ts = str(t)
+                if ts in seen_src:
+                    continue
+                seen_src.add(ts)
+                try:
+                    source_ids.append(int(ts))
+                except (TypeError, ValueError):
+                    pass
+        primary_ids_all.extend(primary_ids)
+        tag = f"c{ci + 1}"
+        config_blocks.append({
+            "name": tag,
+            "version": f"vMPT-{SESSION_TOOL_VERSION}",
+            "info": {"fixedSlit": None},
+            "masterBackground": False,
+            "slitlets": slitlets,
+            "exposures": [{
+                "name": f"{tag}e1",
+                "gratingFilter": grating_filter,
+                "msaSlitlet": msa_slitlet,
+                "ra": float(cra),
+                "dec": float(cdec),
+                "sourceIds": source_ids or primary_ids,
+            }],
+            "primaryIds": primary_ids,
+            "fillerIds": [],
+        })
+
+    n_cfg_blocks = len(config_blocks)
+    n_targets = len(set(primary_ids_all))
     return {
         "instrument": "JWST/NIRSpec",
         "name": name,
-        "aperturePA": apa,
+        # Round to 5 dp — strips float-arithmetic noise
+        # (208.99999970000002 → 209.0) to match the input precision.
+        "aperturePA": round(apa, 5),
         "theta": 0.0,
         "catalog": {
             "name": catalog_basename,
@@ -209,27 +412,11 @@ def _build_mpt_payload(session: Session) -> dict:
             "ra": float(session.pointing_ra_deg),
             "dec": float(session.pointing_dec_deg),
         },
-        "configs": [{
-            "name": "c1",
-            "version": f"vMPT-{SESSION_TOOL_VERSION}",
-            "info": {"fixedSlit": None},
-            "masterBackground": False,
-            "slitlets": slitlets,
-            "exposures": [{
-                "name": "c1e1",
-                "gratingFilter": grating_filter,
-                "msaSlitlet": msa_slitlet,
-                "ra": float(session.pointing_ra_deg),
-                "dec": float(session.pointing_dec_deg),
-                "sourceIds": primary_ids,
-            }],
-            "primaryIds": primary_ids,
-            "fillerIds": [],
-        }],
+        "configs": config_blocks,
         "stats": [{
             "name": "s0",
             "score": float(n_targets),
-            "numberOfConfigurations": 1,
+            "numberOfConfigurations": n_cfg_blocks,
             "numberOfTargets": n_targets,
             "duration": 0.0,
             "totalDuration": 0.0,
@@ -261,8 +448,8 @@ def _build_mpt_payload(session: Session) -> dict:
                 "monteCarloShuffles": None,
                 "ignoreStuckOpen": False,
                 "spectralOverlapThreshold": 1.5,
-                "numberOfConfigurations": 1,
-                "allowMultiSourceShutters": False,
+                "numberOfConfigurations": n_cfg_blocks,
+                "allowMultiSourceShutters": True,
                 "spectralOverlapShutterOffsetMap": _spectral_offset_map(session.disperser),
             },
             "slitSearchSpecification": None,
@@ -331,14 +518,7 @@ def _build_workspace_payload(session: Session) -> dict:
         "created": session.created if session.created is not None else _utc_now_iso(),
         "pa_v3_deg": float(session.pa_v3_deg),
         "slitlet_height": int(session.slitlet_height),
-        "open_shutters": [
-            {
-                "q": int(sh.q), "d": int(sh.d), "s": int(sh.s),
-                "target_id": (str(sh.target_id) if sh.target_id is not None else None),
-                "role": sh.role,
-            }
-            for sh in session.open_shutters
-        ],
+        "open_shutters": _serialize_open_shutters(session.open_shutters),
         "highlighted": [[int(q), int(s), int(d)] for (q, s, d) in session.highlighted],
         "image_path": session.image_path,
         "wcs_sidecar_path": session.wcs_sidecar_path,
@@ -348,6 +528,32 @@ def _build_workspace_payload(session: Session) -> dict:
             for e in (session.catalog_paths or [])
             if e.get("path")
         ],
+        # v1.4.0 multi-config. Only emitted when >1 config is present so
+        # single-config bundles stay byte-identical to ≤1.3.x.
+        **(
+            {
+                "active_config": int(session.active_config),
+                "configs": [
+                    {
+                        "name": str(c.get("name") or f"Config {ci + 1}"),
+                        "ra_deg": (None if c.get("ra_deg") is None
+                                   else float(c["ra_deg"])),
+                        "dec_deg": (None if c.get("dec_deg") is None
+                                    else float(c["dec_deg"])),
+                        "pa_v3": (None if c.get("pa_v3") is None
+                                  else float(c["pa_v3"])),
+                        "open_shutters": _serialize_open_shutters(
+                            c.get("open_shutters") or []),
+                        "highlighted": [
+                            [int(q), int(s), int(d)]
+                            for (q, s, d) in (c.get("highlighted") or [])
+                        ],
+                    }
+                    for ci, c in enumerate(session.configs)
+                ],
+            }
+            if session.configs and len(session.configs) > 1 else {}
+        ),
     }
 
 
@@ -442,11 +648,7 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
         opens: list[OpenShutter] = []
         for i, sh in enumerate(sidecar["open_shutters"]):
             try:
-                opens.append(OpenShutter(
-                    q=int(sh["q"]), s=int(sh["s"]), d=int(sh["d"]),
-                    target_id=sh.get("target_id"),
-                    role=sh.get("role", "target"),
-                ))
+                opens.append(_deserialize_open_shutter(sh))
             except (KeyError, TypeError, ValueError) as e:
                 raise ValueError(f"malformed workspace open_shutters[{i}]: {e}") from e
     else:
@@ -480,6 +682,35 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
         sidecar.get("catalog_paths"), sidecar.get("catalog_path"),
     )
 
+    # v1.4.0 multi-config reconstruction (workspace sidecar). Absent for
+    # single-config / pre-1.4.0 bundles → empty list (legacy behaviour).
+    configs: list = []
+    raw_configs = sidecar.get("configs")
+    if isinstance(raw_configs, list) and raw_configs:
+        for ci, c in enumerate(raw_configs):
+            c_opens: list[OpenShutter] = []
+            for sh in (c.get("open_shutters") or []):
+                try:
+                    c_opens.append(_deserialize_open_shutter(sh))
+                except (KeyError, TypeError, ValueError):
+                    pass
+            c_hl: list[tuple[int, int, int]] = []
+            for hl in (c.get("highlighted") or []):
+                try:
+                    q, s, d = hl
+                    c_hl.append((int(q), int(s), int(d)))
+                except (TypeError, ValueError):
+                    pass
+            configs.append({
+                "name": str(c.get("name") or f"Config {ci + 1}"),
+                "ra_deg": c.get("ra_deg"),
+                "dec_deg": c.get("dec_deg"),
+                "pa_v3": c.get("pa_v3"),
+                "open_shutters": c_opens,
+                "highlighted": c_hl,
+            })
+    active_config = int(sidecar.get("active_config", 0) or 0)
+
     return Session(
         pointing_ra_deg=ra if ra is not None else 0.0,
         pointing_dec_deg=dec if dec is not None else 0.0,
@@ -496,6 +727,8 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
         tool_version=str(sidecar.get("vmpt_version", SESSION_TOOL_VERSION)),
         created=sidecar.get("created") or data.get("created"),
         name=data.get("name"),
+        configs=configs,
+        active_config=active_config,
     )
 
 

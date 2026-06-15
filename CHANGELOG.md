@@ -4,6 +4,155 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.4.0] — 2026-06-14
+
+Multiple MPT configurations (APT-style), a read-only catalog viewer of
+the selected sources, and shutters that can hold more than one source.
+
+### Multiple MPT configurations
+
+vMPT can now plan up to **two MPT configurations** — each an independent
+pointing + set of open shutters, mirroring how APT/MPT allows multiple
+configs. The **Pointing** tab gains a *Number of configs* spinner and a
+*Working on* selector; manual shutter opens land only on the active
+config, and each config keeps its own pointing (so two configs can sit
+at the same or different RA/Dec/PA — the latter is the "split colliding
+sources across two exposures" workflow).
+
+Which config you're editing is shown three ways: a bright **CONFIG k/N**
+chip pinned to the always-visible top bar, an "Editing Config k" banner
+in the Pointing tab, and — on the image — **each config's quadrant
+boundary drawn in its own colour** (Config 1 blue, Config 2 magenta):
+the active config as a solid grid, the idle config(s) as faint dashed
+outlines at their own pointing. The chip, banner, boundary, and the
+MPT-viewer Cfg column all share one colour per config. The top-bar chip
+is also a **one-click switcher** — clicking it cycles the active config
+(1→2→…→1), so you can change config without leaving the canvas (the
+Pointing-tab *Working on* dropdown stays in sync).
+
+The optimizer, when 2 configs are requested, **auto-produces both at
+once** with a sequential-greedy search: it optimizes Config 1, charges
+its observed sources against their max-observation budget, then
+optimizes Config 2 over what is left. The results modal shows a **single
+combined table** — one row per plan (Config 1 #k + Config 2 #k) with a
+**combined score** on the left and each config's own score + ΔRA/ΔDec/ΔPA
+on its own line — and a per-plan **Apply** that fills both configs at
+once. All three methods (Democracy / Meritocracy / Hierarchy) work
+unchanged — the budget simply removes already-observed sources from the
+candidate pool.
+
+A **Max configs per source** cap controls reuse — **default 1**, so each
+source is observed in at most one config (disjoint configs, no duplicate
+pointing); blank = unlimited. The global default now lives in the
+optimizer's **Advanced settings** next to the rarely-used Priority cutoff
+(both moved out of the main optimizer card to declutter it). Override it
+per source three ways: the Constraints… popover, the `max_configs`
+catalog column, or a **bulk rule in the catalog editor** — *Set max
+configs = N for sources where `<condition>`*, where the condition is a
+sandboxed boolean expression over any catalog column (e.g.
+`(f444w > 27) & (z > 6)`; functions abs/log10/sqrt/isin; combine with
+`&` / `|` / `~`). The expression is syntax-checked — unknown columns and
+bad syntax are reported inline — *before* anything changes, and only
+matching rows are updated.
+
+### MPT catalog viewer
+
+A new **View MPT catalog…** button (Pointing tab) opens a read-only
+table of every selected source across all configs — id, RA/Dec,
+priority, weight, mag, z, config #, and shutter address (q, s, d). It
+also shows each source's **wavelength coverage** (`λ_blue`, `λ_red`) and
+**detector-gap range** (`Gap`) — computed per shutter under the current
+Disperser / Filter when the viewer opens (a brief loading spinner covers
+the compute). A **Show-columns** chip picker hides/reorders columns, rows
+are sortable and drag-reorderable, and there's a *Save as CSV* export
+(now including the λ / gap columns). The numeric columns (priority,
+weight, mag, z, λ_blue, λ_red, RA/Dec, q/s/d) are stored as numbers, so
+they **sort numerically** — `2` before `15`, not the string order `15`
+before `2`. The **Cfg** cell is colour-coded to match the active-config
+chip language (Config 1 → blue, Config 2 → magenta), so the per-config
+grouping reads at a glance. Each source is reported at its slitlet's
+centre (target) shutter when open. Empty until you pick a shutter or run
+the optimizer.
+
+The internal **target/sky nod-shutter "role"** column was removed — it
+isn't a per-source property (every selected source is a science target;
+"sky" just labels the flanking background shutters of its slitlet) and
+read as a misleading near-constant in crowded fields.
+
+### Multi-source shutters
+
+Two very close sources can now share a single shutter and **both** are
+recorded. `OpenShutter` carries a `target_ids` list; the session
+workspace, the MPT plan's `sourceIds`, and the eMPT `observed_targets`
+output all list every source in a shutter (one row per source), not
+just the slitlet's primary.
+
+### Export & session
+
+The session bundle round-trips the full multi-config + multi-source
+state (`configs` array in the workspace sidecar). The MPT plan emits
+one config block per config with per-config pointing; the eMPT bundle
+writes a `config_N/` subdirectory per config when there is more than
+one. Single-config, single-source exports are unchanged from 1.3.x.
+
+### APT / MPT import bundle
+
+The export bundle is now clearer to hand to APT:
+
+- A generated **`README.md`** at the bundle root gives the exact 3-step
+  import recipe (Import MSA Source Catalog → *Whitespace Separated*;
+  Plans → Import Plan(s); set **Nod Pattern = 3-Shutter Slitlet**) with
+  this bundle's real filenames + catalog name filled in. The same steps
+  are in the docs (`docs/exporting.md`, README).
+- The two APT-facing files are **target-prefixed**:
+  `<catalog>_APT_catalog.cat` and `<catalog>_MPT_plan.json` (the eMPT
+  pipeline files keep their fixed names). The `.cat` stem still equals
+  the plan's `catalog.name`, so APT's filename-derived default lines up.
+- The plan's **`name`** is now informative — `vmpt-<catalog>-<timestamp>`
+  (e.g. `vmpt-rxcj2211_targets-20260615T12:19:06Z`) instead of the old
+  un-editable "vMPT session — …", and **`aperturePA`** is rounded to 5 dp
+  (no more `208.99999970000002` float noise).
+- The `.cat` **Weight** column now carries the source *weight* (falling
+  back to *priority* when unset) — previously it always held the priority
+  under a `Weight` header. **Primary** is `1` for input-catalog sources
+  and `0` for vMPT-opened slitlets that had no catalog source (was always
+  `1`). Optional **Magnitude** / **Redshift** columns are carried from the
+  input catalog when present (APT-recognized names; missing values use a
+  finite sentinel — `99.9` mag / `-1` redshift — since APT rejects `NaN`).
+
+### Fixed
+
+- A catalog with no `lam_req` column produced a 2-D `(n, 0)`
+  `required_lam` array whose `.size` was 0, which made the optimizer
+  raise `required_lam size 0 != ra_sources size N` for any plain single
+  catalog. `required_lam` is now always a 1-D object array of empty
+  lists.
+- A newly created config (e.g. via a persisted `default_num_configs`
+  preference, before an image loaded) froze at pointing (0, 0); switching
+  to it jumped the MSA off the image. New configs are now born with an
+  unset pointing and inherit the live pointing on first activation.
+- The blue MSA quadrant outlines traced the corner shutter *centres*, so
+  they sat ~0.23″ (≈3 screen px) inside the rendered shutter area. They
+  now trace the outer corners of the corner shutters and hug the shutters
+  (worst residual ~0.05″, just grid curvature). pysiaf V2/V3 unchanged.
+- The optimizer modal's **Cancel** button was clipped by the card's right
+  edge (the 320 px Run button + Cancel overflowed the 374 px body). Run is
+  now 270 px so both fit with room to spare.
+- The combined 2-config results table showed a bare "−K" drop suffix on
+  Config 2 with no explanation. Each Score cell now carries the same
+  hover tooltip as the single-config table (top placed sources + a
+  per-reason drop breakdown), the new `budget` reason reads "already
+  observed in another config", and a one-line legend appears above the
+  table whenever any plan drops sources.
+- Toggling a **large catalog** (> 1000 sources) on/off in the sidebar
+  re-renders all its circles with no feedback; it now shows the loading
+  spinner during the re-render, matching the initial catalog load.
+
+### Notes
+
+- The example datasets are unchanged, so `vmpt examples download` still
+  pulls the `v1.3.1` release tarball.
+
 ## [1.3.1] — 2026-06-09
 
 The spec-overlap renderer is now matched against direct

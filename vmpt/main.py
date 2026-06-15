@@ -56,7 +56,12 @@ from bokeh.models import (
 )
 from bokeh.plotting import figure
 
-from vmpt.catalog import Catalog, catalog_in_view, load_catalog
+from vmpt.catalog import (
+    Catalog,
+    catalog_in_view,
+    evaluate_catalog_condition,
+    load_catalog,
+)
 from vmpt.coords import (
     MSA_V2_REF,
     MSA_V3_REF,
@@ -92,6 +97,9 @@ from vmpt.session_io import (
     MPT_PLAN_FILENAME,
     Session,
     WORKSPACE_FILENAME,
+    apt_catalog_basename,
+    apt_plan_basename,
+    bundle_readme_text,
     export_session_json,
     import_session_json,
 )
@@ -131,6 +139,35 @@ DISPERSER_FILTER_LABELS = [f"{d} / {f}" for d, f in DISPERSER_FILTER_COMBOS]
 # Session state
 # ---------------------------------------------------------------------------
 
+def _new_config(name: str) -> dict:
+    """Create one empty MPT configuration.
+
+    Each config owns its picks (`open_shutters`), visual highlights, undo
+    history, AND its own saved pointing (`ra_deg`/`dec_deg`/`pa_v3`). A
+    pointing of None means "inherit the live widgets when this config is
+    first activated" (used for the freshly-created config). While a config
+    is the *active* one, its live pointing is the global `state['ra_deg']`
+    etc. + the widgets; the saved copy is refreshed when you switch away.
+    """
+    return {
+        "name": name,
+        "open_shutters": {},   # (q,s,d) -> OpenShutter
+        "highlighted": set(),  # set of (q,s,d) tuples
+        "history": [],         # undo stack of open_shutters snapshots
+        "ra_deg": None,
+        "dec_deg": None,
+        "pa_v3": None,
+    }
+
+
+# The first config exists from the start; `state['open_shutters']`,
+# `['highlighted']` and `['history']` are LIVE ALIASES of the active
+# config's dicts so the ~40 existing in-place readers/mutators keep working
+# unchanged. Only WHOLESALE reassignments (`state['open_shutters'] = {...}`)
+# must go through `_set_open_shutters()` so the alias and the config slot
+# stay in sync.
+_config0 = _new_config("Config 1")
+
 state: dict = {
     "image": None,
     "catalog": None,         # merged-active cache; rebuilt from "catalogs"
@@ -138,9 +175,14 @@ state: dict = {
                              # — the source of truth. `state["catalog"]` is
                              # recomputed on every add/remove/toggle.
     "tmp_sidecar_path": None,
-    "open_shutters": {},  # (q,s,d) -> OpenShutter
-    "highlighted": set(), # set of (q,s,d) tuples — visual flag, not exported
-    "history": [],        # stack of prior open_shutters snapshots (capped)
+    # ─── Multi-config (v1.4.0) ───────────────────────────────────────────
+    "configs": [_config0],   # list of config dicts (see _new_config)
+    "active_config": 0,      # index into configs the user is working on
+    "n_configs": 1,          # how many configs are "live" in the plan (1..2)
+    # Legacy keys — LIVE ALIASES of configs[active_config][...]:
+    "open_shutters": _config0["open_shutters"],  # (q,s,d) -> OpenShutter
+    "highlighted": _config0["highlighted"],      # set of (q,s,d) tuples
+    "history": _config0["history"],              # undo snapshots (per-config)
     "pa_v3": 0.0,
     "ra_deg": 0.0,
     "dec_deg": 0.0,
@@ -153,6 +195,30 @@ state: dict = {
     # pointing / PA / catalog changes.
     "shutter_to_catids": {},
 }
+
+
+def _active_config() -> dict:
+    """The config dict the user is currently working on."""
+    return state["configs"][state["active_config"]]
+
+
+def _set_open_shutters(new: dict) -> None:
+    """Replace the active config's open_shutters wholesale, keeping the
+    legacy `state['open_shutters']` alias pointed at the same object."""
+    _active_config()["open_shutters"] = new
+    state["open_shutters"] = new
+
+
+def _set_highlighted(new: set) -> None:
+    """Replace the active config's highlighted set, keeping the alias."""
+    _active_config()["highlighted"] = new
+    state["highlighted"] = new
+
+
+def _set_history(new: list) -> None:
+    """Replace the active config's undo history, keeping the alias."""
+    _active_config()["history"] = new
+    state["history"] = new
 
 
 def _push_history() -> None:
@@ -170,6 +236,23 @@ FIG_W_HINT = 900     # initial canvas width hint (Bokeh stretches it)
 FIG_H_HINT = 800     # initial canvas height hint
 SIDEBAR_W = 340      # left tab panel (Input / Pointing / Setting / MPT)
 HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
+
+# Per-config accent colours — shared by the top-bar CONFIG chip, the MSA
+# quadrant outline (active solid + idle dashed), and the MPT-viewer Cfg
+# column so the "which config" colour language is identical everywhere.
+_CONFIG_COLORS = ["#1f6fc0", "#b5179e", "#2a9d3a"]
+
+
+def _config_color(idx: int) -> str:
+    """Accent colour for config ``idx`` (0-based); clamps to the palette
+    ends for out-of-range indices."""
+    idx = max(0, int(idx))
+    return _CONFIG_COLORS[idx] if idx < len(_CONFIG_COLORS) else _CONFIG_COLORS[-1]
+
+
+# Catalogs with more sources than this trigger the full-page loading
+# spinner when toggled on/off (re-rendering all their circles takes a beat).
+_LARGE_CATALOG_N = 1000
 
 # Inline styles for the header bar at the top of every modal dialog.
 # Applied via `styles=` on the header `row()` so they survive Bokeh's
@@ -442,9 +525,21 @@ opt_centration_override_hint = Div(
     text="",
     width=SIDEBAR_W - 20,
 )
+# Both inputs live in the Advanced-settings modal (rarely changed), so
+# their width matches the other Advanced inputs (_ADV_INPUT_W).
+_ADV_INPUT_W = 240
 opt_priority_input = TextInput(
     title="Priority cutoff ≤ (blank = all)", value="", placeholder="e.g. 1",
-    width=SIDEBAR_W - 20,
+    width=_ADV_INPUT_W,
+)
+# Global multi-config cap (v1.4.0). Default 1 → each source is observed in
+# at most ONE config (disjoint configs, no duplicate pointing). Blank =
+# unlimited. A per-source override (Constraints… popover / max_configs
+# column / rule) wins over this default. Only consulted when n_configs > 1.
+opt_global_max_configs_input = TextInput(
+    title="Max configs per source (blank = unlimited)",
+    value="1", placeholder="e.g. 1",
+    width=_ADV_INPUT_W,
 )
 
 # Collision-protection group — opt-in. When enabled, sources matching
@@ -483,7 +578,6 @@ opt_protect_status_div = Div(
 opt_advanced_btn = Button(label="Advanced settings…",
                           button_type="default", width=SIDEBAR_W - 20)
 
-_ADV_INPUT_W = 240
 opt_grid_n_ra_input = TextInput(title="Grid n_RA", value="20", width=_ADV_INPUT_W)
 opt_grid_n_dec_input = TextInput(title="Grid n_Dec", value="20", width=_ADV_INPUT_W)
 opt_grid_n_pa_input = TextInput(title="Grid n_PA", value="20", width=_ADV_INPUT_W)
@@ -539,6 +633,13 @@ opt_advanced_modal_card = column(
     opt_objective_select,
     opt_sigma_input,
     opt_theta_input,
+    Div(text="<div style='font-size:12px; color:#1f4e87; font-weight:600; "
+             "margin-top:4px'>Source selection</div>"
+             "<div style='font-size:11px; color:#5a6b85'>Priority cutoff "
+             "drops sources above the cutoff. Max configs per source caps "
+             "how many configs may observe each source (1 = disjoint "
+             "configs).</div>", width=520),
+    row(opt_priority_input, opt_global_max_configs_input, spacing=12),
     opt_advanced_modal_close_btn,
     spacing=10,
     width=540,
@@ -582,6 +683,7 @@ _cat_edit_source = ColumnDataSource(data=dict(
     # Constraints-column HTMLTemplateFormatter to pick the button's
     # colour (gray = unset, blue = at least one field set).
     lam_req=[], no_gap=[], extend_blue=[], extend_red=[], protect=[],
+    centration=[], max_configs=[],
     _has_constraint=[],
 ))
 # Tiny sink the JS-side delete handler writes into when the user
@@ -592,6 +694,10 @@ _cat_edit_delete_signal = ColumnDataSource(data=dict(idx=[-1], stamp=[0]))
 # onclick writes the row index here; the Python handler opens the
 # constraints popover pre-filled with that row's current values.
 _cat_edit_constraint_signal = ColumnDataSource(data=dict(idx=[-1], stamp=[0]))
+# Same pattern for the always-visible top-bar CONFIG chip: a JS onclick
+# stamps `data`, and `_on_config_chip_signal` advances the active config
+# (1→2→…→1) so the user can switch configs without leaving the canvas.
+_config_chip_signal = ColumnDataSource(data=dict(stamp=[0]))
 
 _NUM_FMT = NumberFormatter(format="0.[000000]")
 # Trash icon column — Underscore.js template renders a clickable span
@@ -693,6 +799,34 @@ cat_edit_compute_div = Div(
          "Hierarchy uses Priority. Use these to derive one from the "
          "other.</small>", width=460,
 )
+
+# ── Bulk max_configs rule (v1.4.1) ───────────────────────────────────────
+# "Set max configs = N for sources where <condition>". The condition is a
+# boolean expression over catalog columns (e.g. (mag_f444w > 27) & (z > 6))
+# evaluated safely by `evaluate_catalog_condition`; matching rows get the
+# chosen value, the rest keep theirs. Manual per-row edits stay available
+# via the Constraints… popover. Use it for "faint sources → observe in 2
+# configs" style cuts, or "(use global)" to clear an override.
+cat_rule_value_select = Select(
+    title="Set max configs =", value="2",
+    options=["1", "2", "(use global)"], width=150,
+)
+cat_rule_condition_input = TextInput(
+    title="for sources where",
+    placeholder="e.g. (mag_f444w > 27) & (z > 6)", width=430,
+)
+cat_rule_apply_btn = Button(label="Apply rule", button_type="default",
+                            width=110)
+cat_rule_help_div = Div(
+    text="<small style='color:#5a6b85'>Boolean expression over catalog "
+         "columns — combine with <code>&amp;</code> / <code>|</code> / "
+         "<code>~</code> and parenthesise each test (e.g. "
+         "<code>(mag &gt; 27) &amp; (z &gt; 6)</code>). Functions: "
+         "abs, log10, log, sqrt, exp, isin. Matching sources are updated; "
+         "the rest keep their value. Syntax is checked before "
+         "applying.</small>", width=620,
+)
+cat_rule_status_div = Div(text="", width=620)
 # Inject CSS so SlickGrid cells are text-selectable (so the user can
 # drag to highlight + Ctrl-C copy / Ctrl-V paste cell content while
 # the editor input is active). Bokeh Div renders `<style>` content as
@@ -801,6 +935,10 @@ cat_edit_modal_card = column(
     row(cat_edit_new_col_input, cat_edit_new_col_btn, spacing=10),
     cat_edit_compute_div,
     row(cat_edit_compute_w_btn, cat_edit_compute_p_btn, spacing=10),
+    cat_rule_help_div,
+    row(cat_rule_value_select, cat_rule_condition_input, cat_rule_apply_btn,
+        spacing=10),
+    cat_rule_status_div,
     row(cat_edit_undo_btn, cat_edit_redo_btn, cat_edit_history_div,
         spacing=10),
     _cat_edit_css,
@@ -900,6 +1038,20 @@ cat_constraints_centration_hint = Div(
          "setting for this row only.</small>",
     width=420,
 )
+# Per-target multi-config cap (v1.4.0+). "(use global)" → "" in storage;
+# "1"/"2" cap how many MPT configs the optimizer may place this source in.
+cat_constraints_max_configs_select = Select(
+    title="Max MPT configs this source may be observed in",
+    options=["(use global)", "1", "2"],
+    value="(use global)",
+    width=420,
+)
+cat_constraints_max_configs_hint = Div(
+    text="<small style='color:#5a6b85'>"
+         "Caps how many of the planned MPT configs may observe this "
+         "source. Blank = use the optimizer's global default.</small>",
+    width=420,
+)
 cat_constraints_apply_btn = Button(
     label="Apply", button_type="primary", width=80,
 )
@@ -933,6 +1085,8 @@ cat_constraints_modal_card = column(
     cat_constraints_checks,
     cat_constraints_centration_select,
     cat_constraints_centration_hint,
+    cat_constraints_max_configs_select,
+    cat_constraints_max_configs_hint,
     row(cat_constraints_apply_btn, cat_constraints_cancel_btn, spacing=10),
     spacing=10,
     width=460,
@@ -954,8 +1108,11 @@ cat_constraints_modal_card = column(
 )
 
 
+# Width leaves room for the 80 px Cancel button (+10 px spacing) inside
+# the modal body (SIDEBAR_W + 30 = 370 px); 270 + 10 + 80 = 360 ≤ 370 so
+# the Cancel button no longer overflows the card and gets clipped.
 opt_run_btn = Button(label="Run optimization",
-                    button_type="primary", width=SIDEBAR_W - 20)
+                    button_type="primary", width=SIDEBAR_W - 70)
 # The Pointing-tab CTA that opens the optimizer's config modal. The
 # config widgets used to live inline in the Pointing tab; on a 913 px
 # laptop screen they pushed the actual Run button below the fold.
@@ -964,6 +1121,188 @@ opt_open_btn = Button(
     label="Open optimizer…",
     button_type="primary",
     width=SIDEBAR_W - 20,
+)
+
+# ── MPT configurations (v1.4.0) ─────────────────────────────────────────
+# Multiple MPT configs mirror JWST APT/MPT: each config is an independent
+# pointing + set of open shutters (a separate exposure). The user works on
+# one config at a time ("Working on"); manual shutter opens land only on
+# the active config. Default is a single config so v1.3.x behaviour is
+# unchanged until the user opts in.
+mpt_num_configs_spinner = Spinner(
+    low=1, high=2, step=1, value=1, width=_HALF_W,
+    title="Number of configs",
+)
+mpt_config_select = Select(
+    title="Working on", value="Config 1", options=["Config 1"],
+    width=_HALF_W,
+)
+# Prominent "you are here" banner — only shown in multi-config mode so the
+# user is never confused about which config a manual open lands in. Updated
+# by `_refresh_active_config_banner()` on every switch / count change.
+mpt_active_config_div = Div(text="", width=SIDEBAR_W - 20, visible=False)
+mpt_view_btn = Button(label="View MPT catalog…",
+                      button_type="default", width=SIDEBAR_W - 20)
+
+# Read-only "MPT catalog viewer" — one row per (config, selected source).
+# Mirrors the input catalog editor's DataTable but is never editable; it
+# stays empty until a shutter is opened by hand or by the optimizer.
+# Numeric columns are STORED as floats (NaN = missing) so the DataTable
+# sorts them numerically — string storage made "101" sort before "11".
+# These NaN-safe Underscore templates render them (integer for
+# Pri/Weight/Q/s/d, fixed decimals elsewhere) and blank a missing value.
+def _mpt_num_template(decimals: int) -> str:
+    render = ("Math.round(value)" if decimals == 0
+              else f"value.toFixed({decimals})")
+    return (
+        "<%= (value === null || value === undefined || value === '' || "
+        "(typeof value === 'number' && isNaN(value))) ? '' : "
+        f"(typeof value === 'number' ? {render} : value) %>"
+    )
+
+
+_MPT_FMT_INT = HTMLTemplateFormatter(template=_mpt_num_template(0))
+_MPT_FMT_COORD = HTMLTemplateFormatter(template=_mpt_num_template(6))
+_MPT_FMT_Z = HTMLTemplateFormatter(template=_mpt_num_template(4))
+_MPT_FMT_MAG = HTMLTemplateFormatter(template=_mpt_num_template(2))
+_MPT_FMT_UM = HTMLTemplateFormatter(template=_mpt_num_template(3))  # μm, 3 dp
+# field → formatter for the numeric columns (others render as plain text).
+_MPT_VIEW_NUM_FMT = {
+    "ra": _MPT_FMT_COORD, "dec": _MPT_FMT_COORD,
+    "priority": _MPT_FMT_INT, "weight": _MPT_FMT_INT,
+    "q": _MPT_FMT_INT, "s": _MPT_FMT_INT, "d": _MPT_FMT_INT,
+    "z": _MPT_FMT_Z, "mag": _MPT_FMT_MAG,
+    "lam_blue": _MPT_FMT_UM, "lam_red": _MPT_FMT_UM,
+}
+_mpt_view_source = ColumnDataSource(data=dict(
+    config=[], id=[], ra=[], dec=[], priority=[], weight=[], mag=[], z=[],
+    lam_blue=[], lam_red=[], gap=[], q=[], s=[], d=[], label=[],
+))
+# Toggleable columns (Cfg + Source ID are always shown). (field, title, width).
+# "Role" (the internal target/sky nod-shutter attribute) is intentionally
+# NOT shown — it isn't a per-source property and was misleading.
+# λ_blue / λ_red / Gap are the spectrum's on-detector wavelength coverage
+# and the NRS1/NRS2 detector-gap range for the source's shutter under the
+# current Disperser / Filter (computed on open via wavelengths.cutoffs).
+_MPT_VIEW_COLS = [
+    ("ra", "RA (deg)", 92), ("dec", "Dec (deg)", 92),
+    ("priority", "Pri", 44), ("weight", "Weight", 66), ("mag", "Mag", 56),
+    ("z", "z", 60),
+    ("lam_blue", "λ_blue", 64), ("lam_red", "λ_red", 64), ("gap", "Gap (μm)", 104),
+    ("q", "Q", 34), ("s", "s", 42), ("d", "d", 42),
+    ("label", "Label", 120),
+]
+_MPT_VIEW_TITLE_TO_FIELD = {t: f for f, t, _ in _MPT_VIEW_COLS}
+# Colour the Cfg cell to match the active-config chip language
+# (Config 1 → blue, Config 2 → magenta; any further config → green) so
+# the per-config grouping reads at a glance in the multi-config viewer.
+_MPT_VIEW_CFG_FORMATTER = HTMLTemplateFormatter(template=(
+    "<span style='font-weight:600; color:"
+    "<%= (value==1)?'#1f6fc0':(value==2)?'#b5179e':'#2a9d3a' %>'>"
+    "<%= value %></span>"
+))
+mpt_view_columns_choice = MultiChoice(
+    title="Show columns (drag chips to reorder; remove to hide)",
+    value=[t for _, t, _ in _MPT_VIEW_COLS],
+    options=[t for _, t, _ in _MPT_VIEW_COLS],
+    width=1040,
+)
+mpt_view_table = DataTable(
+    source=_mpt_view_source,
+    columns=[
+        TableColumn(field="config", title="Cfg", width=42,
+                    formatter=_MPT_VIEW_CFG_FORMATTER),
+        TableColumn(field="id", title="Source ID", width=104),
+        *[TableColumn(field=f, title=t, width=w,
+                      **({"formatter": _MPT_VIEW_NUM_FMT[f]}
+                         if f in _MPT_VIEW_NUM_FMT else {}))
+          for f, t, w in _MPT_VIEW_COLS],
+    ],
+    editable=False,
+    sortable=True,
+    selectable=True,
+    reorderable=True,   # drag a row's handle to reorder
+    index_position=0,   # drag-handle / row-number gutter
+    width=1080,
+    height=360,
+    autosize_mode="none",
+)
+
+
+def _mpt_view_rebuild_columns() -> None:
+    """Rebuild the viewer's columns from the picker. Cfg + Source ID are
+    always present; the chosen optional columns follow in the picker's
+    (drag-reorderable) order."""
+    chosen = list(mpt_view_columns_choice.value or [])
+    cols = [
+        TableColumn(field="config", title="Cfg", width=42,
+                    formatter=_MPT_VIEW_CFG_FORMATTER),
+        TableColumn(field="id", title="Source ID", width=104),
+    ]
+    width_of = {t: w for _, t, w in _MPT_VIEW_COLS}
+    for title in chosen:
+        f = _MPT_VIEW_TITLE_TO_FIELD.get(title)
+        if f:
+            kw = ({"formatter": _MPT_VIEW_NUM_FMT[f]}
+                  if f in _MPT_VIEW_NUM_FMT else {})
+            cols.append(TableColumn(field=f, title=title,
+                                    width=width_of.get(title, 80), **kw))
+    mpt_view_table.columns = cols
+
+
+mpt_view_columns_choice.on_change(
+    "value", lambda a, o, n: _mpt_view_rebuild_columns())
+mpt_view_summary_div = Div(text="", width=1040)
+mpt_view_top_close_btn = Button(label="×", button_type="default",
+                                width=32, height=28,
+                                css_classes=["vmpt-modal-x"])
+mpt_view_close_btn = Button(label="Close", button_type="default", width=90)
+mpt_view_csv_path_input = TextInput(
+    title="Save selected list as CSV", value="", width=620,
+    placeholder="/path/to/mpt_selected.csv",
+)
+mpt_view_csv_save_btn = Button(label="Save as CSV",
+                               button_type="default", width=110)
+mpt_view_modal_backdrop = Div(
+    text="", width=0, height=0, visible=False,
+    styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)",
+        "z-index": "999",
+    },
+)
+mpt_view_modal_card = column(
+    row(
+        Div(text="<h3>MPT catalog — selected sources</h3>",
+            sizing_mode="stretch_width"),
+        mpt_view_top_close_btn,
+        css_classes=["vmpt-modal-header"],
+        styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    ),
+    mpt_view_summary_div,
+    mpt_view_columns_choice,
+    mpt_view_table,
+    row(mpt_view_csv_path_input, mpt_view_csv_save_btn, spacing=10),
+    row(mpt_view_close_btn, spacing=10),
+    spacing=10,
+    width=1100,
+    visible=False,
+    css_classes=["vmpt-modal-card"],
+    styles={
+        "position": "fixed",
+        "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)",
+        "background": "white",
+        "border": "1px solid #c0c8d6",
+        "border-radius": "6px",
+        "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
+        "padding": "16px 20px",
+        "z-index": "1000",
+        "max-height": "92vh",
+        "overflow-y": "auto",
+    },
 )
 opt_status_div = Div(
     # Updated live by `_refresh_opt_status_div` from the catalog +
@@ -1020,7 +1359,6 @@ opt_config_modal_card = column(
     row(opt_dpa_input, opt_n_top_input, spacing=12),
     opt_centration_select,
     opt_centration_override_hint,
-    opt_priority_input,
     opt_protect_section_div,
     opt_protect_enable_cb,
     opt_protect_mode_radio,
@@ -1208,6 +1546,10 @@ _opt_run: dict = {}
 # stamp guarantees a fresh `change` event even when the same row is
 # re-applied (Bokeh dedupes identical values).
 opt_apply_trigger = TextInput(value="", visible=False)
+# v1.4.0: applies BOTH configs of a 2-config plan in one click. The JS
+# confirm sets a fresh stamp; the Python handler reads the two best
+# pointings out of `_opt_run` and applies each to its config.
+opt_apply_both_trigger = TextInput(value="", visible=False)
 
 # Full-page loading overlay — a centered translucent backdrop with an
 # animated spinner. The widget itself is a zero-size Bokeh Div, but its
@@ -1753,6 +2095,9 @@ catalog_hover_modal_backdrop = Div(
 # Glyph data sources
 src_image = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
 src_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[]))
+# Quadrant outlines of the OTHER (idle) MPT configs — drawn faint so the
+# user sees where the other exposure sits while editing the active one.
+src_idle_msa_outline = ColumnDataSource(data=dict(xs=[], ys=[], cfg=[], color=[]))
 src_bg_shutters = ColumnDataSource(
     data=dict(xs=[], ys=[], q=[], s=[], d=[])
 )
@@ -1933,9 +2278,20 @@ highlighted_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_highlighted,
     line_color="cyan", line_width=2.0, fill_alpha=0.0,
 )
+# Idle configs' outlines render UNDER the active outline (drawn first):
+# faint dashed blue with a whisper of fill so they read as "the other
+# config's footprint" without competing with the active solid-blue grid.
+idle_msa_outline_glyph = fig.multi_polygons(
+    xs="xs", ys="ys", source=src_idle_msa_outline,
+    line_color="color", line_width=1.0, line_dash="dashed",
+    line_alpha=0.7, fill_alpha=0.0,  # boundary only — no fill in the box
+)
+# Active config's quadrant outline. `line_color` is repainted per active
+# config in `refresh_overlays` (Config 1 blue, Config 2 magenta, …) to
+# match the top-bar CONFIG chip; the initial value is the Config-1 colour.
 msa_outline_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_msa_outline,
-    line_color="dodgerblue", line_width=1.5, fill_alpha=0.0,
+    line_color=_config_color(0), line_width=1.5, fill_alpha=0.0,
 )
 fixed_slits_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_fixed_slits,
@@ -2272,19 +2628,84 @@ def _fixed_slit_polygons(pa_v3: float, fid_pix: tuple[float, float],
 
 def _msa_outline_polygons(pa_v3: float, fid_pix: tuple[float, float],
                           jinv: np.ndarray) -> dict:
-    """Trace each quadrant outline (using its 4 corner shutters)."""
+    """Trace each quadrant outline along the OUTER corners of its 4 corner
+    shutters, so the blue outline hugs the rendered shutter area.
+
+    Previously the outline ran through the corner shutter *centres*, which
+    left the outermost half-shutter (~0.23″, ~3 screen px) sticking out
+    past the blue line. For each quadrant-corner shutter we pick the one of
+    its 4 footprint corners that is farthest from the quadrant's centre, so
+    the polygon encloses every shutter regardless of the MSA's V2/V3
+    rotation/shear.
+    """
     xs_all, ys_all = [], []
     rows = [0, 0, 170, 170]
     cols = [0, 364, 364, 0]
+    tdv2 = _SHUTTER_CORNER_TEMPLATE[:, 0]
+    tdv3 = _SHUTTER_CORNER_TEMPLATE[:, 1]
     for q in range(4):
-        v2c = np.array([V2_MSA[q, r, c] for r, c in zip(rows, cols)])
-        v3c = np.array([V3_MSA[q, r, c] for r, c in zip(rows, cols)])
+        cen_v2 = float(V2_MSA[q].mean())
+        cen_v3 = float(V3_MSA[q].mean())
+        v2_out, v3_out = [], []
+        for r, c in zip(rows, cols):
+            v2c = float(V2_MSA[q, r, c])
+            v3c = float(V3_MSA[q, r, c])
+            cand_v2 = v2c + tdv2
+            cand_v3 = v3c + tdv3
+            k = int(np.argmax((cand_v2 - cen_v2) ** 2
+                              + (cand_v3 - cen_v3) ** 2))
+            v2_out.append(cand_v2[k])
+            v3_out.append(cand_v3[k])
         x, y = _project_v2v3_offsets_to_pixel(
-            v2c - MSA_V2_REF, v3c - MSA_V3_REF, pa_v3, fid_pix, jinv,
+            np.array(v2_out) - MSA_V2_REF, np.array(v3_out) - MSA_V3_REF,
+            pa_v3, fid_pix, jinv,
         )
         xs_all.append([[x.tolist()]])
         ys_all.append([[y.tolist()]])
     return dict(xs=xs_all, ys=ys_all)
+
+
+def _idle_config_outlines_data(wcs) -> dict:
+    """Quadrant outlines for every non-active live config that sits at its
+    own distinct pointing, each projected at THAT config's pointing.
+
+    Returns empty when single-config, or for configs that have never been
+    positioned (their pointing is None → they share the active pointing, so
+    drawing them would just overlap the active grid)."""
+    n = int(state.get("n_configs", 1))
+    if n <= 1:
+        return dict(xs=[], ys=[], cfg=[], color=[])
+    active = int(state.get("active_config", 0))
+    a_ra = state.get("ra_deg")
+    a_dec = state.get("dec_deg")
+    a_pa = state.get("pa_v3")
+    xs_all, ys_all, cfg_all, color_all = [], [], [], []
+    for ci in range(min(n, len(state["configs"]))):
+        if ci == active:
+            continue
+        cfg = state["configs"][ci]
+        ra_c, dec_c, pa_c = cfg.get("ra_deg"), cfg.get("dec_deg"), cfg.get("pa_v3")
+        if ra_c is None or dec_c is None or pa_c is None:
+            continue
+        try:
+            # Skip if it coincides with the active pointing (would overlap).
+            if (a_ra is not None and abs(float(ra_c) - float(a_ra)) < 1e-9
+                    and abs(float(dec_c) - float(a_dec)) < 1e-9
+                    and abs(float(pa_c) - float(a_pa)) < 1e-9):
+                continue
+            sc = SkyCoord(float(ra_c), float(dec_c), unit=u.deg, frame="icrs")
+            fx, fy = _world_to_pixel(sc, wcs)
+            fp = (float(fx), float(fy))
+            jv = _compute_wcs_jacobian(wcs, fp[0], fp[1])
+            d = _msa_outline_polygons(float(pa_c), fp, jv)
+        except Exception:  # noqa: BLE001
+            continue
+        for poly_xs, poly_ys in zip(d["xs"], d["ys"]):
+            xs_all.append(poly_xs)
+            ys_all.append(poly_ys)
+            cfg_all.append(ci + 1)
+            color_all.append(_config_color(ci))
+    return dict(xs=xs_all, ys=ys_all, cfg=cfg_all, color=color_all)
 
 
 def _shutter_polys_to_cds(polys: dict, only_reason: int | None = None) -> dict:
@@ -2437,12 +2858,23 @@ def refresh_overlays() -> None:
     fid_pix = (float(fid_x), float(fid_y))
     jinv = _compute_wcs_jacobian(wcs, fid_pix[0], fid_pix[1])
 
-    # MSA outline
+    # MSA outline (active config). Repaint its line colour to the active
+    # config's accent so the solid boundary matches the top-bar chip
+    # (Config 1 blue, Config 2 magenta, …).
     show_outline = 0 in layers_box.active
+    msa_outline_glyph.glyph.line_color = _config_color(
+        int(state.get("active_config", 0)))
     if show_outline:
         src_msa_outline.data = _msa_outline_polygons(pa_v3, fid_pix, jinv)
     else:
         src_msa_outline.data = dict(xs=[], ys=[])
+    # Faint outlines of the OTHER configs (multi-config mode), each at its
+    # own pointing and in its own accent colour, so the user sees where the
+    # idle exposure(s) sit and which is which.
+    if show_outline and int(state.get("n_configs", 1)) > 1:
+        src_idle_msa_outline.data = _idle_config_outlines_data(wcs)
+    else:
+        src_idle_msa_outline.data = dict(xs=[], ys=[], cfg=[], color=[])
 
     # Cull to the current visible figure bounds (post-zoom), clipped to the
     # image. With the current view-bbox approach, all three shutter-flavour
@@ -3239,8 +3671,31 @@ def refresh_overlays() -> None:
             f'<span style="{cell} border-right:none;">',
             1,
         )
+    # Multi-config: a bright "CONFIG k/N" chip pinned to the left of the
+    # always-visible top bar so the user never loses track of which config
+    # a manual open lands in (accent matches the Pointing-tab banner).
+    # The chip is also a CONTROL: clicking it cycles the active config
+    # (1→2→…→1) so you can switch without leaving the canvas. The onclick
+    # calls the global installed by `_config_chip_install_js`.
+    n_cfg = int(state.get("n_configs", 1))
+    config_chip = ""
+    if n_cfg > 1:
+        act = int(state.get("active_config", 0)) + 1
+        accent = _config_color(act - 1)
+        config_chip = (
+            f'<span onclick="window.__vmpt_cycle_config && '
+            f'window.__vmpt_cycle_config()" '
+            f'title="Click to switch the active config '
+            f'(now Config {act} of {n_cfg})" '
+            f'style="display:inline-flex; align-items:center; cursor:pointer; '
+            f'user-select:none; background:{accent}; color:white; '
+            f'font-weight:700; padding:3px 10px; border-radius:4px; '
+            f'margin:0 8px 0 2px; font-size:12px; white-space:nowrap;">'
+            f'⇄ CONFIG {act} / {n_cfg}</span>'
+        )
     stats_div.text = (
         '<div style="display:flex; flex-wrap:wrap; align-items:center; gap:0;">'
+        + config_chip
         + "".join(ordered_html)
         + '</div>'
     )
@@ -3578,6 +4033,21 @@ def _rebuild_merged_catalog() -> None:
         return (np.concatenate(chunks) if chunks
                 else np.array([], dtype=object))
     centration_merged = _pad_centration_per_cat()
+
+    # Per-target multi-config cap (v1.4.0+). Float with NaN = unset; pad
+    # missing/short catalogs with NaN so they inherit the global default.
+    def _pad_max_configs_per_cat() -> np.ndarray:
+        chunks = []
+        for c in cats:
+            arr = getattr(c, "max_configs", None)
+            arr = (np.asarray(arr, dtype=float) if arr is not None
+                   else np.array([], dtype=float))
+            if arr.size != len(c.ra_deg):
+                arr = np.full(len(c.ra_deg), np.nan, dtype=float)
+            chunks.append(arr)
+        return (np.concatenate(chunks) if chunks
+                else np.array([], dtype=float))
+    max_configs_merged = _pad_max_configs_per_cat()
     colors = np.concatenate([
         np.full(len(e["catalog"].ra_deg), e["color"], dtype=object)
         for e in ordered_for_draw
@@ -3599,6 +4069,7 @@ def _rebuild_merged_catalog() -> None:
         extend_red=extend_red_merged,
         protect=protect_merged,
         centration=centration_merged,
+        max_configs=max_configs_merged,
         source_path=" + ".join(c.source_path for c in cats),
     )
     state["catalog_colors"] = colors
@@ -3676,11 +4147,25 @@ def _render_catalog_list() -> None:
 
         def _make_toggle(i):
             def _cb(attr, old, new):
-                if 0 <= i < len(state["catalogs"]):
-                    state["catalogs"][i]["enabled"] = (0 in new)
-                    _rebuild_merged_catalog()
-                    _rebuild_shutter_catalog_index()
-                    refresh_overlays()
+                if not (0 <= i < len(state["catalogs"])):
+                    return
+                state["catalogs"][i]["enabled"] = (0 in new)
+
+                def _apply():
+                    try:
+                        _rebuild_merged_catalog()
+                        _rebuild_shutter_catalog_index()
+                        refresh_overlays()
+                    finally:
+                        _hide_loading()
+                # Re-rendering thousands of catalog circles takes a beat;
+                # show the spinner first (deferred build) for big catalogs.
+                n = len(state["catalogs"][i]["catalog"].ra_deg)
+                if n > _LARGE_CATALOG_N:
+                    _show_loading(f"Rendering {n} sources…")
+                    _deferred(_apply)
+                else:
+                    _apply()
             return _cb
 
         def _make_delete(i, label_name):
@@ -4067,6 +4552,26 @@ def _shutter_source_id(q: int, s: int, d: int) -> str | None:
     return str(ids[0])
 
 
+def _shutter_source_ids(q: int, s: int, d: int) -> list[str]:
+    """Every catalog source id (as strings, catalog order) whose footprint
+    falls inside this shutter at the current pointing — usually 0 or 1, but
+    two very close sources can share one shutter (v1.4.0 records them all)."""
+    bucket = state.get("shutter_to_catids") or {}
+    return [str(t) for t in (bucket.get((int(q), int(s), int(d))) or [])]
+
+
+def _open_shutter_ids(sh) -> list[str]:
+    """All source ids attributed to an OpenShutter. Prefers the snapshotted
+    ``target_ids`` list; falls back to the scalar ``target_id`` so shutters
+    loaded from pre-1.4.0 sessions still report their source."""
+    ids = [str(t) for t in (getattr(sh, "target_ids", None) or []) if str(t) != ""]
+    if not ids:
+        tid = getattr(sh, "target_id", None)
+        if tid is not None and str(tid) != "":
+            ids = [str(tid)]
+    return ids
+
+
 def _nearest_shutter(v2_target: float, v3_target: float,
                      require_operable: bool = True,
                      max_dist_arcsec: float | None = None) -> tuple[int, int, int] | None:
@@ -4148,10 +4653,34 @@ def _add_slitlet(q: int, s_click: int, d: int, target_id: str | None) -> int:
         if not OPERABLE[q - 1, s - 1, d - 1]:
             continue
         role = "target" if offset == 0 else "sky"
-        state["open_shutters"][(q, s, d)] = OpenShutter(
-            q=q, s=s, d=d, target_id=target_id, role=role,
-        )
-        added += 1
+        key = (q, s, d)
+        # Every catalog source physically inside THIS shutter (snapshot).
+        shutter_ids = _shutter_source_ids(q, s, d)
+        # Make sure the anchor's chosen primary is recorded on the shutter it
+        # sits in, even if a pointing-rounding mismatch kept it out of the
+        # footprint bucket.
+        if role == "target" and target_id is not None and str(target_id) not in shutter_ids:
+            shutter_ids = [str(target_id)] + shutter_ids
+        existing = state["open_shutters"].get(key)
+        if existing is not None:
+            # Shutter already open (e.g. an adjacent slitlet, or two optimizer
+            # targets that mapped to the same shutter): MERGE sources rather
+            # than clobber. Replace (don't mutate) so undo snapshots that hold
+            # the old object are unaffected.
+            merged = list(dict.fromkeys(_open_shutter_ids(existing) + shutter_ids))
+            state["open_shutters"][key] = OpenShutter(
+                q=q, s=s, d=d,
+                target_id=(existing.target_id
+                           if existing.target_id is not None else target_id),
+                role=existing.role,
+                target_ids=merged,
+            )
+        else:
+            state["open_shutters"][key] = OpenShutter(
+                q=q, s=s, d=d, target_id=target_id, role=role,
+                target_ids=shutter_ids,
+            )
+            added += 1
     return added
 
 
@@ -4305,7 +4834,7 @@ def on_undo():
     if not state["history"]:
         _set_status("Nothing to undo.", "warn")
         return
-    state["open_shutters"] = state["history"].pop()
+    _set_open_shutters(state["history"].pop())
     refresh_overlays()
     _set_status("Undid last action.", "ok")
 
@@ -4314,7 +4843,7 @@ def on_clear():
     if not state["open_shutters"]:
         return
     _push_history()
-    state["open_shutters"] = {}
+    _set_open_shutters({})
     refresh_overlays()
     _set_status("Cleared all open shutters.", "ok")
 
@@ -4396,11 +4925,19 @@ def on_export():
             n += 1
         return n
 
-    def _cat_lookup(tid: str) -> tuple[float, float, int, str] | None:
-        """Look up a catalog row by id. Returns (ra, dec, weight, label).
-        `label` is the catalog's `label`/`name` column value when
-        available, else the original raw ID (so the trace from MPT-side
-        integer ID back to the user's source-list name is preserved)."""
+    def _cat_num(arr, k) -> float | None:
+        """A finite float from catalog column `arr` at row `k`, else None."""
+        try:
+            v = float(arr[k])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return v if np.isfinite(v) else None
+
+    def _cat_lookup(tid: str) -> dict | None:
+        """Look up a catalog row by id. Returns a dict with ra/dec, priority
+        (`pr`), `weight`, `mag`, `z`, and `label`. `label` is the catalog's
+        `label`/`name` value when available, else the raw ID (preserving the
+        trace from the MPT integer ID back to the user's source name)."""
         if cat is None:
             return None
         ids_str = [str(i) for i in cat.ids]
@@ -4413,16 +4950,26 @@ def on_export():
             label_val = str(cat.label[k]) if cat.label is not None else ""
         except (AttributeError, IndexError, TypeError):
             label_val = ""
-        label_val = label_val.strip()
-        if not label_val:
-            label_val = tid  # original string ID as the Label
-        return float(cat.ra_deg[k]), float(cat.dec_deg[k]), pr, label_val
+        label_val = label_val.strip() or tid
+        return {
+            "ra": float(cat.ra_deg[k]), "dec": float(cat.dec_deg[k]),
+            "pr": pr,
+            "weight": _cat_num(getattr(cat, "weight", []), k),
+            "mag": _cat_num(getattr(cat, "mag", []), k),
+            "z": _cat_num(getattr(cat, "z", []), k),
+            "label": label_val,
+        }
 
     def _push_target_row(
         raw_tid: str | None,
         ra_d: float,
         dec_d: float,
+        *,
         pr: int,
+        primary: int,
+        weight: float | None = None,
+        mag: float | None = None,
+        z: float | None = None,
         label: str,
     ) -> int:
         """Append a target row. Always returns the assigned integer ID.
@@ -4430,6 +4977,11 @@ def on_export():
         If `raw_tid` is None, a fresh sequential integer is generated.
         Otherwise the integer is derived from `raw_tid` via _to_int_id
         (e.g. "RJ0600-10274-P0" → 10274).
+
+        `Pr` (priority) feeds the eMPT observed_targets.cat; the APT `.cat`
+        uses `Weight` (the source's weight, falling back to priority) plus
+        the `Primary` flag (1 = catalog source, 0 = vMPT-synthesised) and
+        optional `Magnitude`/`Redshift` carried from the input catalog.
         """
         if raw_tid is None:
             target_no = max(used_int_ids, default=0) + 1
@@ -4440,27 +4992,39 @@ def on_export():
         used_int_ids.add(target_no)
         targets_rows.append({
             "No_cat": target_no,
-            "Pr": pr,
+            "Pr": int(pr),
+            "Weight": (weight if weight is not None else pr),
+            "Primary": int(primary),
+            "Magnitude": mag,
+            "Redshift": z,
             "ra_deg": ra_d,
             "dec_deg": dec_d,
             "label": label,
         })
         return target_no
 
-    # Step 1: open shutters with a known catalog source. The output
-    # `.cat` row's integer ID is derived from the original catalog
-    # token (digit-run extraction). The original token survives in the
-    # Label column for downstream traceability.
+    # Step 1: open shutters with a known catalog source. One output row
+    # per source — when two very close sources share one shutter (v1.4.0)
+    # BOTH are recorded, not just the slitlet's primary. The output `.cat`
+    # row's integer ID is derived from the original catalog token (digit-
+    # run extraction); the original token survives in the Label column.
     for (q, s, d), sh in state["open_shutters"].items():
-        tid = sh.target_id or _shutter_source_id(q, s, d)
-        if not tid or tid in real_ids_seen:
-            continue
-        info = _cat_lookup(str(tid))
-        if info is None:
-            continue  # synthesise later from geometry
-        ra_d, dec_d, pr, label_val = info
-        real_ids_seen.add(str(tid))
-        _push_target_row(str(tid), ra_d, dec_d, pr, label=label_val)
+        tids = _open_shutter_ids(sh)
+        if not tids:
+            fallback = _shutter_source_id(q, s, d)
+            tids = [fallback] if fallback else []
+        for tid in tids:
+            if not tid or str(tid) in real_ids_seen:
+                continue
+            info = _cat_lookup(str(tid))
+            if info is None:
+                continue  # synthesise later from geometry
+            real_ids_seen.add(str(tid))
+            _push_target_row(
+                str(tid), info["ra"], info["dec"],
+                pr=info["pr"], primary=1, weight=info["weight"],
+                mag=info["mag"], z=info["z"], label=info["label"],
+            )
 
     # Step 1b: append ALL OTHER sources from the loaded input catalog —
     # whether or not they're inside any open shutter. Output is a
@@ -4485,7 +5049,10 @@ def on_export():
                 tid,
                 float(cat.ra_deg[i]),
                 float(cat.dec_deg[i]),
-                pr,
+                pr=pr, primary=1,
+                weight=_cat_num(getattr(cat, "weight", []), i),
+                mag=_cat_num(getattr(cat, "mag", []), i),
+                z=_cat_num(getattr(cat, "z", []), i),
                 label=label_val,
             )
 
@@ -4531,7 +5098,7 @@ def on_export():
             else:
                 ra_d, dec_d = float("nan"), float("nan")
             fake_id = str(_push_target_row(
-                None, ra_d, dec_d, pr=5, label="vMPT_synth",
+                None, ra_d, dec_d, pr=5, primary=0, label="vMPT_synth",
             ))
             # Tag every shutter in the run with this fake id so later
             # exporters (MPT plan primaryIds) see consistent target IDs.
@@ -4553,13 +5120,13 @@ def on_export():
         apa_v3_deg=pa_v3,
         pa_ap_deg=pa_ap,
     )
-    # Resolve the MPT catalog filename: align the .cat basename with the
-    # catalog.name we write into the plan JSON. If the user loaded a
-    # specific catalog, mirror its basename; otherwise use the default.
-    if cat is not None and getattr(cat, "source_path", None):
-        mpt_catalog_name = Path(cat.source_path).stem + ".cat"
-    else:
-        mpt_catalog_name = MPT_CATALOG_FILENAME
+    # APT-facing filenames: target-prefixed + role-suffixed so it's obvious
+    # which file APT/MPT loads. The .cat basename equals the plan JSON's
+    # catalog.name (apt_catalog_basename), so APT's filename-derived default
+    # lines up with the plan automatically.
+    _cat_src = getattr(cat, "source_path", None) if cat is not None else None
+    mpt_catalog_name = apt_catalog_basename(_cat_src) + ".cat"
+    mpt_plan_name = apt_plan_basename(_cat_src) + ".json"
 
     try:
         # 1) APT-importable primaries catalog (the file APT's Target List
@@ -4578,18 +5145,79 @@ def on_export():
             str(out_dir / EMPT_SHUTTER_MASK_FILENAME),
             open_list, OPERABLE, REASON,
         )
+        # 2b) Per-config eMPT artifacts (v1.4.0). The top-level files
+        # above describe the ACTIVE config; when a plan has >1 config,
+        # each also gets a config_N/ subdir with its own one-row-per-
+        # source observed list + shutter mask (eMPT outputs are
+        # per-pointing). Single-config plans skip this entirely so their
+        # bundle is unchanged from ≤1.3.x.
+        n_cfg_out = int(state.get("n_configs", 1))
+        n_sub = 0
+        if n_cfg_out > 1:
+            _save_active_config_pointing()
+            for ci in range(min(n_cfg_out, len(state["configs"]))):
+                cobj = state["configs"][ci]
+                copen = list(cobj["open_shutters"].values())
+                sub = out_dir / f"config_{ci + 1}"
+                sub.mkdir(parents=True, exist_ok=True)
+                crows: list = []
+                cused: set = set()
+                cseen: set = set()
+                for sh in copen:
+                    for tid in _open_shutter_ids(sh):
+                        if tid in cseen:
+                            continue
+                        cseen.add(tid)
+                        info = _cat_lookup(str(tid))
+                        if info is None:
+                            continue
+                        no = _to_int_id(str(tid), cused)
+                        cused.add(no)
+                        crows.append({"No_cat": no, "Pr": info["pr"],
+                                      "ra_deg": info["ra"],
+                                      "dec_deg": info["dec"],
+                                      "label": info["label"]})
+                write_observed_targets_cat(
+                    str(sub / EMPT_OBSERVED_FILENAME), crows)
+                write_shutter_mask_csv(
+                    str(sub / EMPT_SHUTTER_MASK_FILENAME),
+                    copen, OPERABLE, REASON)
+                cra, cdec, cpa = (cobj.get("ra_deg"), cobj.get("dec_deg"),
+                                  cobj.get("pa_v3"))
+                if cra is not None and cdec is not None and cpa is not None:
+                    cpa_ap = (float(cpa) + V3_IDL_Y_ANGLE) % 360.0
+                    write_pointing_summary_txt(
+                        str(sub / EMPT_POINTING_FILENAME),
+                        Pointing(ra_deg=float(cra), dec_deg=float(cdec),
+                                 apa_v3_deg=float(cpa), pa_ap_deg=cpa_ap),
+                        state["disperser"], state["filter"],
+                        n_targets_total=(len(cat.ra_deg)
+                                         if cat is not None else 0),
+                        n_targets_accepted=len(crows))
+                n_sub += 1
         # 3) MPT plan + vMPT workspace sidecar so the bundle round-trips
         # cleanly: Session → Load on either file restores everything.
-        export_session_json(_build_current_session(), str(out_dir / MPT_PLAN_FILENAME))
+        export_session_json(_build_current_session(), str(out_dir / mpt_plan_name))
+        # 4) README telling the user exactly how to load this into APT/MPT.
+        try:
+            (out_dir / "README.md").write_text(bundle_readme_text(
+                catalog_filename=mpt_catalog_name,
+                catalog_name=apt_catalog_basename(_cat_src),
+                plan_filename=mpt_plan_name,
+                n_configs=n_cfg_out,
+            ))
+        except OSError:
+            pass  # README is a convenience; never fail the export over it
+        sub_note = (f" + {n_sub} config_N/ subdir(s)" if n_sub else "")
         _set_status(
-            f"Wrote bundle to {out_dir} — {MPT_PLAN_FILENAME} + "
-            f"{mpt_catalog_name} (APT import) + {WORKSPACE_FILENAME} "
-            f"(vMPT state) + 3 eMPT_* files. "
+            f"Wrote bundle to {out_dir} — {mpt_plan_name} + "
+            f"{mpt_catalog_name} (APT import) + README.md + "
+            f"{WORKSPACE_FILENAME} (vMPT state) + 3 eMPT_* files{sub_note}. "
             f"{len(targets_rows)} targets, {len(open_list)} open shutters.",
             "ok", clear_after=18,
         )
         # Pre-fill the Session-load input so the user can re-load with one click.
-        session_load_path_input.value = str(out_dir / MPT_PLAN_FILENAME)
+        session_load_path_input.value = str(out_dir / mpt_plan_name)
     except Exception as e:  # noqa: BLE001
         _set_status(f"Export failed: {e}", "err")
         traceback.print_exc()
@@ -4633,6 +5261,22 @@ def _build_current_session() -> Session:
         (e["path"] for e in catalog_entries if e["enabled"]),
         catalog_entries[0]["path"] if catalog_entries else None,
     )
+    # v1.4.0: snapshot the live pointing into the active config, then
+    # serialize every live config so the bundle round-trips the whole
+    # multi-config plan. Single-config bundles leave `configs` empty.
+    _save_active_config_pointing()
+    n_cfg = int(state.get("n_configs", 1))
+    configs_payload = []
+    for ci in range(min(n_cfg, len(state["configs"]))):
+        c = state["configs"][ci]
+        configs_payload.append({
+            "name": c.get("name") or f"Config {ci + 1}",
+            "ra_deg": c.get("ra_deg"),
+            "dec_deg": c.get("dec_deg"),
+            "pa_v3": c.get("pa_v3"),
+            "open_shutters": list(c["open_shutters"].values()),
+            "highlighted": list(c.get("highlighted") or []),
+        })
     return Session(
         pointing_ra_deg=float(state["ra_deg"]),
         pointing_dec_deg=float(state["dec_deg"]),
@@ -4646,6 +5290,8 @@ def _build_current_session() -> Session:
         wcs_sidecar_path=(getattr(img, "wcs_sidecar_path", None) if img else None),
         catalog_path=first_enabled,
         catalog_paths=catalog_entries,
+        configs=configs_payload,
+        active_config=int(state.get("active_config", 0)),
     )
 
 
@@ -4714,11 +5360,63 @@ def on_session_load():
         state["filter"] = sess.filter_name
     slitlet_select.value = str(sess.slitlet_height)
     state["slitlet_height"] = int(sess.slitlet_height)
-    state["open_shutters"] = {
-        (sh.q, sh.s, sh.d): sh for sh in sess.open_shutters
-    }
-    state["highlighted"] = set(sess.highlighted)
-    state["history"] = []
+
+    # ── Rebuild the config list (v1.4.0) ───────────────────────────────
+    # A multi-config bundle carries `sess.configs`; a single-config /
+    # legacy bundle describes one config via the top-level pointing +
+    # open_shutters. Either way we reset state["configs"] cleanly so a
+    # single-config load after a multi-config session clears stale picks.
+    sess_configs = getattr(sess, "configs", None)
+    if sess_configs and len(sess_configs) > 1:
+        new_configs = []
+        for ci, entry in enumerate(sess_configs):
+            new_configs.append({
+                "name": entry.get("name") or f"Config {ci + 1}",
+                "open_shutters": {(sh.q, sh.s, sh.d): sh
+                                  for sh in entry.get("open_shutters", [])},
+                "highlighted": set(entry.get("highlighted") or []),
+                "history": [],
+                "ra_deg": entry.get("ra_deg"),
+                "dec_deg": entry.get("dec_deg"),
+                "pa_v3": entry.get("pa_v3"),
+            })
+        state["configs"] = new_configs
+        state["n_configs"] = len(new_configs)
+        state["active_config"] = max(
+            0, min(int(getattr(sess, "active_config", 0) or 0),
+                   len(new_configs) - 1))
+    else:
+        c0 = _new_config("Config 1")
+        c0["open_shutters"] = {(sh.q, sh.s, sh.d): sh
+                               for sh in sess.open_shutters}
+        c0["highlighted"] = set(sess.highlighted)
+        c0["ra_deg"] = float(sess.pointing_ra_deg)
+        c0["dec_deg"] = float(sess.pointing_dec_deg)
+        c0["pa_v3"] = float(sess.pa_v3_deg)
+        state["configs"] = [c0]
+        state["n_configs"] = 1
+        state["active_config"] = 0
+    # Re-point the legacy aliases at the active config.
+    _ac = state["configs"][state["active_config"]]
+    state["open_shutters"] = _ac["open_shutters"]
+    state["highlighted"] = _ac["highlighted"]
+    state["history"] = _ac["history"]
+    _refresh_config_select_options()
+    _prefs_save_suppress["flag"] = True
+    try:
+        mpt_num_configs_spinner.value = int(state["n_configs"])
+    finally:
+        _prefs_save_suppress["flag"] = False
+    # Load the active config's saved pointing into the widgets (overrides
+    # the top-level pointing applied above for a multi-config bundle).
+    if _ac["ra_deg"] is not None:
+        state["ra_deg"] = float(_ac["ra_deg"])
+        ra_input.value = f"{float(_ac['ra_deg']):.6f}"
+    if _ac["dec_deg"] is not None:
+        state["dec_deg"] = float(_ac["dec_deg"])
+        dec_input.value = f"{float(_ac['dec_deg']):.6f}"
+    if _ac["pa_v3"] is not None:
+        _sync_pa_widgets(float(_ac["pa_v3"]))
 
     # Now try to load the image. Route by extension so a JPG session goes
     # through the JPG+sidecar loader, not load_fits. Tolerate failures —
@@ -4943,9 +5641,9 @@ def _apply_plan(plan) -> None:
         combo = f"{plan.grating} / {plan.filter_name}"
         if combo in DISPERSER_FILTER_LABELS:
             disperser_filter_select.value = combo
-    state["open_shutters"] = {
+    _set_open_shutters({
         (sh.q, sh.s, sh.d): sh for sh in plan.to_open_shutters()
-    }
+    })
     n_open = len(state["open_shutters"])
     img: LoadedImage | None = state["image"]
     if img is None:
@@ -4978,7 +5676,7 @@ def on_mpt_csv_load():
         _set_status(f"Shutter CSV parse failed: {e}", "err")
         return
     _push_history()
-    state["open_shutters"] = {(sh.q, sh.s, sh.d): sh for sh in opens}
+    _set_open_shutters({(sh.q, sh.s, sh.d): sh for sh in opens})
     refresh_overlays()
     _set_status(
         f"Loaded shutter CSV: {len(opens)} open shutters (no slitlet "
@@ -5647,6 +6345,365 @@ opt_open_btn.on_click(_open_opt_config_modal)
 opt_config_close_btn.on_click(_close_opt_config_modal)
 opt_config_top_close_btn.on_click(_close_opt_config_modal)
 
+
+# ── MPT configurations — switching, count, and the read-only viewer ──────
+_mpt_cfg_suppress = {"flag": False}
+
+
+def _config_label(i: int) -> str:
+    return f"Config {i + 1}"
+
+
+def _save_active_config_pointing() -> None:
+    """Snapshot the live widget pointing into the active config dict so it
+    is restored when the user switches back to this config."""
+    cfg = _active_config()
+    cfg["ra_deg"] = state.get("ra_deg")
+    cfg["dec_deg"] = state.get("dec_deg")
+    cfg["pa_v3"] = state.get("pa_v3")
+
+
+def _refresh_active_config_banner() -> None:
+    """Show/hide the 'Editing Config k of N' banner (multi-config only)."""
+    n = int(state.get("n_configs", 1))
+    if n <= 1:
+        mpt_active_config_div.text = ""
+        mpt_active_config_div.visible = False
+        return
+    act = int(state.get("active_config", 0)) + 1
+    # Distinct accent per config so the banner colour matches the active grid.
+    accent = _config_color(act - 1)
+    mpt_active_config_div.text = (
+        f"<div style='background:#eef4ff; border-left:5px solid {accent}; "
+        f"border-radius:4px; padding:5px 9px; font-size:12px; color:#23324d'>"
+        f"✏️ Editing <b>Config {act}</b> of {n} — manual shutter opens land "
+        f"here. Other configs show as faint dashed outlines.</div>"
+    )
+    mpt_active_config_div.visible = True
+
+
+def _refresh_config_select_options() -> None:
+    """Rebuild the 'Working on' dropdown to list exactly the live configs."""
+    n = max(1, int(state.get("n_configs", 1)))
+    opts = [_config_label(i) for i in range(n)]
+    cur = _config_label(state["active_config"])
+    if cur not in opts:
+        cur = opts[0]
+    _mpt_cfg_suppress["flag"] = True
+    try:
+        mpt_config_select.options = opts
+        mpt_config_select.value = cur
+    finally:
+        _mpt_cfg_suppress["flag"] = False
+    _refresh_active_config_banner()
+
+
+def _switch_active_config(idx: int) -> None:
+    """Make config `idx` the active one: rebind the open_shutters /
+    highlighted / history aliases and swap the pointing widgets."""
+    idx = max(0, min(int(idx), len(state["configs"]) - 1,
+                     int(state["n_configs"]) - 1))
+    if idx == state["active_config"]:
+        return
+    _save_active_config_pointing()
+    state["active_config"] = idx
+    cfg = _active_config()
+    state["open_shutters"] = cfg["open_shutters"]
+    state["highlighted"] = cfg["highlighted"]
+    state["history"] = cfg["history"]
+    # Load this config's saved pointing (None = keep current widgets).
+    if cfg["ra_deg"] is not None and cfg["dec_deg"] is not None:
+        try:
+            ra_input.value = f'{float(cfg["ra_deg"]):.6f}'
+            dec_input.value = f'{float(cfg["dec_deg"]):.6f}'
+        except (TypeError, ValueError):
+            pass
+        if cfg["pa_v3"] is not None:
+            try:
+                _sync_pa_widgets(float(cfg["pa_v3"]))
+            except (TypeError, ValueError):
+                pass
+    _refresh_config_select_options()
+    _rebuild_shutter_catalog_index()
+    refresh_overlays()
+    _set_status(
+        f"Now editing {cfg['name']} — "
+        f"{len(cfg['open_shutters'])} open shutter(s).",
+        "ok", clear_after=8,
+    )
+
+
+def _ensure_n_configs(n: int) -> None:
+    """Grow/cap the live config list to `n` (1 or 2).
+
+    New configs are born with pointing = None ("inherit the live pointing
+    when first activated"), NOT a creation-time snapshot — otherwise a
+    config created before an image loads (e.g. via a persisted
+    default_num_configs pref) would freeze at (0, 0) and switching to it
+    would jump the MSA off the image. `_switch_active_config` keeps the
+    current widgets when the target config's pointing is None, so a
+    never-positioned config simply shares wherever you are now."""
+    n = max(1, min(2, int(n)))
+    while len(state["configs"]) < n:
+        state["configs"].append(
+            _new_config(_config_label(len(state["configs"])))
+        )
+    state["n_configs"] = n
+    if state["active_config"] >= n:
+        _switch_active_config(0)
+    _refresh_config_select_options()
+
+
+def _on_mpt_config_select(attr, old, new):
+    if _mpt_cfg_suppress["flag"]:
+        return
+    try:
+        idx = int(str(new).split()[-1]) - 1
+    except (ValueError, IndexError):
+        idx = 0
+    _switch_active_config(idx)
+
+
+def _on_mpt_num_configs(attr, old, new):
+    try:
+        n = int(new)
+    except (TypeError, ValueError):
+        return
+    _ensure_n_configs(n)
+    # Repaint so the top-bar CONFIG chip + idle outlines reflect the count.
+    try:
+        refresh_overlays()
+    except Exception:  # noqa: BLE001
+        pass
+    if int(state["n_configs"]) > 1:
+        _set_status(
+            f"{int(state['n_configs'])} MPT configs active — pick which to "
+            f"work on with the 'Working on' dropdown.",
+            "ok", clear_after=10,
+        )
+
+
+def _fmt_gap(glo, ghi, has_spectrum: bool) -> str:
+    """Label for the viewer's Gap column: ``"lo–hi"`` (μm) when the
+    NRS1/NRS2 detector gap falls inside the spectrum, ``"none"`` when the
+    spectrum is gap-free, ``""`` when there's no spectrum at all."""
+    try:
+        if glo is not None and ghi is not None:
+            return f"{float(glo):.3f}–{float(ghi):.3f}"
+    except (TypeError, ValueError):
+        return ""
+    return "none" if has_spectrum else ""
+
+
+def _shutter_lambda_cov(q: int, s: int, d: int) -> tuple[float, float, str]:
+    """(λ_blue, λ_red) in μm (NaN where no spectrum) and a Gap-range label
+    for shutter (q, s, d) under the current Disperser / Filter, via the
+    accurate per-shutter ``wavelengths.cutoffs`` table path."""
+    try:
+        v2 = float(V2_MSA[q - 1, s - 1, d - 1])
+        v3 = float(V3_MSA[q - 1, s - 1, d - 1])
+        cut = cutoffs(v2, v3, state["disperser"], state["filter"],
+                      q=q, s=s, d=d)
+    except Exception:  # noqa: BLE001
+        return float("nan"), float("nan"), ""
+    b, r = cut.get("lam_blue"), cut.get("lam_red")
+    glo, ghi = cut.get("lam_gap_lo"), cut.get("lam_gap_hi")
+    has_spec = (b is not None) or (r is not None)
+    return (b if b is not None else float("nan"),
+            r if r is not None else float("nan"),
+            _fmt_gap(glo, ghi, has_spec))
+
+
+def _mpt_view_collect_rows() -> list:
+    """One dict per (config, selected source). A source counted once per
+    config even if it spans several shutters (reported at the shutter it
+    sits in). Catalog fields filled from the merged active catalog.
+    Each row also carries the shutter's wavelength coverage (λ_blue,
+    λ_red) + detector-gap range under the current Disperser / Filter."""
+    cat = state["catalog"]
+    id_to_row: dict = {}
+    if cat is not None:
+        for i in range(len(cat.ra_deg)):
+            id_to_row[str(cat.ids[i])] = i
+    rows: list = []
+    n = min(int(state.get("n_configs", 1)), len(state["configs"]))
+    for ci in range(n):
+        cfg = state["configs"][ci]
+        seen: dict = {}
+        for key in sorted(cfg["open_shutters"].keys()):
+            sh = cfg["open_shutters"][key]
+            for sid in _open_shutter_ids(sh):
+                # Report each source at the shutter where it is the slitlet's
+                # PRIMARY (centred) target if such a shutter is open; only
+                # fall back to a flanking/neighbour shutter otherwise. This
+                # keeps the reported (Q, s, d) the source's real target
+                # shutter rather than an arbitrary first-sorted one.
+                is_primary = str(getattr(sh, "target_id", "")) == str(sid)
+                if sid not in seen or (is_primary and not seen[sid][3]):
+                    seen[sid] = (key[0], key[1], key[2], is_primary)
+        for sid, (q, s, d, _is_primary) in seen.items():
+            r = id_to_row.get(sid)
+            row = {"config": ci + 1, "id": sid, "q": q, "s": s, "d": d}
+            if r is not None:
+                lbl = ""
+                try:
+                    lbl = str(cat.label[r]).strip()
+                except (AttributeError, IndexError, TypeError):
+                    lbl = ""
+                row.update({
+                    "ra": float(cat.ra_deg[r]),
+                    "dec": float(cat.dec_deg[r]),
+                    "priority": (cat.priority[r]
+                                 if r < len(cat.priority) else float("nan")),
+                    "weight": (cat.weight[r]
+                               if r < len(cat.weight) else float("nan")),
+                    "mag": (cat.mag[r]
+                            if r < len(cat.mag) else float("nan")),
+                    "z": cat.z[r] if r < len(cat.z) else float("nan"),
+                    "label": lbl or sid,
+                })
+            else:
+                row.update({"ra": float("nan"), "dec": float("nan"),
+                            "priority": float("nan"), "weight": float("nan"),
+                            "mag": float("nan"),
+                            "z": float("nan"), "label": "(not in catalog)"})
+            lam_b, lam_r, gap_str = _shutter_lambda_cov(q, s, d)
+            row["lam_blue"], row["lam_red"], row["gap"] = lam_b, lam_r, gap_str
+            rows.append(row)
+    return rows
+
+
+def _mpt_view_refresh() -> None:
+    rows = _mpt_view_collect_rows()
+
+    # Numeric columns are stored as floats (NaN = missing) so the
+    # DataTable sorts them numerically; the column formatters render
+    # them (int / fixed decimals) and blank NaN. config / id / label
+    # stay strings.
+    def _f(v) -> float:
+        try:
+            f = float(v)
+            return f if np.isfinite(f) else float("nan")
+        except (TypeError, ValueError):
+            return float("nan")
+
+    data = dict(config=[], id=[], ra=[], dec=[], priority=[], weight=[],
+                mag=[], z=[], lam_blue=[], lam_red=[], gap=[],
+                q=[], s=[], d=[], label=[])
+    for r in rows:
+        data["config"].append(str(r["config"]))
+        data["id"].append(str(r["id"]))
+        data["ra"].append(_f(r.get("ra")))
+        data["dec"].append(_f(r.get("dec")))
+        data["priority"].append(_f(r.get("priority")))
+        data["weight"].append(_f(r.get("weight")))
+        data["mag"].append(_f(r.get("mag")))
+        data["z"].append(_f(r.get("z")))
+        data["lam_blue"].append(_f(r.get("lam_blue")))
+        data["lam_red"].append(_f(r.get("lam_red")))
+        data["gap"].append(str(r.get("gap", "")))
+        data["q"].append(_f(r.get("q")))
+        data["s"].append(_f(r.get("s")))
+        data["d"].append(_f(r.get("d")))
+        data["label"].append(str(r.get("label", "")))
+    _mpt_view_source.data = data
+
+    if not rows:
+        mpt_view_summary_div.text = (
+            "<span style='color:#5a6b85'>No sources selected yet. Open "
+            "shutters by hand or run the optimizer, then reopen this "
+            "viewer.</span>"
+        )
+        return
+    per_cfg: dict = {}
+    for r in rows:
+        per_cfg[r["config"]] = per_cfg.get(r["config"], 0) + 1
+    parts = ", ".join(f"Config&nbsp;{c}:&nbsp;{per_cfg[c]}"
+                      for c in sorted(per_cfg))
+    uniq = len({r["id"] for r in rows})
+    mpt_view_summary_div.text = (
+        f"<b>{len(rows)}</b> selected row(s) across "
+        f"<b>{min(int(state['n_configs']), len(state['configs']))}</b> "
+        f"config(s) — {parts}. <b>{uniq}</b> unique source(s)."
+    )
+
+
+def _open_mpt_view():
+    # Computing per-shutter wavelength coverage for every selected source
+    # can take a moment; show the spinner first, then build on the next
+    # tick so the overlay paints before the (blocking) compute + render.
+    _show_loading("Computing wavelength coverage…")
+
+    def _build():
+        try:
+            _mpt_view_rebuild_columns()
+            _mpt_view_refresh()
+            mpt_view_modal_backdrop.visible = True
+            mpt_view_modal_card.visible = True
+        finally:
+            _hide_loading()
+    _deferred(_build)
+
+
+def _mpt_view_close():
+    mpt_view_modal_backdrop.visible = False
+    mpt_view_modal_card.visible = False
+
+
+def _mpt_view_save_csv():
+    path = mpt_view_csv_path_input.value.strip()
+    if not path:
+        _set_status("Set a CSV path for the MPT catalog first.", "warn")
+        return
+    rows = _mpt_view_collect_rows()
+    if not rows:
+        _set_status("Nothing selected to save.", "warn")
+        return
+    p = Path(path).expanduser()
+
+    def _do_save():
+        import csv
+
+        def g(r, k, nd=6, as_int=False) -> str:
+            v = r.get(k)
+            try:
+                f = float(v)
+                if not np.isfinite(f):
+                    return ""
+                if as_int:
+                    return str(int(round(f)))
+                return (f"{f:.{nd}f}".rstrip("0").rstrip(".")) or "0"
+            except (TypeError, ValueError):
+                return "" if v is None else str(v)
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "w", newline="") as f:
+            w = csv.writer(f)
+            w.writerow(["config", "ID", "RA", "DEC", "priority", "weight",
+                        "z", "lam_blue", "lam_red", "gap",
+                        "q", "s", "d", "label"])
+            for r in rows:
+                w.writerow([
+                    r["config"], r["id"], g(r, "ra"), g(r, "dec"),
+                    g(r, "priority", as_int=True), g(r, "weight", as_int=True),
+                    g(r, "z", 4), g(r, "lam_blue", 4), g(r, "lam_red", 4),
+                    r.get("gap", ""),
+                    r["q"], r["s"], r["d"],
+                    r.get("label", ""),
+                ])
+        _set_status(f"Saved {len(rows)} MPT-catalog rows → {p}", "ok",
+                    clear_after=12)
+
+    _confirm_overwrite_if_exists(p, _do_save, what="MPT catalog CSV")
+
+
+mpt_num_configs_spinner.on_change("value", _on_mpt_num_configs)
+mpt_config_select.on_change("value", _on_mpt_config_select)
+mpt_view_btn.on_click(_open_mpt_view)
+mpt_view_close_btn.on_click(_mpt_view_close)
+mpt_view_top_close_btn.on_click(_mpt_view_close)
+mpt_view_csv_save_btn.on_click(_mpt_view_save_csv)
+
 # Keep the status line live as the user changes the method or
 # touches the catalog. The catalog-change hook is set up later, in
 # the catalog-load handlers, where state["catalog"] is mutated.
@@ -5762,7 +6819,7 @@ def _cat_edit_populate_table(idx: int) -> None:
             id=[], ra=[], dec=[], priority=[], weight=[],
             mag=[], z=[], label=[], _idx=[],
             lam_req=[], no_gap=[], extend_blue=[], extend_red=[],
-            protect=[], _has_constraint=[],
+            protect=[], centration=[], max_configs=[], _has_constraint=[],
         ))
         cat_edit_columns_choice.options = []
         cat_edit_columns_choice.value = []
@@ -5807,10 +6864,22 @@ def _cat_edit_populate_table(idx: int) -> None:
             centration_list = ["" for _ in range(n)]
         else:
             centration_list = [str(v).strip() for v in centration_arr]
+        # Per-target multi-config cap (v1.4.0+). Stored in the CDS as a
+        # string ("" = unset, "1"/"2") to round-trip with the popover
+        # Select; the Catalog field is float (NaN = unset).
+        mc_arr = np.asarray(getattr(cat, "max_configs", []), dtype=float)
+        if mc_arr.size != n:
+            max_configs_list = ["" for _ in range(n)]
+        else:
+            max_configs_list = [
+                ("" if not np.isfinite(v) else str(int(round(v))))
+                for v in mc_arr
+            ]
         has_constraint_list = [
             int(bool(lam_req_list[i]) or no_gap_list[i] or
                 extend_blue_list[i] or extend_red_list[i]
-                or protect_list[i] or bool(centration_list[i]))
+                or protect_list[i] or bool(centration_list[i])
+                or bool(max_configs_list[i]))
             for i in range(n)
         ]
         # Priority and weight are stored as FLOATS (NaN for missing)
@@ -5847,6 +6916,7 @@ def _cat_edit_populate_table(idx: int) -> None:
             extend_red=extend_red_list,
             protect=protect_list,
             centration=centration_list,
+            max_configs=max_configs_list,
             _has_constraint=has_constraint_list,
         )
         # Add every extras column verbatim (already object arrays of
@@ -5917,7 +6987,7 @@ def _cat_edit_rebuild_columns() -> None:
         # Constraint values surface via the dedicated Constraints…
         # popover, not as inline-editable columns.
         "lam_req", "no_gap", "extend_blue", "extend_red", "protect",
-        "centration",
+        "centration", "max_configs",
     )
     # Extras: any source-data key not in the standard set + not
     # internal.
@@ -6083,6 +7153,72 @@ def _on_cat_edit_compute_p_from_w():
     _cat_edit_render_history()
     _set_status("Computed priorities from weights. Click Apply to commit.",
                 "ok", clear_after=10)
+
+
+def _on_cat_rule_apply():
+    """Bulk-set ``max_configs`` for every row matching a boolean column
+    expression (the 'condition + value' rule). The expression is validated
+    by :func:`evaluate_catalog_condition` FIRST — on any error nothing is
+    changed and the message is shown inline. Matching rows get the chosen
+    value; non-matching rows keep theirs. Recorded on the undo stack."""
+    data = dict(_cat_edit_source.data)
+    n = len(data.get("id", []))
+    if n == 0:
+        cat_rule_status_div.text = (
+            "<span style='color:#b00020'>Load a catalog first.</span>")
+        return
+    expr = (cat_rule_condition_input.value or "").strip()
+    # Columns the rule may reference: user-facing data only — skip the
+    # editor's internal (_idx, _has_constraint) and constraint-bookkeeping
+    # columns so they can't shadow a real column name.
+    skip = {"_idx", "_has_constraint", "protect", "centration",
+            "max_configs", "lam_req", "no_gap", "extend_blue", "extend_red"}
+    cols = {k: list(v) for k, v in data.items()
+            if k not in skip and not k.startswith("_")}
+    try:
+        mask = evaluate_catalog_condition(expr, cols)
+    except ValueError as exc:
+        msg = (str(exc).replace("&", "&amp;")
+               .replace("<", "&lt;").replace(">", "&gt;"))
+        cat_rule_status_div.text = f"<span style='color:#b00020'>⚠ {msg}</span>"
+        return
+    sel = (cat_rule_value_select.value or "").strip()
+    set_val = "" if sel == "(use global)" else sel
+    mc = list(data.get("max_configs", [""] * n))
+    if len(mc) != n:
+        mc = [""] * n
+    count = 0
+    for i in range(n):
+        if i < len(mask) and bool(mask[i]):
+            mc[i] = set_val
+            count += 1
+    data["max_configs"] = mc
+    # Recompute the per-row "has any constraint" flag (drives the
+    # Constraints-column highlight) from the live constraint columns.
+    def _col(key):
+        return list(data.get(key, [""] * n))
+    lam, ng, eb = _col("lam_req"), _col("no_gap"), _col("extend_blue")
+    er, pr, ce = _col("extend_red"), _col("protect"), _col("centration")
+    data["_has_constraint"] = [
+        int(bool(lam[i]) or bool(ng[i]) or bool(eb[i]) or bool(er[i])
+            or bool(pr[i]) or bool(ce[i]) or bool(mc[i]))
+        for i in range(n)
+    ]
+    _cat_edit_set_data_silently(data)
+    snap = {k: list(v) for k, v in _cat_edit_source.data.items()}
+    _cat_edit_undo_stack.append(snap)
+    _cat_edit_redo_stack.clear()
+    _cat_edit_render_history()
+    label = "(use global)" if set_val == "" else set_val
+    if count == 0:
+        cat_rule_status_div.text = (
+            "<span style='color:#9a6a00'>No sources matched — nothing "
+            "changed.</span>")
+    else:
+        cat_rule_status_div.text = (
+            f"<span style='color:#1a7f37'>✓ Set max configs = {label} "
+            f"for {count} source(s). Click <b>Apply changes</b> to commit "
+            "to the live catalog.</span>")
 
 
 def _on_cat_edit_data_change(attr, old, new):
@@ -6354,6 +7490,11 @@ def _on_cat_edit_apply():
         # strings. Anything not in the canonical five-value set turns
         # into "" via :func:`vmpt.catalog._normalise_centration`.
         centration=_centration_col_from_editor(data, n),
+        max_configs=np.asarray(
+            [_str_to_float_or_nan(v)
+             for v in (list(data.get("max_configs", [""] * n)) + [""] * n)[:n]],
+            dtype=float,
+        ),
         source_path=cat.source_path,
         extras=new_extras,
     )
@@ -6448,7 +7589,7 @@ def _cat_edit_save_csv_to(p: Path, data: dict, n: int) -> None:
         # floats in source.data so we coerce them to int-or-blank.
         _INTERNAL = {"_idx", "_has_constraint", "lam_req",
                      "no_gap", "extend_blue", "extend_red", "protect",
-                     "centration"}
+                     "centration", "max_configs"}
         extras_cols = [k for k in data.keys()
                        if k not in _CAT_STD_COLS and k not in _INTERNAL]
         # Are any per-target constraints set anywhere in the catalog?
@@ -6458,7 +7599,8 @@ def _cat_edit_save_csv_to(p: Path, data: dict, n: int) -> None:
             int(v) for v in (data.get("_has_constraint") or [])
         )
         constraint_cols = (["lam_req", "no_gap", "extend_blue",
-                            "extend_red", "protect", "centration"]
+                            "extend_red", "protect", "centration",
+                            "max_configs"]
                            if has_constraints else [])
         header = ["ID", "RA", "DEC", "priority", "weight", "mag", "z",
                   "label", *constraint_cols, *extras_cols]
@@ -6481,8 +7623,8 @@ def _cat_edit_save_csv_to(p: Path, data: dict, n: int) -> None:
                     val = (data.get(k) or [""])[i]
                     if k == "lam_req":
                         row_vals.append("" if not val else str(val))
-                    elif k == "centration":
-                        # String label or empty — write verbatim
+                    elif k in ("centration", "max_configs"):
+                        # String label / count or empty — write verbatim
                         # (already normalised by the popover/loader).
                         row_vals.append(str(val) if val else "")
                     else:
@@ -6510,6 +7652,7 @@ cat_edit_columns_choice.on_change("value", _on_cat_edit_columns_change)
 cat_edit_new_col_btn.on_click(_on_cat_edit_add_column)
 cat_edit_compute_w_btn.on_click(_on_cat_edit_compute_w_from_p)
 cat_edit_compute_p_btn.on_click(_on_cat_edit_compute_p_from_w)
+cat_rule_apply_btn.on_click(_on_cat_rule_apply)
 cat_edit_undo_btn.on_click(_on_cat_edit_undo)
 cat_edit_redo_btn.on_click(_on_cat_edit_redo)
 cat_edit_apply_btn.on_click(_on_cat_edit_apply)
@@ -6608,6 +7751,11 @@ def _on_cat_constraints_signal(attr, old, new) -> None:
         cat_constraints_centration_select.value = centration_stored
     else:
         cat_constraints_centration_select.value = "(use global)"
+    # Max-configs cap Select. Stored "" / "1" / "2".
+    mc_stored = str((data.get("max_configs") or [""] * n)[idx]).strip()
+    cat_constraints_max_configs_select.value = (
+        mc_stored if mc_stored in ("1", "2") else "(use global)"
+    )
     cat_constraints_modal_backdrop.visible = True
     cat_constraints_modal_card.visible = True
 
@@ -6641,9 +7789,12 @@ def _on_cat_constraints_apply() -> None:
     cent_val = (cat_constraints_centration_select.value or "").strip()
     if cent_val == "(use global)":
         cent_val = ""
+    mc_val = (cat_constraints_max_configs_select.value or "").strip()
+    if mc_val == "(use global)":
+        mc_val = ""
     has_any = int(
         bool(lam_val) or new_no_gap or new_blue or new_red or new_protect
-        or bool(cent_val)
+        or bool(cent_val) or bool(mc_val)
     )
 
     # Bokeh ColumnDataSource needs the WHOLE column replaced — mutating
@@ -6661,6 +7812,7 @@ def _on_cat_constraints_apply() -> None:
     _replace("extend_red", new_red, 0)
     _replace("protect", new_protect, 0)
     _replace("centration", cent_val, "")
+    _replace("max_configs", mc_val, "")
     _replace("_has_constraint", has_any, 0)
     # Use the silent setter so this edit doesn't push an extra undo
     # step on top of whatever the user was already doing.
@@ -6720,6 +7872,42 @@ _cat_edit_install_js = CustomJS(
 )
 curdoc().js_on_event(DocumentReady, _cat_edit_install_js)
 _cat_edit_source.js_on_change("data", _cat_edit_install_js)
+
+
+# Install the global the top-bar CONFIG chip's onclick calls. Stamps the
+# `_config_chip_signal` data so the Python `_on_config_chip_signal`
+# listener fires and advances the active config. Bound to DocumentReady
+# AND to every repaint of the stats bar (`stats_div.text`) so the global
+# always exists by the time the chip is rendered; the guard makes
+# re-installation a no-op.
+_config_chip_install_js = CustomJS(
+    args=dict(sig=_config_chip_signal),
+    code="""
+    if (!window.__vmpt_cycle_config) {
+        window.__vmpt_cycle_config = function() {
+            sig.data = {stamp: [Date.now() + Math.random()]};
+            sig.properties.data.change.emit();
+        };
+    }
+    """,
+)
+curdoc().js_on_event(DocumentReady, _config_chip_install_js)
+stats_div.js_on_change("text", _config_chip_install_js)
+
+
+def _on_config_chip_signal(attr, old, new):
+    """Top-bar CONFIG chip was clicked → cycle to the next config
+    (wraps 1→2→…→1). No-op in single-config mode. The dropdown in the
+    Pointing tab and the chip's own colour stay in sync because
+    `_switch_active_config` repaints both."""
+    n = int(state.get("n_configs", 1))
+    if n <= 1:
+        return
+    nxt = (int(state.get("active_config", 0)) + 1) % n
+    _switch_active_config(nxt)
+
+
+_config_chip_signal.on_change("data", _on_config_chip_signal)
 
 
 # ── Draggable modal dialogs (v1.3.3+) ────────────────────────────────────
@@ -6917,7 +8105,7 @@ _cat_edit_source.js_on_change("data", _cat_edit_sort_scroll_js)
 
 def _apply_optimizer_result(
     ra_p: float, dec_p: float, pa_v3: float,
-    *, clear_existing: bool = True,
+    *, clear_existing: bool = True, config_idx: int | None = None,
 ) -> None:
     """Apply one of the optimizer's pointings.
 
@@ -6937,11 +8125,28 @@ def _apply_optimizer_result(
     indices (`s_frac ∈ [0,170]`, `d_frac ∈ [0,364]`); vMPT's
     `_add_slitlet` takes 1-based `s, d`. We convert here so the
     opened slitlets centre exactly on the target.
+
+    `config_idx` (v1.4.0): when given, the result is applied to that
+    MPT config — the config list is grown and the active config switched
+    first, so the slitlets land on the right config. The per-config
+    observation budget (config 1 → none, config 2 → the pass-2 mask) is
+    applied to the evaluator so Config 2 never reopens Config 1's targets.
     """
+    if config_idx is not None:
+        if config_idx + 1 > int(state.get("n_configs", 1)):
+            _ensure_n_configs(config_idx + 1)
+            _prefs_save_suppress["flag"] = True
+            try:
+                mpt_num_configs_spinner.value = int(state["n_configs"])
+            finally:
+                _prefs_save_suppress["flag"] = False
+        if config_idx != state["active_config"]:
+            _switch_active_config(config_idx)
+
     _push_history()  # snapshot for Undo
 
     if clear_existing:
-        state["open_shutters"] = {}
+        _set_open_shutters({})
 
     ra_input.value = f"{ra_p:.6f}"
     dec_input.value = f"{dec_p:.6f}"
@@ -6952,6 +8157,21 @@ def _apply_optimizer_result(
     ev = _opt_run.get("evaluator") if _opt_run else None
     ids = _opt_run.get("source_ids", []) if _opt_run else []
     if ev is not None:
+        # Apply the per-config evaluator budget (v1.4.0). config 0 / single
+        # config → no budget; config 1 → the pass-2 budget mask so it
+        # excludes Config 1's already-observed sources.
+        try:
+            _eff_cfg = (config_idx if config_idx is not None
+                        else int(state.get("active_config", 0)))
+            _budget = (_opt_run.get("budgets", {}) or {}).get(_eff_cfg)
+            if _budget is not None:
+                ev._budget = np.asarray(_budget, dtype=bool)
+                ev._budget_enabled = not bool(ev._budget.all())
+            else:
+                ev._budget = np.ones(len(ev.ra), dtype=bool)
+                ev._budget_enabled = False
+        except Exception:  # noqa: BLE001
+            pass
         try:
             detected, _tp, shutters = ev.evaluate(ra_p, dec_p, pa_v3)
             quad, s_frac, d_frac = shutters
@@ -6991,23 +8211,64 @@ def _apply_optimizer_result(
 
 def _on_opt_apply_trigger(attr, old, new):
     """Fires when the Apply button's JS confirm dialog returns OK.
-    The trigger value is `"<ra>,<dec>,<pa>,<stamp>"`."""
+    The trigger value is `"<ra>,<dec>,<pa>,<config_idx>,<stamp>"`."""
     if not new:
         return
+    cfg = None
     try:
-        ra_s, dec_s, pa_s, _stamp = new.split(",", 3)
-        ra_p = float(ra_s); dec_p = float(dec_s); pa_v3 = float(pa_s)
-    except (ValueError, TypeError):
+        parts = new.split(",", 4)
+        ra_p = float(parts[0]); dec_p = float(parts[1]); pa_v3 = float(parts[2])
+        if len(parts) >= 5:
+            cfg = int(parts[3])
+    except (ValueError, TypeError, IndexError):
         opt_apply_trigger.value = ""
         return
     # Reset the trigger so the next click on the same row still fires.
     # (Suppress the recursive on_change by checking `new` at the top.)
     opt_apply_trigger.value = ""
-    _apply_optimizer_result(ra_p, dec_p, pa_v3, clear_existing=True)
+    _apply_optimizer_result(ra_p, dec_p, pa_v3, clear_existing=True,
+                            config_idx=cfg)
     _opt_hide_modal()
 
 
 opt_apply_trigger.on_change("value", _on_opt_apply_trigger)
+
+
+def _on_opt_apply_both_trigger(attr, old, new):
+    """Apply a 2-config plan in one click: Config 1 #k + Config 2 #k.
+
+    The trigger payload is ``"<rank>,<stamp>"`` (rank is 0-based); each
+    config is filled from its own k-th solution (clamped to range)."""
+    if not new:
+        return
+    opt_apply_both_trigger.value = ""
+    try:
+        k = int(str(new).split(",", 1)[0])
+    except (ValueError, IndexError):
+        k = 0
+    r1 = _opt_run.get("pass1_results")
+    r2 = _opt_run.get("pass2_results")
+    if not r1 or len(r1.get("score", [])) == 0:
+        return
+    k1 = max(0, min(k, len(r1["score"]) - 1))
+    _apply_optimizer_result(
+        float(r1["ra"][k1]), float(r1["dec"][k1]), float(r1["pa"][k1]),
+        clear_existing=True, config_idx=0,
+    )
+    if r2 and len(r2.get("score", [])) > 0:
+        k2 = max(0, min(k, len(r2["score"]) - 1))
+        _apply_optimizer_result(
+            float(r2["ra"][k2]), float(r2["dec"][k2]), float(r2["pa"][k2]),
+            clear_existing=True, config_idx=1,
+        )
+    # Leave the user on Config 1 to review.
+    _switch_active_config(0)
+    _opt_hide_modal()
+    _set_status(f"Applied 2-config plan #{k + 1} (Config 1 + Config 2).",
+                "ok", clear_after=12)
+
+
+opt_apply_both_trigger.on_change("value", _on_opt_apply_both_trigger)
 
 
 # ── Pop-up modal helpers ─────────────────────────────────────────────────
@@ -7042,37 +8303,52 @@ def _opt_update_progress(text: str, frac: float) -> None:
     opt_modal_progress_bar.styles = {"--vmpt-pct": f"{pct:.1f}%"}
 
 
-def _opt_render_results_in_modal(
-    results: dict, ra_ref: float, dec_ref: float, pa_ref: float,
-    n_sources: int,
-    *, method: str = "Democracy",
-) -> None:
-    """Build the post-run results table: one Bokeh row per solution
-    so the Apply button sits exactly next to its cells (no Bokeh
-    column-spacing drift between buttons and table rows).
+# Human-readable labels for the per-pointing drop reasons surfaced in the
+# results Score-cell tooltips. Keys mirror `optimizer.DROP_REASONS`.
+# `budget` (v1.4.0) only fires in the 2-config pass-2 search: a source is
+# dropped because the other config already observed it up to its
+# max-configs cap. Ordered budget-first since that dominates Config 2.
+_DROP_REASON_LABELS = {
+    "budget":       "already observed in another config",
+    "collision":    "spectral collision",
+    "required_lam": "required λ-range missing",
+    "no_gap":       "detector gap inside spectrum",
+    "extend_blue":  "blue-edge truncated",
+    "extend_red":   "red-edge truncated",
+}
 
-    Per-row enrichments built upstream and read here:
-      • `total_count[i]` — count of observable sources at this pointing.
-      • `sum_weight[i]`  — Σ weight of observable sources (Meritocracy
-        headline).
-      • `tier_breakdown[i]` — per-priority-tier counts (Hierarchy
-        headline).
-      • `top_targets[i]`  — top-10 sources at this pointing sorted by
-        priority asc / weight desc. Rendered as a hover tooltip on
-        the row's Score cell.
+
+def _opt_drop_breakdown_lines(reasons_i: dict, n_drop_i: int) -> list:
+    """Tooltip lines breaking `n_drop_i` down by reason (best-effort).
+
+    Falls back to a generic line when the per-reason dict is empty.
+    """
+    lines: list = []
+    if reasons_i:
+        lines.append(f"−{n_drop_i} dropped:")
+        for key, label in _DROP_REASON_LABELS.items():
+            count = int(reasons_i.get(key, 0) or 0)
+            if count > 0:
+                lines.append(f"   {count}× {label}")
+    else:
+        lines.append(f"(−{n_drop_i} source(s) dropped at this pointing.)")
+    return lines
+
+
+def _opt_build_result_rows(
+    results: dict, ra_ref: float, dec_ref: float, pa_ref: float,
+    *, method: str, config_idx: int, confirm_what: str,
+) -> list:
+    """Build the Bokeh rows (header + one per solution) for one results
+    table. Shared by the single-config and 2-config (pair) renderers.
+
+    `config_idx` is baked into each Apply button's trigger payload so the
+    Python handler knows which config to fill. `confirm_what` is the body
+    of the JS confirm() dialog.
     """
     n = len(results["score"])
     if n == 0:
-        opt_modal_progress_box.visible = False
-        opt_modal_results_box.visible = True
-        opt_modal_results_summary.text = (
-            "<i>No solutions found inside the search box. "
-            "Try widening ΔRA / ΔDec / ΔPA, lowering the centration "
-            "class, or relaxing the priority cutoff.</i>"
-        )
-        opt_modal_results_rows.children = []
-        return
-
+        return []
     n_show = min(10, n)
     cos_dec = np.cos(np.deg2rad(dec_ref))
     breakdowns = results.get("tier_breakdown")
@@ -7084,29 +8360,6 @@ def _opt_render_results_in_modal(
     protect_enabled = bool(results.get("protect_enabled"))
     is_hierarchy = breakdowns is not None and len(breakdowns) >= n_show
     is_meritocracy = method == "Meritocracy"
-
-    # Summary line.
-    method_blurb = {
-        "Democracy":   "ranked by raw count.",
-        "Meritocracy": "ranked by Σ weight; <b>Σw</b> shown, total count in parens.",
-        "Hierarchy":   ("ranked lexicographically by priority tier; "
-                        "<b>P<sub>i</sub>:n</b> = sources placed at tier i."),
-    }.get(method, "")
-    protect_blurb = ""
-    if protect_enabled:
-        protect_blurb = (
-            " · <b>🛡 collision protection</b> ON — "
-            "<code>−K</code> counts targets dropped to protect "
-            "high-priority spectra."
-        )
-    opt_modal_results_summary.text = (
-        f"<div style='font-size:12px; margin-bottom:4px'>"
-        f"<b>Top {n_show}</b> distinct solutions of {n} total · "
-        f"{n_sources} candidate sources · "
-        f"<b>Method:</b> {method} — {method_blurb}{protect_blurb} "
-        f"Hover a Score cell to see the top-10 placed sources. "
-        f"Offsets are from the search centre.</div>"
-    )
 
     # Header row (Bokeh row of Divs aligning with the data rows).
     HEADER_BG = "#eef2f8"
@@ -7273,6 +8526,7 @@ def _opt_render_results_in_modal(
         # plain floats. We embed the per-button scalars via Python
         # f-string interpolation into the JS body, and pass only the
         # trigger TextInput as a real model arg.
+        _confirm_js = confirm_what.replace('"', '\\"')
         btn.js_on_click(CustomJS(
             args=dict(trig=opt_apply_trigger),
             code=f"""
@@ -7280,17 +8534,17 @@ def _opt_render_results_in_modal(
             const dec = {float(dec_i)};
             const pa = {float(pa_i)};
             const rank = {i + 1};
+            const cfg = {int(config_idx)};
             const msg = "Apply solution #" + rank +
-                        " ?\\n\\nThis will CLEAR all previously open " +
-                        "shutters and replace them with the optimizer's " +
-                        "slitlets.";
+                        " ?\\n\\n{_confirm_js}";
             if (!window.confirm(msg)) {{
                 return;
             }}
-            // Include a stamp so Bokeh sees a new value even for
-            // repeat applies (same row clicked twice in a session).
+            // Payload: ra,dec,pa,config_idx,stamp. The stamp makes Bokeh
+            // see a fresh value even when the same row is re-applied.
             trig.value = ra.toFixed(8) + "," + dec.toFixed(8) + "," +
-                         pa.toFixed(6) + "," + Date.now() + "_" + Math.random();
+                         pa.toFixed(6) + "," + cfg + "," +
+                         Date.now() + "_" + Math.random();
             """,
         ))
 
@@ -7306,9 +8560,300 @@ def _opt_render_results_in_modal(
             spacing=0, width=total_w, styles=row_styles_bg(),
         ))
 
+    return [header_row, *data_rows]
+
+
+def _opt_render_results_in_modal(
+    results: dict, ra_ref: float, dec_ref: float, pa_ref: float,
+    n_sources: int,
+    *, method: str = "Democracy",
+) -> None:
+    """Single-config results table (n_pass == 1). Applies to the active
+    config (config 0 in the common case)."""
+    n = len(results["score"])
+    if n == 0:
+        opt_modal_progress_box.visible = False
+        opt_modal_results_box.visible = True
+        opt_modal_results_summary.text = (
+            "<i>No solutions found inside the search box. "
+            "Try widening ΔRA / ΔDec / ΔPA, lowering the centration "
+            "class, or relaxing the priority cutoff.</i>"
+        )
+        opt_modal_results_rows.children = []
+        return
+    n_show = min(10, n)
+    method_blurb = {
+        "Democracy":   "ranked by raw count.",
+        "Meritocracy": "ranked by Σ weight; <b>Σw</b> shown, total count in parens.",
+        "Hierarchy":   ("ranked lexicographically by priority tier; "
+                        "<b>P<sub>i</sub>:n</b> = sources placed at tier i."),
+    }.get(method, "")
+    protect_blurb = ""
+    if bool(results.get("protect_enabled")):
+        protect_blurb = (
+            " · <b>🛡 collision protection</b> ON — "
+            "<code>−K</code> counts targets dropped to protect "
+            "high-priority spectra."
+        )
+    opt_modal_results_summary.text = (
+        f"<div style='font-size:12px; margin-bottom:4px'>"
+        f"<b>Top {n_show}</b> distinct solutions of {n} total · "
+        f"{n_sources} candidate sources · "
+        f"<b>Method:</b> {method} — {method_blurb}{protect_blurb} "
+        f"Hover a Score cell to see the top-10 placed sources. "
+        f"Offsets are from the search centre.</div>"
+    )
+    rows_built = _opt_build_result_rows(
+        results, ra_ref, dec_ref, pa_ref, method=method,
+        config_idx=int(state.get("active_config", 0)),
+        confirm_what=("This will CLEAR all previously open shutters and "
+                      "replace them with the optimizer's slitlets."),
+    )
     opt_modal_progress_box.visible = False
     opt_modal_results_box.visible = True
-    opt_modal_results_rows.children = [header_row, *data_rows]
+    opt_modal_results_rows.children = rows_built
+
+
+def _opt_render_pair_results(
+    res1: dict, res2: dict, ra_ref: float, dec_ref: float, pa_ref: float,
+    n_sources: int, *, method: str = "Democracy",
+) -> None:
+    """2-config (auto-both) results as ONE combined table.
+
+    Each row is a *plan* = Config 1 #k + Config 2 #k, rendered as two
+    lines (one per config) sharing a combined headline score, with each
+    config's own score and ΔRA/ΔDec/ΔPA on its line. The per-plan Apply
+    fills BOTH configs at once. Config 2 is optimized against Config 1
+    #1's budget, so plan #1 is the consistent recommended pairing; lower
+    rows pair the k-th best of each config independently.
+    """
+    n1 = len(res1.get("score", []))
+    n2 = len(res2.get("score", []))
+    if n1 == 0:
+        _opt_render_results_in_modal(res1, ra_ref, dec_ref, pa_ref,
+                                     n_sources, method=method)
+        return
+    if n2 == 0:
+        # No complementary Config 2 found — show Config 1 alone.
+        _opt_render_results_in_modal(res1, ra_ref, dec_ref, pa_ref,
+                                     n_sources, method=method)
+        _set_status(
+            "Config 2 found no additional targets under the current "
+            "max-configs cap — showing Config 1 only.",
+            "warn", clear_after=12,
+        )
+        return
+
+    cos_dec = np.cos(np.deg2rad(dec_ref))
+    is_hier = method == "Hierarchy"
+    is_merit = method == "Meritocracy"
+
+    def _parts(res: dict, k: int) -> dict:
+        """Per-config stats for solution k: count, Σweight, a display
+        label (method-aware, with the −drop suffix), and Δ offsets."""
+        totals = res.get("total_count")
+        sweights = res.get("sum_weight")
+        breakdowns = res.get("tier_breakdown")
+        ndrop = res.get("n_dropped")
+        top_targets = res.get("top_targets")
+        drop_reasons = res.get("drop_reasons")
+        cnt = (int(totals[k]) if totals is not None and k < len(totals)
+               else int(round(float(res["score"][k]))))
+        sw = (float(sweights[k]) if sweights is not None
+              and k < len(sweights) else None)
+        drop = int(ndrop[k]) if ndrop is not None and k < len(ndrop) else 0
+        if is_merit:
+            lbl = f"Σw {sw:.0f} ({cnt})" if sw is not None else f"{cnt}"
+        elif is_hier and breakdowns is not None and k < len(breakdowns):
+            tb = " · ".join(f"P{int(t)}:{c}" for t, c in breakdowns[k])
+            lbl = f"{tb} ({cnt})" if tb else f"{cnt}"
+        else:
+            lbl = f"{cnt}"
+        if drop > 0:
+            lbl += f" −{drop}"
+        # Hover tooltip: top placed sources + the −drop breakdown by
+        # reason (budget / collision / spectral). Mirrors the single-
+        # config table so the prominent "−K" on Config 2 is explained.
+        tip_lines: list = []
+        tt = (top_targets[k] if top_targets is not None
+              and k < len(top_targets) else None)
+        if tt:
+            tip_lines.append(f"Top {len(tt)} placed sources at this pointing:")
+            for r, t in enumerate(tt, 1):
+                pid = "—" if t["p"] is None else f"{int(t['p'])}"
+                wid = "—" if t["w"] is None else f"{int(t['w'])}"
+                tip_lines.append(f"{r}. ID={t['id']}  P={pid}  W={wid}")
+        if drop > 0:
+            reasons_i = (drop_reasons[k] if drop_reasons is not None
+                         and k < len(drop_reasons) else None)
+            if tip_lines:
+                tip_lines.append("")
+            tip_lines.extend(_opt_drop_breakdown_lines(reasons_i, drop))
+        tooltip = "\n".join(tip_lines)
+        if tooltip:
+            title_attr = (tooltip.replace("&", "&amp;")
+                          .replace('"', "&quot;").replace("<", "&lt;"))
+            score_html = (
+                f'<span title="{title_attr}" style="cursor:help; '
+                f'border-bottom:1px dotted #888">{lbl}</span>'
+            )
+        else:
+            score_html = lbl
+        ra_i = float(res["ra"][k])
+        dec_i = float(res["dec"][k])
+        pa_i = float(res["pa"][k])
+        return dict(
+            cnt=cnt, sw=(sw if sw is not None else float(cnt)), lbl=lbl,
+            score_html=score_html,
+            dra=(ra_i - ra_ref) * 3600.0 * cos_dec,
+            ddec=(dec_i - dec_ref) * 3600.0,
+            dpa=(pa_i - pa_ref + 180.0) % 360.0 - 180.0,
+        )
+
+    def _combined(pa: dict, pb: dict) -> str:
+        """Combined headline across the two configs (disjoint under the
+        max-configs cap, so counts/weights simply add)."""
+        if is_merit:
+            return f"Σw {pa['sw'] + pb['sw']:.0f} ({pa['cnt'] + pb['cnt']})"
+        return f"{pa['cnt'] + pb['cnt']}"
+
+    p1a, p1b = _parts(res1, 0), _parts(res2, 0)
+    # Legend for the "−K" suffix — shown only when some plan actually
+    # drops sources (almost always Config 2, where the max-configs cap
+    # skips sources Config 1 already claimed). Hover a Score for the
+    # exact per-reason breakdown.
+    n_plans_pre = min(len(res1.get("score", [])), len(res2.get("score", [])), 10)
+    _any_drop = any(
+        (_parts(res1, k)["lbl"].find("−") >= 0
+         or _parts(res2, k)["lbl"].find("−") >= 0)
+        for k in range(n_plans_pre)
+    )
+    drop_legend = (
+        " <span style='color:#8a5a00'>“<b>−K</b>” = sources that landed in "
+        "shutters but were skipped (usually because the other config already "
+        "observed them under the max-configs cap; hover a Score for the "
+        "breakdown).</span>"
+        if _any_drop else ""
+    )
+    opt_modal_results_summary.text = (
+        f"<div style='font-size:12px; margin-bottom:4px'>"
+        f"<b>2-config plan</b> · {n_sources} candidate sources · "
+        f"<b>Method:</b> {method}. Each row is a plan "
+        f"(<b>Config 1 #k + Config 2 #k</b>) — combined score on the left, "
+        f"each config's own score + offsets on its line. "
+        f"<b>Recommended: plan #1</b> = <b>{_combined(p1a, p1b)}</b> combined. "
+        f"Config 2 is optimized against Config 1 #1's budget, so plan #1 is "
+        f"the consistent pairing. Offsets are from the search centre.{drop_legend}</div>"
+    )
+
+    # Banner: one-click apply of the recommended plan (#1).
+    apply_both_btn = Button(
+        label=f"✔ Apply recommended plan #1  ({_combined(p1a, p1b)} combined)",
+        button_type="primary", width=380, height=30,
+    )
+    apply_both_btn.js_on_click(CustomJS(
+        args=dict(trig=opt_apply_both_trigger),
+        code="""
+        if (!window.confirm("Apply the recommended 2-config plan (#1)?\\n\\n"
+            + "This CLEARS and refills BOTH Config 1 and Config 2.")) {
+            return;
+        }
+        trig.value = "0," + Date.now() + "_" + Math.random();
+        """,
+    ))
+
+    HEADER_BG = "#eef2f8"
+    ROW_H = 24
+    score_w = 188 if is_hier else 150 if is_merit else 72
+    W = dict(rank=30, comb=98, cfg=34, dra=80, ddec=80, dpa=74,
+             score=score_w, apply=150)
+    total_w = sum(W.values())
+    _base = {
+        "padding": "0 6px", "line-height": f"{ROW_H}px",
+        "box-sizing": "border-box", "height": f"{ROW_H}px",
+        "overflow": "hidden", "white-space": "nowrap",
+        "text-overflow": "ellipsis",
+    }
+
+    def _cell(text, w, *, header=False, bold=False, mono=False,
+              align="center", bg=None):
+        st = dict(_base)
+        st["text-align"] = align
+        if header:
+            st.update({"background": HEADER_BG, "font-weight": "600",
+                       "text-align": "center"})
+        if bold:
+            st["font-weight"] = "600"
+        if mono:
+            st["font-family"] = "monospace"
+        if bg:
+            st["background"] = bg
+        return Div(text=text, width=w, height=ROW_H, styles=st)
+
+    header_row = row(
+        _cell("#", W["rank"], header=True),
+        _cell("Combined", W["comb"], header=True),
+        _cell("Cfg", W["cfg"], header=True),
+        _cell("ΔRA", W["dra"], header=True),
+        _cell("ΔDec", W["ddec"], header=True),
+        _cell("ΔPA", W["dpa"], header=True),
+        _cell("Score", W["score"], header=True),
+        _cell("", W["apply"], header=True),
+        spacing=0, width=total_w,
+    )
+
+    n_plans = min(n1, n2, 10)
+    plan_blocks: list = []
+    for k in range(n_plans):
+        pa, pb = _parts(res1, k), _parts(res2, k)
+        bg = "#f7f9fc" if k % 2 else "#ffffff"
+        apply_btn = Button(
+            label=f"Apply plan #{k + 1}" if k == 0 else f"Plan #{k + 1}",
+            button_type="primary" if k == 0 else "default",
+            width=W["apply"] - 12, height=ROW_H,
+        )
+        apply_btn.js_on_click(CustomJS(
+            args=dict(trig=opt_apply_both_trigger),
+            code=f"""
+            if (!window.confirm("Apply 2-config plan #{k + 1}?\\n\\n"
+                + "This CLEARS and refills BOTH Config 1 and Config 2.")) {{
+                return;
+            }}
+            trig.value = "{k}," + Date.now() + "_" + Math.random();
+            """,
+        ))
+        line1 = row(
+            _cell(str(k + 1), W["rank"], bold=True, bg=bg),
+            _cell(_combined(pa, pb), W["comb"], bold=True, bg=bg),
+            _cell("C1", W["cfg"], bg=bg),
+            _cell(f"{pa['dra']:+.2f}″", W["dra"], mono=True, align="right", bg=bg),
+            _cell(f"{pa['ddec']:+.2f}″", W["ddec"], mono=True, align="right", bg=bg),
+            _cell(f"{pa['dpa']:+.3f}°", W["dpa"], mono=True, align="right", bg=bg),
+            _cell(pa["score_html"], W["score"], bg=bg),
+            apply_btn,
+            spacing=0, width=total_w,
+        )
+        line2 = row(
+            _cell("", W["rank"], bg=bg),
+            _cell("", W["comb"], bg=bg),
+            _cell("C2", W["cfg"], bg=bg),
+            _cell(f"{pb['dra']:+.2f}″", W["dra"], mono=True, align="right", bg=bg),
+            _cell(f"{pb['ddec']:+.2f}″", W["ddec"], mono=True, align="right", bg=bg),
+            _cell(f"{pb['dpa']:+.3f}°", W["dpa"], mono=True, align="right", bg=bg),
+            _cell(pb["score_html"], W["score"], bg=bg),
+            _cell("", W["apply"], bg=bg),
+            spacing=0, width=total_w,
+        )
+        plan_blocks.append(column(
+            line1, line2, spacing=0, width=total_w,
+            styles={"border-bottom": "2px solid #d8dee8"},
+        ))
+
+    opt_modal_progress_box.visible = False
+    opt_modal_results_box.visible = True
+    opt_modal_results_rows.children = [
+        row(apply_both_btn), header_row, *plan_blocks,
+    ]
 
 
 # ── Chunked optimizer runner ─────────────────────────────────────────────
@@ -7624,27 +9169,76 @@ def _opt_de_step() -> None:
                 breakdowns.append(per_tier)
             refined["tier_breakdown"] = breakdowns
 
-        _opt_render_results_in_modal(
-            refined,
-            _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
-            _opt_run["n_sources"],
-            method=_opt_run.get("method", "Democracy"),
-        )
-        if breakdowns and breakdowns[0]:
-            best_summary = " · ".join(
-                f"P{int(t)}={c}" for t, c in breakdowns[0]
+        # ── Multi-config (v1.4.0): after Config 1's DE finishes, run a
+        # second pass for Config 2 on a reduced budget (sequential greedy).
+        if _opt_run.get("n_pass", 1) >= 2 and _opt_run.get("pass", 1) == 1:
+            _opt_run["pass1_results"] = dict(refined)
+            ev = _opt_run["evaluator"]
+            best = (float(refined["ra"][0]), float(refined["dec"][0]),
+                    float(refined["pa"][0]))
+            try:
+                det_best, _, _ = ev.evaluate(*best)
+                observed = det_best.astype(int)
+            except Exception:  # noqa: BLE001
+                observed = np.zeros(len(_opt_run["effective_max"]), dtype=int)
+            eff = np.asarray(_opt_run["effective_max"], dtype=float)
+            budget2 = np.asarray(eff > observed, dtype=bool)
+            ev._budget = budget2
+            ev._budget_enabled = not bool(budget2.all())
+            _opt_run["budgets"][1] = budget2.copy()
+            # Reset the state machine for a fresh Config 2 search.
+            _opt_run["pass"] = 2
+            _opt_run["phase"] = "grid"
+            _opt_run["grid_idx"] = 0
+            _opt_run["grid_scores"] = np.zeros(
+                int(_opt_run["n_total"]), dtype=float)
+            _opt_run["de_idx"] = 0
+            _opt_run["de_scores"] = []
+            _opt_run["de_params"] = []
+            for _k in ("grid_result", "hier_pool", "hier_scores",
+                       "hier_tiers", "hier_tier_idx", "lex_tiers"):
+                _opt_run.pop(_k, None)
+            _opt_run["started"] = _now()
+            _opt_update_progress(
+                "Config 2: optimizing on the remaining budget…", 0.0)
+            curdoc().add_next_tick_callback(_opt_drive)
+            return
+
+        if _opt_run.get("n_pass", 1) >= 2:
+            _opt_run["pass2_results"] = dict(refined)
+            _opt_render_pair_results(
+                _opt_run.get("pass1_results") or refined, refined,
+                _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
+                _opt_run["n_sources"],
+                method=_opt_run.get("method", "Democracy"),
             )
             _set_status(
-                f"Optimization complete (Hierarchy): "
-                f"{best_summary} of {_opt_run['n_sources']} sources.",
-                "ok", clear_after=12,
+                "Optimization complete: 2-config plan ready. Apply a row "
+                "or the recommended plan.", "ok", clear_after=12,
             )
         else:
-            _set_status(
-                f"Optimization complete: best score "
-                f"{refined['score'][0]:.1f} of {_opt_run['n_sources']} sources.",
-                "ok", clear_after=10,
+            _opt_render_results_in_modal(
+                refined,
+                _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
+                _opt_run["n_sources"],
+                method=_opt_run.get("method", "Democracy"),
             )
+            if breakdowns and breakdowns[0]:
+                best_summary = " · ".join(
+                    f"P{int(t)}={c}" for t, c in breakdowns[0]
+                )
+                _set_status(
+                    f"Optimization complete (Hierarchy): "
+                    f"{best_summary} of {_opt_run['n_sources']} sources.",
+                    "ok", clear_after=12,
+                )
+            else:
+                _set_status(
+                    f"Optimization complete: best score "
+                    f"{refined['score'][0]:.1f} of "
+                    f"{_opt_run['n_sources']} sources.",
+                    "ok", clear_after=10,
+                )
         _opt_run["phase"] = "done"
         return
 
@@ -8006,6 +9600,24 @@ def on_optimize():
         _cent_full[keep] if keep is not None else _cent_full
     )
 
+    # ---- Multi-config observation budget (v1.4.0) ----
+    # n_pass = how many configs the optimizer should plan (1 or 2). When
+    # 2, it runs sequential-greedy: optimize config 1 (full budget), then
+    # optimize config 2 with the config-1 best's observed sources charged
+    # against their cap. effective_max[i] = per-source override (Catalog
+    # max_configs) if set, else the optimizer-modal global default (blank
+    # = unlimited → +inf).
+    n_pass = max(1, min(2, int(mpt_num_configs_spinner.value or 1)))
+    _gmax_text = (opt_global_max_configs_input.value or "").strip()
+    try:
+        global_max = float(_gmax_text) if _gmax_text else np.inf
+    except ValueError:
+        global_max = np.inf
+    per_src_max = _slice_or_default(
+        getattr(cat, "max_configs", None), np.nan, float)
+    effective_max = np.where(np.isfinite(per_src_max), per_src_max,
+                             global_max)
+
     # Build the evaluator now so the heavy CloughTocher Delaunay step
     # happens before we show the modal — the user sees the bar start
     # at 0 % and advance, instead of staring at a frozen 0 % for 2 s.
@@ -8083,6 +9695,15 @@ def on_optimize():
         "protect_mask": protect_mask_evaluator,
         "protect_mode_idx": protect_mode_idx,
         "protect_threshold": opt_protect_threshold_input.value,
+        # ── Multi-config (v1.4.0) ──
+        "n_pass": n_pass,            # 1 or 2 (= requested config count)
+        "pass": 1,                   # current pass
+        "n_total": n_total,          # grid points (for pass-2 grid reset)
+        "effective_max": effective_max,
+        "pass1_results": None,       # stored after pass 1
+        # Per-config evaluator budgets used by Apply: config 0 → None
+        # (no budget), config 1 → the pass-2 budget mask.
+        "budgets": {0: None},
     })
 
     # Close the config modal now that we've kicked off the run; the
@@ -8537,6 +10158,11 @@ aim_tab = TabPanel(title="Pointing", child=column(
               "dialog. Results land in the same modal as before.</small>"),
         width=SIDEBAR_W - 20),
     opt_open_btn,
+    Div(text="<b>MPT configurations</b> "
+             "<small>(APT-style; each is a separate exposure)</small>"),
+    row(mpt_num_configs_spinner, mpt_config_select, spacing=10),
+    mpt_active_config_div,
+    mpt_view_btn,
     width=SIDEBAR_W - 20,
 ))
 
@@ -8666,6 +10292,8 @@ curdoc().add_root(opt_advanced_modal_backdrop)
 curdoc().add_root(opt_advanced_modal_card)
 curdoc().add_root(opt_config_modal_backdrop)
 curdoc().add_root(opt_config_modal_card)
+curdoc().add_root(mpt_view_modal_backdrop)
+curdoc().add_root(mpt_view_modal_card)
 curdoc().add_root(cat_edit_modal_backdrop)
 curdoc().add_root(cat_edit_modal_card)
 curdoc().add_root(cat_constraints_modal_backdrop)
@@ -8745,6 +10373,7 @@ def _collect_prefs() -> dict:
         "stats_bar_order": list(stats_bar_choice.value or []),
         "catalog_hover_order": list(catalog_hover_choice.value or []),
         "help_visible": bool(help_div.visible),
+        "default_num_configs": int(mpt_num_configs_spinner.value or 1),
     }
 
 
@@ -8861,6 +10490,13 @@ def _apply_prefs(prefs: dict) -> None:
                 help_panel.width = HELPPANEL_W if v else 130
             except Exception:  # noqa: BLE001
                 pass
+        if "default_num_configs" in prefs:
+            try:
+                v = max(1, min(2, int(prefs["default_num_configs"])))
+                mpt_num_configs_spinner.value = v
+                _ensure_n_configs(v)
+            except (ValueError, TypeError):
+                pass
     finally:
         _prefs_save_suppress["flag"] = False
 
@@ -8903,6 +10539,7 @@ overlay_alpha_slider.on_change("value", _save_current_prefs)
 overlay_stroke_slider.on_change("value", _save_current_prefs)
 stats_bar_choice.on_change("value", _save_current_prefs)
 catalog_hover_choice.on_change("value", _save_current_prefs)
+mpt_num_configs_spinner.on_change("value", _save_current_prefs)
 # The help-panel toggle button already has `on_help_toggle` bound;
 # adding `_save_current_prefs` as a SECOND on_click means both fire
 # on every click — the first toggles the panel state, the second

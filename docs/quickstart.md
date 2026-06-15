@@ -7,7 +7,8 @@ A two-minute tour. Assumes you've already run `pip install jwst-vmpt`
 
 ```bash
 vmpt
-# browser opens at http://localhost:5006/app
+# browser opens at http://localhost:5099/vmpt by default
+# pass --port to use a different port
 ```
 
 If a tab doesn't open automatically, visit the URL yourself.
@@ -30,8 +31,10 @@ If you haven't downloaded the examples yet, run
 vmpt examples download
 ```
 
-from a directory of your choice (the tarball is fetched from the
-matching GitHub release).
+(from any working directory — since v1.3.1 the tarball lands in
+`~/.vmpt/examples/`, which the buttons search automatically). See
+[Troubleshooting](troubleshooting.md) if the buttons stay dead
+after the download finishes.
 
 ## 3. Aim the MSA
 
@@ -66,6 +69,11 @@ In the **Pointing** tab, click `Open optimizer…`. Choose a method
 optional collision protection, then `Run optimization`. The top-10
 solutions appear in a results table; click `Apply #N` to set the
 pointing and auto-open slitlets for the matched targets.
+
+Planning **two exposures**? Bump *Number of configs* to 2 (beneath the
+optimizer) — one Run then returns a complete 2-config plan, and *Max
+configs per source* = 1 keeps the second config from re-observing the
+first's targets. See [Multiple configurations](multiconfig.md).
 
 ## 6. Save / share
 

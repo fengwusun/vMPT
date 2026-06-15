@@ -30,17 +30,28 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   between) — the conflict propagates along the colliding slitlets'
   entire dispersion bands. Alpha stacks with the number of dispersing
   sources hitting each shutter. Undo / redo at will.
-- **APT / eMPT-ready export** — write an MPT_plan.json + .cat
-  bundle that loads straight into APT, plus the three CSVs that
-  feed the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
+- **Multiple MPT configurations** (`v1.4.0`) — plan up to two
+  APT-style MPT configs (each its own pointing + shutters). The
+  optimizer **auto-produces both at once** (sequential-greedy) with a
+  per-source *max-configs* cap so the second config finds new targets;
+  a one-click top-bar chip switches the config you're editing (idle
+  configs draw as faint dashed outlines in their own colour). A
+  **MPT catalog viewer** lists every selected source with its
+  wavelength coverage + detector-gap, and shutters can hold more than
+  one source.
+- **APT / eMPT-ready export** — write a bundle (target-prefixed
+  `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
+  generated `README.md` of the import steps) that loads straight into
+  APT, plus the files that feed the
+  [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
 - **Sharing** — save the whole session as a JSON file, send it to a
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-188%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-234%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.3.1-blueviolet)
+![release](https://img.shields.io/badge/release-v1.4.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -517,25 +528,35 @@ pointing (instead of recentering on the image).
 ## Bundle output
 
 When you click **Save session** or **Export eMPT bundle**, vMPT
-writes a directory with six files. The prefixes telegraph the role:
+writes a directory. The two APT-facing files are **target-prefixed**
+(`<catalog>` = your loaded catalog's name) so it's obvious which file
+APT/MPT loads, and a generated **`README.md`** gives the import steps
+filled in for that run:
 
 | File | Role | Format |
 |---|---|---|
-| **`MPT_plan.json`** | APT MPT plan — load via APT MOS → MSA Planner | APT MPT JSON, matches the reference schema field-for-field |
-| **`<catalog>.cat`** | APT-importable Target List — name matches the user's catalog (or `MPT_catalog.cat` if none was loaded) | ASCII, tab-separated, `#`-header with the JDox-recognized labels (`ID`, `RA`, `DEC`, `Weight`, `Primary`, `Label`). The `Label` column carries `real` or `vMPT_synth` so you can tell which rows came from your input catalog. |
-| **`vMPT_workspace.json`** | vMPT-only state — per-shutter `target_id`+`role`, highlighted set, image / sidecar / catalog paths, slitlet height, exact V3 PA | vMPT-internal JSON |
+| **`<catalog>_APT_catalog.cat`** | APT **MSA source catalog** — import into APT | ASCII, tab-separated, `#`-header with JDox-recognized labels: `ID RA DEC Weight Primary [Magnitude] [Redshift] Label`. **Weight** = source weight (falls back to priority). **Primary** = `1` for input-catalog sources, `0` for vMPT-opened slitlets with no catalog source. **Magnitude/Redshift** carried from your catalog when present. **Label** keeps your original ID. |
+| **`<catalog>_MPT_plan.json`** | APT MPT plan — *Plans → Import Plan(s)* | APT MPT JSON; `name` is `vmpt-<catalog>-<timestamp>`, `aperturePA` rounded to 5 dp |
+| **`README.md`** | The import steps below, with this bundle's exact filenames | Markdown |
+| **`vMPT_workspace.json`** | vMPT-only state — per-shutter `target_id`+`role`, highlighted set, paths, slitlet height, exact V3 PA | vMPT-internal JSON |
 | **`eMPT_observed_targets.cat`** | eMPT-style target list | eMPT format |
 | **`eMPT_pointing_summary.txt`** | eMPT-style pointing summary | eMPT format |
 | **`eMPT_shutter_mask.csv`** | 730×342 MSA mask, byte-compatible with eMPT's writer (`shutter_routines_new.f90`) | eMPT format |
 
+A multi-config plan also writes a `config_N/` subfolder per pointing.
+
 ### Loading the bundle into APT
 
-1. **Import the target list**: APT → *Targets → Target Lists → Import…*
-   → select the `<catalog>.cat` file. APT names the list after the
-   file stem; that stem matches `catalog.name` inside `MPT_plan.json`.
-2. **Load the plan**: APT → MOS template → *MSA Planner → Load Plan*
-   → select `MPT_plan.json`. APT pairs the plan with the Target List
-   imported in step 1.
+1. **Import the source catalog**: APT → **Import MSA Source Catalog**.
+   Set **File to Import** to `<catalog>_APT_catalog.cat`, type the
+   **Catalog Name** (the `.cat` stem — it matches `catalog.name` in the
+   plan), and set **File Format** to **Whitespace Separated** → Import.
+2. **Import the plan**: **MSA Planning Tool → Plans** tab → in **Plan
+   Selection** click **Import Plan(s)** → select
+   `<catalog>_MPT_plan.json`. Each config loads as its own **Pointings**
+   entry; click **Create Observation** (or **Update Observation**).
+3. **Finish the design**: set the **Nod Pattern** column to **3-Shutter
+   Slitlet** (vMPT plans 3-shutter slitlets), then set exposures/dithers.
 
 ### Loading the bundle back into vMPT
 

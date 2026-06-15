@@ -39,7 +39,7 @@ is padded with spaces to that width to match the reference byte-for-byte.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
@@ -61,13 +61,22 @@ class Pointing:
 
 @dataclass
 class OpenShutter:
-    """A user-commanded open shutter."""
+    """A user-commanded open shutter.
+
+    ``target_id`` is the slitlet's *primary* source (the anchor) and is kept
+    for backward compatibility / APT primaryIds. ``target_ids`` lists *every*
+    catalog source whose footprint falls inside this one shutter — usually 0
+    or 1, but two very close sources can share a shutter, and v1.4.0 records
+    all of them (one output row each). Snapshotted at open-time so it is
+    stable even after the pointing later changes.
+    """
 
     q: int
     s: int
     d: int
     target_id: int | str | None = None
     role: str = "target"
+    target_ids: list = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -114,32 +123,62 @@ class OpenShutter:
 # APT carries through to hover / display.
 
 
-_MPT_CAT_HEADER = "# ID\tRA\tDEC\tWeight\tPrimary\tLabel"
+# Missing-value sentinels for the optional APT-recognized columns. APT
+# validates these as real numbers and REJECTS "NaN" ("…does not appear to
+# be a Magnitude"), so a finite "no-data" sentinel is written instead:
+# 99.9 = unmeasurably faint magnitude; -1 = no redshift. Both are the
+# conventional astronomical "not measured" flags and import cleanly.
+MISSING_MAG = 99.9
+MISSING_Z = -1.0
+
+
+def _finite_or_none(v) -> float | None:
+    """float(v) if finite, else None (treats NaN / '' / non-numeric as None)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if np.isfinite(f) else None
 
 
 def write_mpt_catalog(path: str, targets: list[dict]) -> None:
     """Write a target list in APT MPT-importable format (tab-separated).
 
-    `targets` is a list of dicts each containing:
+    Each dict in `targets`:
       • ``No_cat`` (int ID) — required
       • ``ra_deg``, ``dec_deg`` — required, decimal degrees
-      • ``Pr``    — weight (int); defaults to 1
-      • ``label`` — text in the Label column; defaults to "real". Use
-                    "vMPT_synth" for entries we made up for unmatched
-                    slitlets; the original catalog's label/name if you
-                    have it.
-
-    All rows are written as primaries (Primary=1); the user can edit
-    the column later to demote rows to fillers (Primary=0).
+      • ``Weight`` — APT's ranking weight (int). Falls back to ``Pr``
+        (priority) then 1. (APT's MSA catalog format has a ``Weight``
+        column but no ``Priority`` column, so priority rides here when no
+        separate weight exists.)
+      • ``Primary`` — 1 = source from the user's input catalog;
+        0 = a slitlet vMPT opened that had no catalog match. Defaults 1.
+      • ``Magnitude`` / ``Redshift`` — optional floats carried from the
+        input catalog. The column is emitted only when at least one row
+        has a finite value; missing cells are filled with a finite
+        sentinel (``99.9`` mag / ``-1`` redshift, NOT ``NaN`` — APT
+        rejects NaN) so the whitespace importer keeps a constant column
+        count.
+      • ``label`` — Label column text; defaults to "real". "vMPT_synth"
+        marks an entry we made up for an unmatched slitlet.
     """
-    lines = [_MPT_CAT_HEADER]
+    has_mag = any(_finite_or_none(t.get("Magnitude")) is not None
+                  for t in targets)
+    has_z = any(_finite_or_none(t.get("Redshift")) is not None
+                for t in targets)
+    cols = ["ID", "RA", "DEC", "Weight", "Primary"]
+    if has_mag:
+        cols.append("Magnitude")
+    if has_z:
+        cols.append("Redshift")
+    cols.append("Label")
+    lines = ["# " + "\t".join(cols)]
     for t in targets:
         # `No_cat` MUST be coerce-able to int — APT MPT expects the ID
-        # column to be integer-typed. Caller is responsible for deriving
-        # an integer from any source-side string ID (see `on_export`
-        # which extracts the longest digit run, e.g. "RJ0600-10274-P0"
-        # → 10274). Anything we can't cast raises a clear error rather
-        # than producing a malformed `.cat`.
+        # column to be integer-typed. Caller derives an integer from any
+        # source-side string ID (see `on_export`'s digit-run extraction,
+        # e.g. "RJ0600-10274-P0" → 10274). Anything we can't cast raises a
+        # clear error rather than producing a malformed `.cat`.
         try:
             no_cat = int(t["No_cat"])
         except (ValueError, TypeError) as e:
@@ -147,14 +186,21 @@ def write_mpt_catalog(path: str, targets: list[dict]) -> None:
                 f"MPT catalog ID must be an integer; got {t['No_cat']!r}"
             ) from e
         primary = int(t.get("Primary", 1))
-        weight = int(t.get("Pr", 1))
+        weight = int(round(float(t.get("Weight", t.get("Pr", 1)))))
         ra = float(t["ra_deg"])
         dec = float(t["dec_deg"])
         label = str(t.get("label", "real")) or "real"
         label = label.replace("\t", " ").replace("\n", " ").strip() or "real"
-        lines.append(
-            f"{no_cat}\t{ra:.10f}\t{dec:.10f}\t{weight}\t{primary}\t{label}"
-        )
+        row = [str(no_cat), f"{ra:.10f}", f"{dec:.10f}",
+               str(weight), str(primary)]
+        if has_mag:
+            m = _finite_or_none(t.get("Magnitude"))
+            row.append(f"{MISSING_MAG:.1f}" if m is None else f"{m:.4f}")
+        if has_z:
+            z = _finite_or_none(t.get("Redshift"))
+            row.append(f"{MISSING_Z:.1f}" if z is None else f"{z:.5f}")
+        row.append(label)
+        lines.append("\t".join(row))
     with open(path, "w") as f:
         f.write("\n".join(lines) + "\n")
 

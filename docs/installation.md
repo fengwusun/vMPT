@@ -20,10 +20,21 @@ vmpt --jpg img.jpg --wcs wcs.fits --catalog targets.csv          # JPG + WCS pai
 vmpt examples download                                           # grab example_a370 + example_r0600
 ```
 
-The wheel itself is ~20 MB (the required MSA grid + per-shutter
-dispersion table). The two example datasets (~64 MB combined) are
-fetched on demand via `vmpt examples download` and dropped into the
-current directory; they are **not** bundled in the wheel.
+The wheel itself is ~20 MB (includes the MSA grid + per-shutter
+dispersion table with all 9 supported disperser/filter combos).
+The two example datasets (~70 MB combined) are fetched on demand
+via `vmpt examples download` and dropped into **`~/.vmpt/examples/`**
+(stable per-user cache, since v1.3.1). The in-app "Load Abell 370
+example" and "Load RXCJ0600 example" buttons find them there
+automatically — no need to run vmpt from a particular working
+directory.
+
+For sysadmins or shared machines, the cache location is overridable:
+
+```bash
+VMPT_EXAMPLES_DIR=/data/shared/vmpt_examples vmpt examples download
+VMPT_EXAMPLES_DIR=/data/shared/vmpt_examples vmpt           # app reads the same env var
+```
 
 ## From source (developers)
 
@@ -32,7 +43,7 @@ git clone https://github.com/fengwusun/vMPT.git
 cd vMPT
 pip install -e .            # editable install, picks up local edits
 ./run.sh                    # same as `vmpt` after install
-pytest tests/               # 183 passed, 5 skipped
+pytest tests/               # 188 passed, 5 skipped
 ```
 
 ### STScI's `stenv`

@@ -64,12 +64,17 @@ DROP_REQUIRED_LAM = "required_lam"
 DROP_NO_GAP       = "no_gap"
 DROP_EXTEND_BLUE  = "extend_blue"
 DROP_EXTEND_RED   = "extend_red"
+# v1.4.0 multi-config: a source whose max-observation budget is already
+# spent in the other config(s) can't be re-picked in the config being
+# optimized. Dropped before the collision / spectral rules run.
+DROP_BUDGET       = "budget"
 DROP_REASONS = (
     DROP_COLLISION,
     DROP_REQUIRED_LAM,
     DROP_NO_GAP,
     DROP_EXTEND_BLUE,
     DROP_EXTEND_RED,
+    DROP_BUDGET,
 )
 
 
@@ -386,6 +391,13 @@ class PointingEvaluator:
         # over the global ``centration`` argument for that one source —
         # even when it's a laxer level. Empty / None cells use the global.
         centration_per_target: Optional[np.ndarray] = None,
+        # v1.4.0+: multi-config observation budget. Length-N boolean
+        # array — True = the source still has budget (may be picked in
+        # the config being optimized), False = its max-observation cap is
+        # already spent in the other config(s), so it is dropped before
+        # any scoring. None = all sources have budget (single-config /
+        # unlimited behaviour, identical to ≤1.3.x).
+        budget_remaining: Optional[np.ndarray] = None,
     ):
         self.ra = np.asarray(ra_sources, dtype=float)
         self.dec = np.asarray(dec_sources, dtype=float)
@@ -422,6 +434,20 @@ class PointingEvaluator:
                 # Unrecognised label → silently leaves the global
                 # buffer in place (defensive — the loader/UI already
                 # normalises, this is just belt-and-braces).
+        # Multi-config observation budget (v1.4.0). Default: every source
+        # has budget. A False entry removes that source from this config's
+        # candidate pool before scoring.
+        if budget_remaining is None:
+            self._budget = np.ones(n_src, dtype=bool)
+            self._budget_enabled = False
+        else:
+            self._budget = np.asarray(budget_remaining, dtype=bool)
+            if self._budget.size != n_src:
+                raise ValueError(
+                    f"budget_remaining size {self._budget.size} != "
+                    f"ra_sources size {n_src}"
+                )
+            self._budget_enabled = not bool(self._budget.all())
         self.slit_length = int(slit_length)
         if operable is None:
             operable_loaded, reason_loaded = load_operability()
@@ -816,6 +842,14 @@ class PointingEvaluator:
         tp = np.where(operable_mask & centered, tp, 0.0)
         detected = tp > 0
         reasons: dict = {r: 0 for r in DROP_REASONS}
+
+        # Multi-config budget (v1.4.0): drop sources already observed up
+        # to their cap in the other config(s), before any other rule.
+        if self._budget_enabled:
+            before = int(detected.sum())
+            detected = detected & self._budget
+            reasons[DROP_BUDGET] = before - int(detected.sum())
+            tp = np.where(detected, tp, 0.0)
 
         if not (self._protect_enabled or self._constraint_enabled):
             return detected, tp, (quad, s_frac, d_frac), reasons

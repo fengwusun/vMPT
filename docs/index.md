@@ -7,8 +7,11 @@
 installation
 quickstart
 optimizer
+multiconfig
 catalogs
+spec_overlap
 exporting
+troubleshooting
 api
 changelog
 ```
@@ -42,9 +45,11 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   touch (boundary rows adjacent, no operable row between) — the
   conflict propagates along both slitlets' entire dispersion
   bands, matching APT MPT.
-- **APT- / eMPT-ready export** — write an MPT_plan.json + .cat
-  bundle that loads straight into APT, plus the three CSVs that
-  feed the [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
+- **APT- / eMPT-ready export** — write a bundle (target-prefixed
+  `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
+  generated `README.md` of the import steps) that loads straight into
+  APT, plus the files that feed the
+  [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
 - **Sharing** — save the whole session as a JSON file, send it
   to a collaborator, and they pick up exactly where you left off.
 
@@ -63,11 +68,19 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 * - **[MSA pointing optimizer](optimizer.md)**
   - Democracy / Meritocracy / Hierarchy + shutter-collision
     protection.
+* - **[Multiple configurations](multiconfig.md)**
+  - Plan up to two APT-style MPT configs, the auto-both optimizer, the
+    max-configs cap, the MPT catalog viewer, and multi-source shutters.
 * - **[Catalogs](catalogs.md)**
   - CSV / ASCII / FITS columns, multi-catalog stacking, weights,
     priorities.
+* - **[Spec-overlap colours](spec_overlap.md)**
+  - Pink / orange / purple: what each colour means, how the
+    detector-pixel collision check works, per-disperser behaviour.
 * - **[Exporting & sharing](exporting.md)**
   - APT MPT plan, eMPT bundle, session JSON.
+* - **[Troubleshooting](troubleshooting.md)**
+  - Common install + runtime issues with their one-line fixes.
 * - **[API reference](api.md)**
   - `vmpt.optimizer`, `vmpt.msa`, `vmpt.wavelengths`, …
 * - **[Changelog](changelog.md)**

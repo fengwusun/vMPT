@@ -69,6 +69,15 @@ Click `Edit catalog…` in the Input tab. The pop-up table lets you:
   `Compute p from w`).
 - Edit per-target spectral constraints via the **Constraints…**
   button at the end of each row (v1.3.0+, see below).
+- **Bulk-set `max_configs` by rule** (v1.4.0+) — *Set max configs = N
+  for sources where `<condition>`*, where `<condition>` is a sandboxed
+  boolean expression over any catalog column, e.g.
+  `(mag_f444w > 27) & (z > 6)`. Combine tests with `&` / `|` / `~` and
+  parenthesise each; functions `abs`, `log10`, `log`, `sqrt`, `exp`,
+  `isin` are available. The expression is **syntax-checked before it's
+  applied** — unknown columns and bad syntax are reported inline and
+  nothing changes; only matching rows are updated. See
+  [Multiple configurations › the max-configs cap](multiconfig.md#the-max-configs-cap-avoiding-duplicate-pointings).
 - Save as CSV (standalone copy) or `Apply changes & close` (commit
   to the in-memory catalog).
 
@@ -124,6 +133,13 @@ specific source:
   ignore this setting."*) so the overrides aren't invisible at
   run time.
 
+`Max MPT configs` (v1.4.0+)
+: How many [MPT configs](multiconfig.md) may observe this source —
+  `(use global)`, `1`, or `2`. Overrides the optimizer's global
+  *Max configs per source* default for this one row. Use it to pin a
+  key target into both configs (`2`) or to keep a source single-config
+  (`1`) regardless of the global setting.
+
 When you click **Apply** the popover's values get written into the
 editor's working copy and a single undo entry is pushed. The Edit…
 button colour flips to blue for that row.
@@ -140,7 +156,7 @@ two clicks:
 3. On reload, point the **Catalog path** at that CSV. Constraints
    come back exactly as written.
 
-The CSV writer emits six extra columns when any row has a
+The CSV writer emits these extra columns when any row has a
 constraint set:
 
 | Column | Type | Empty means |
@@ -151,6 +167,7 @@ constraint set:
 | `extend_red` | `1` / blank | False |
 | `protect` | `1` / blank | False |
 | `centration` | one of the 5 labels / blank | use global (no override) |
+| `max_configs` | `1` / `2` / blank | use global (no override) |
 
 When **no** row in the catalog has a constraint set, the writer
 **omits** these columns — the CSV stays in the v1.2.x format so

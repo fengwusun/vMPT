@@ -150,7 +150,7 @@ def tilt_slope_map(
     combo, or ``None`` if the table doesn't ship it.
 
     The map describes how much the spectrum's cross-dispersion row
-    drifts as a function of V2 distance from the open shutter:
+    drifts as a function of V2 distance from the open shutter::
 
         s_expected(ΔV2_arcsec) = s_open + slope * ΔV2_arcsec
 
@@ -162,16 +162,18 @@ def tilt_slope_map(
 
     Returns
     -------
-    (grid_rows, grid_cols, slope) or None
-        grid_rows: shape (Ngrid_r,) int16 — vMPT row centres (1..171)
-        grid_cols: shape (Ngrid_c,) int16 — vMPT col centres (1..365)
-        slope:     shape (4, Ngrid_r, Ngrid_c) float32 — tilt slope
-                   in rows per arcsec V2. NaN entries mean the shutter
-                   doesn't project onto either detector for this combo.
+    tuple or None
+        ``(grid_rows, grid_cols, slope)`` — its parts:
 
-        ``None`` when the precomputed table is missing or doesn't
-        ship tilt arrays for this combo (older builds) — callers
-        should fall back to slope = 0 (flat-row overlap check).
+        - ``grid_rows`` — (Ngrid_r,) int16, vMPT row centres (1..171)
+        - ``grid_cols`` — (Ngrid_c,) int16, vMPT col centres (1..365)
+        - ``slope`` — (4, Ngrid_r, Ngrid_c) float32, tilt slope in rows
+          per arcsec V2; NaN where the shutter projects onto neither
+          detector for this combo.
+
+        ``None`` when the precomputed table is missing or ships no tilt
+        arrays for this combo (older builds) — callers should fall back
+        to slope = 0 (flat-row overlap check).
     """
     tbl = _load_dispersion_table()
     if tbl is None:
@@ -537,7 +539,7 @@ def _bilinear_finite_aware(
 def primary_detector(
     disperser: str, filt: str, q: int, s: int, d: int,
 ) -> int:
-    """Per-shutter "primary detector" lookup. Returns:
+    """Per-shutter "primary detector" lookup. Returns::
 
         0  → spectrum's main body is on NRS1
         1  → spectrum's main body is on NRS2

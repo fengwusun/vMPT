@@ -59,11 +59,6 @@ Source centring
 : APT-style buffer (UNCONSTRAINED → TIGHTLY_CONSTRAINED). Tighter
   classes can only **reduce** the number of successful placements.
 
-Priority cutoff ≤
-: Restrict the optimizer to catalog rows with `priority ≤ X` (e.g.
-  P0/P1 first; do fillers by hand later). Different from the
-  collision-protect threshold below.
-
 ### Advanced settings
 
 Behind `Advanced settings…`:
@@ -83,6 +78,21 @@ Source σ (arcsec)
 
 APT θ (DVA, deg)
 : APT-style differential velocity aberration. Default 90 = no shift.
+
+#### Source selection
+
+Priority cutoff ≤
+: Restrict the optimizer to catalog rows with `priority ≤ X` (e.g.
+  P0/P1 first; do fillers by hand later). Different from the
+  collision-protect threshold below. Blank = all rows.
+
+Max configs per source
+: How many MPT configs may observe each source. **Defaults to 1**, so
+  in [multi-config mode](multiconfig.md) Config 2 must find sources
+  Config 1 didn't take (no duplicate pointings). Blank = unlimited; a
+  per-source override (Constraints… popover, `max_configs` column, or
+  the catalog-editor rule) wins over this default. No effect with a
+  single config.
 
 ## Shutter-collision protection
 

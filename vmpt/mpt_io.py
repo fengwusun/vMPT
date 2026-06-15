@@ -68,7 +68,7 @@ class MPTPlan:
 def parse_mpt_json(path: str) -> list[MPTPlan]:
     """Parse an APT/MPT JSON plan file into one MPTPlan per `configs` entry.
 
-    APT's MSA-Planner exports JSON with this shape:
+    APT's MSA-Planner exports JSON with this shape::
 
         {
           "aperturePA": <degrees>,         # NIRSpec aperture PA on sky
