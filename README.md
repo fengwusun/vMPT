@@ -551,10 +551,19 @@ A multi-config plan also writes a `config_N/` subfolder per pointing.
    Set **File to Import** to `<catalog>_APT_catalog.cat`, type the
    **Catalog Name** (the `.cat` stem — it matches `catalog.name` in the
    plan), and set **File Format** to **Whitespace Separated** → Import.
+
+   ![APT MSA Source Importer](docs/apt_screenshot_load_catalog.png)
+
 2. **Import the plan**: **MSA Planning Tool → Plans** tab → in **Plan
    Selection** click **Import Plan(s)** → select
    `<catalog>_MPT_plan.json`. Each config loads as its own **Pointings**
    entry; click **Create Observation** (or **Update Observation**).
+
+   ![APT MSA Planning Tool — Plans](docs/apt_screenshot_load_MPT_plan.png)
+
+   *A vMPT v1.4.0 two-config plan imported into MPT — its two pointings
+   (`c1e1`, `c2e1`) appear under **Pointings**.*
+
 3. **Finish the design**: set the **Nod Pattern** column to **3-Shutter
    Slitlet** (vMPT plans 3-shutter slitlets), then set exposures/dithers.
 
