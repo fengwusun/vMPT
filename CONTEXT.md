@@ -160,7 +160,7 @@ even if the user hasn't opened them.
 | `slitlet_height` | N ∈ {1, 2, 3, 5}. Determines `_slitlet_offsets` and toggle-off siblings. |
 | `configs` | **(v1.4.0)** List of config dicts, each `{name, open_shutters, highlighted, history, ra_deg, dec_deg, pa_v3}`. One MPT configuration per entry; pointing is per-config (`None` = inherit current). |
 | `active_config` | **(v1.4.0)** Index into `configs` the user is editing. |
-| `n_configs` | **(v1.4.0)** How many configs are "live" (1 or 2). |
+| `n_configs` | **(v1.4.0)** How many configs are "live" (1–5; cap raised from 2 to 5 in v1.5.0). |
 | `open_shutters` | `dict[(q, s, d) → OpenShutter]`. **Live alias** of `configs[active_config]["open_shutters"]` — so the ~40 in-place readers are untouched. Wholesale reassignments MUST go through `_set_open_shutters()` to keep the alias and the config slot in sync. |
 | `highlighted` | `set[(q, s, d)]` — cyan-edge visual flag, not exported. Live alias of the active config (`_set_highlighted`). |
 | `history` | Undo stack (capped at 50). Per-config; live alias of the active config (`_set_history`). |
@@ -174,9 +174,10 @@ Two module-local dicts hold transient work:
 - `_opt_run` (in `main.py`) — in-flight optimizer state machine for
   the chunked grid + DE driver. Cleared on Close / when the run
   finishes / on a fresh run.
-- `_inverse_cache` (in `app/optimizer.py`) — per-quadrant
-  CloughTocher2D interpolators (Axy → fractional shutter indices).
-  Lazy-built on first use (~2 s for the Delaunay triangulations).
+- `_inverse_cache` (in `app/optimizer.py`) — per-quadrant (ax, ay) →
+  fractional-shutter maps: degree-4 polynomial inverses by default
+  (v1.5.0), CloughTocher2D interpolators as an automatic fallback.
+  Lazy-built on first use.
 
 ---
 
@@ -565,11 +566,15 @@ McCarty, Wu; CfA/Harvard), itself derived from ESA's eMPT
    (RA, Dec) → MSA aperture plane (ax, ay) in arcsec. Includes the
    APT DVA correction (parameter `theta_deg`, default 90 = no shift)
    and the PA + intra-MSA rotation.
-2. **`axy_to_shutter`** — per-quadrant `scipy.interpolate.
-   CloughTocher2DInterpolator` maps (ax, ay) → fractional shutter
-   indices `(quad, s_frac, d_frac)`. Built lazily on first call
-   (Delaunay triangulation over ~62 k points per quadrant, ~2-3 s
-   one-time). Cached at module level via `_inverse_cache`.
+2. **`axy_to_shutter`** — per-quadrant map of (ax, ay) → fractional
+   shutter indices `(quad, s_frac, d_frac)`. **(v1.5.0)** Now a
+   **degree-4 polynomial inverse** fit once per quadrant from the MSA
+   grid (in normalised coords), with a 4-corner quadrilateral hull gate
+   reproducing the off-field rejection — ~20–40× faster than the
+   previous `scipy.interpolate.CloughTocher2DInterpolator`, which is
+   retained as an automatic fallback (and for the equivalence tests).
+   Built lazily on first call and cached at module level via
+   `_inverse_cache` (`USE_POLY_INVERSE` toggles the path).
 3. **`PointingEvaluator.evaluate`** — combines the above with the
    CRDS operability mask (incl. configurable 3-shutter vertical
    slit), an APT-style centration buffer (`CENTRATION_BUFFERS` dict
@@ -747,16 +752,20 @@ defeats outer-page CSS for that one corner).
 ### Performance
 
 For a typical run (~500 sources, 20³ = 8 000 grid pointings, top-10
-DE refinement) total wall time is **~5–15 s** depending on machine.
-Grid dominates; per-pointing eval is ~1 ms after the
-CloughTocher2D triangulation is cached.
+DE refinement) total wall time was **~5–15 s** with the CloughTocher
+map. **(v1.5.0)** The polynomial-inverse shutter map makes the
+per-pointing eval **~20–40× faster**, so a single-config run now
+finishes in roughly a second and a five-config plan (minutes before)
+in ~20 s. Grid still dominates; the shutter assignment is the part
+that sped up.
 
 ---
 
 ## CLI auto-load (`run.sh --args`)
 
 `run.sh` forwards `--port`, `--fits`, `--jpg`, `--wcs`,
-`--catalog` (repeatable) via Bokeh's `--args`. Inside main.py,
+`--catalog` (repeatable), and **`--v3pa` / `--apa`** (v1.5.0) via
+Bokeh's `--args`. Inside main.py,
 `_autoload_from_args` parses `sys.argv`, builds a **sequenced
 queue** of (image → catalogs) loaders, and invokes them via an
 explicit on_complete chain — each loader's `finally` block

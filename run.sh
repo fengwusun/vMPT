@@ -10,12 +10,15 @@
 #   --wcs PATH        WCS sidecar FITS for the JPG (must be paired with --jpg).
 #   --catalog PATH    Load this catalog file (CSV / ASCII / FITS).
 #                     May be repeated to layer multiple catalogs.
+#   --v3pa DEG        Initial V3 PA in degrees (e.g. --v3pa 209).
+#   --apa DEG         Initial NIRSpec aperture PA (APA = V3 PA + V3IdlYAngle);
+#                     --v3pa wins if both are given.
 #
 # Examples:
 #   ./run.sh
 #   ./run.sh --port 5010
 #   ./run.sh --fits example_a370/a370_f182m_f200w_f210m.fits
-#   ./run.sh --jpg image.jpg --wcs wcs.fits --catalog targets.csv
+#   ./run.sh --jpg image.jpg --wcs wcs.fits --catalog targets.csv --v3pa 209
 #   ./run.sh --catalog a.csv --catalog b.csv
 
 # Conda's activate hooks reference unset env vars (e.g. GFORTRAN on
@@ -38,6 +41,8 @@ FITS_PATH=""
 JPG_PATH=""
 WCS_PATH=""
 CATALOG_PATHS=()
+V3PA=""
+APA=""
 
 usage() {
     cat <<'EOF' >&2
@@ -47,6 +52,9 @@ Usage: ./run.sh [--port N] [--fits PATH] [--jpg PATH --wcs PATH] [--catalog PATH
   --jpg PATH        JPG/PNG image; REQUIRES --wcs alongside.
   --wcs PATH        Sidecar FITS holding the WCS for --jpg.
   --catalog PATH    Catalog (CSV / ASCII / FITS). Can be repeated.
+  --v3pa DEG        Initial V3 PA in degrees (e.g. --v3pa 209).
+  --apa DEG         Initial NIRSpec aperture PA (APA = V3 PA + V3IdlYAngle).
+                    --v3pa wins if both are given.
   -h, --help        Show this message.
 EOF
 }
@@ -68,6 +76,12 @@ while [[ $# -gt 0 ]]; do
         --catalog)
             [[ $# -ge 2 ]] || { echo "run.sh: --catalog requires a path" >&2; exit 2; }
             CATALOG_PATHS+=("$2"); shift 2 ;;
+        --v3pa)
+            [[ $# -ge 2 ]] || { echo "run.sh: --v3pa requires a number (deg)" >&2; exit 2; }
+            V3PA="$2"; shift 2 ;;
+        --apa)
+            [[ $# -ge 2 ]] || { echo "run.sh: --apa requires a number (deg)" >&2; exit 2; }
+            APA="$2"; shift 2 ;;
         -h|--help)
             usage; exit 0 ;;
         --)
@@ -115,6 +129,8 @@ APP_ARGS=()
 for c in "${RESOLVED_CATALOGS[@]:-}"; do
     APP_ARGS+=(--catalog "$c")
 done
+[[ -n "$V3PA" ]] && APP_ARGS+=(--v3pa "$V3PA")
+[[ -n "$APA" ]]  && APP_ARGS+=(--apa "$APA")
 
 CMD=(bokeh serve vmpt/
      --port "$PORT"

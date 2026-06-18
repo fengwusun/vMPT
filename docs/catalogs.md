@@ -135,10 +135,10 @@ specific source:
 
 `Max MPT configs` (v1.4.0+)
 : How many [MPT configs](multiconfig.md) may observe this source —
-  `(use global)`, `1`, or `2`. Overrides the optimizer's global
+  `(use global)` or `1`–`5`. Overrides the optimizer's global
   *Max configs per source* default for this one row. Use it to pin a
-  key target into both configs (`2`) or to keep a source single-config
-  (`1`) regardless of the global setting.
+  key target into several configs (e.g. `2`) or to keep a source
+  single-config (`1`) regardless of the global setting.
 
 When you click **Apply** the popover's values get written into the
 editor's working copy and a single undo entry is pushed. The Edit…
@@ -167,7 +167,7 @@ constraint set:
 | `extend_red` | `1` / blank | False |
 | `protect` | `1` / blank | False |
 | `centration` | one of the 5 labels / blank | use global (no override) |
-| `max_configs` | `1` / `2` / blank | use global (no override) |
+| `max_configs` | `1`–`5` / blank | use global (no override) |
 
 When **no** row in the catalog has a constraint set, the writer
 **omits** these columns — the CSV stays in the v1.2.x format so

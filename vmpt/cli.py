@@ -8,7 +8,8 @@ Two subcommands:
                           working directory.
 
 The default subcommand forwards the same flags as ``./run.sh``:
-``--port``, ``--fits``, ``--jpg``, ``--wcs``, ``--catalog``.
+``--port``, ``--fits``, ``--jpg``, ``--wcs``, ``--catalog``,
+``--v3pa``, ``--apa``.
 """
 
 from __future__ import annotations
@@ -44,7 +45,7 @@ def _serve(argv: list[str]) -> int:
     defaults (large WebSocket frame so big uploads don't truncate)."""
     # Split flags into "consumed by bokeh" and "forwarded to the app
     # via --args". `--port` is for bokeh; everything else (--fits,
-    # --jpg, --wcs, --catalog) is for vmpt/main.py's autoload.
+    # --jpg, --wcs, --catalog, --v3pa, --apa) is for the autoload.
     bokeh_flags: list[str] = []
     app_args: list[str] = []
     i = 0
@@ -53,7 +54,8 @@ def _serve(argv: list[str]) -> int:
         if tok == "--port" and i + 1 < len(argv):
             bokeh_flags += [tok, argv[i + 1]]
             i += 2
-        elif tok in ("--fits", "--jpg", "--wcs", "--catalog") and i + 1 < len(argv):
+        elif (tok in ("--fits", "--jpg", "--wcs", "--catalog", "--v3pa", "--apa")
+              and i + 1 < len(argv)):
             app_args += [tok, argv[i + 1]]
             i += 2
         elif tok in ("-h", "--help"):
@@ -148,24 +150,52 @@ def _examples_download(target_dir: str | None = None) -> int:
     return 0
 
 
+def _package_version() -> str:
+    """Best-effort vMPT version string.
+
+    Prefers the installed-package metadata (the usual case for the
+    ``vmpt`` console script); falls back to reading ``pyproject.toml``
+    next to the source tree so it also works when run uninstalled."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        try:
+            return version("jwst-vmpt")
+        except PackageNotFoundError:
+            pass
+    except Exception:
+        pass
+    try:
+        import tomllib
+        root = Path(__file__).resolve().parent.parent
+        with open(root / "pyproject.toml", "rb") as fh:
+            return tomllib.load(fh)["project"]["version"]
+    except Exception:
+        return "unknown"
+
+
 def _print_help() -> None:
     print(
         "Usage:\n"
         "  vmpt [--port N] [--fits PATH] [--jpg PATH --wcs PATH] \\\n"
-        "       [--catalog PATH]…\n"
+        "       [--catalog PATH]… [--v3pa DEG | --apa DEG]\n"
         "  vmpt examples download [DIR]\n"
+        "  vmpt --version\n"
         "  vmpt --help\n"
         "\n"
         "Start the vMPT Bokeh server (default) or fetch the example\n"
         "datasets. The serve subcommand accepts the same flags as\n"
         "./run.sh; --jpg requires --wcs, --fits is mutually exclusive\n"
         "with --jpg/--wcs, and --catalog may be repeated to stack\n"
-        "multiple catalogs."
+        "multiple catalogs. --v3pa / --apa set the initial roll in\n"
+        "degrees (APA = V3 PA + V3IdlYAngle); --v3pa wins if both given."
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in ("--version", "-version", "-V", "version"):
+        print(f"vmpt {_package_version()}")
+        return 0
     if argv and argv[0] == "examples":
         sub = argv[1] if len(argv) > 1 else ""
         if sub == "download":

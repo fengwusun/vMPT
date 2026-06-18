@@ -15,7 +15,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   mapping, and gnomonic projection are independently implemented;
   the search algorithm (grid → differential-evolution refine) is
   a simpler version than hMPT's. Three modes: Democracy (count),
-  Meritocracy (Σ weight), Hierarchy (strict priority tiers).
+  Meritocracy (Σ weight), Hierarchy (strict priority tiers). As of
+  `v1.5.0` the per-pointing shutter mapping uses a polynomial inverse
+  of the MSA map — ~20–40× faster than the previous interpolation, with
+  identical shutter assignments — so multi-config plans run in seconds.
 - **Shutter-collision protection** — mark high-priority targets
   whose spectra must not overlap any other source on the detector
   under the current Disperser / Filter. Slitlet-aware row buffer
@@ -30,12 +33,13 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   between) — the conflict propagates along the colliding slitlets'
   entire dispersion bands. Alpha stacks with the number of dispersing
   sources hitting each shutter. Undo / redo at will.
-- **Multiple MPT configurations** (`v1.4.0`) — plan up to two
-  APT-style MPT configs (each its own pointing + shutters). The
-  optimizer **auto-produces both at once** (sequential-greedy) with a
-  per-source *max-configs* cap so the second config finds new targets;
-  a one-click top-bar chip switches the config you're editing (idle
-  configs draw as faint dashed outlines in their own colour). A
+- **Multiple MPT configurations** (`v1.4.0`; up to **five** in
+  `v1.5.0`) — plan up to five APT-style MPT configs (each its own
+  pointing + shutters). The optimizer **auto-produces them all in one
+  run** (sequential-greedy) with a per-source *max-configs* cap so later
+  configs find new targets; a one-click top-bar chip switches the config
+  you're editing (idle configs draw as faint dashed outlines in their
+  own colour, one of five). A
   **MPT catalog viewer** lists every selected source with its
   wavelength coverage + detector-gap, and shutters can hold more than
   one source.
@@ -48,10 +52,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-234%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-238%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.4.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.5.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -67,7 +71,7 @@ orange if a user-pick does. Alpha stacks with the number of dispersing
 sources. Purple (Mask Conflict) fires when two open slitlets touch
 (boundary rows adjacent, no operable row between them) — the entire
 dispersion band of either slitlet promotes to purple. Left sidebar:
-image / aim / pick / MPT tabs. Right panel: rotating tip card +
+Input / Pointing / Settings / MPT tabs. Right panel: rotating tip card +
 quick-reference legend.*
 
 ---
@@ -92,8 +96,14 @@ The console script `vmpt` accepts the same flags as `run.sh`:
 vmpt --port 5010                                                 # different port
 vmpt --fits img.fits --catalog a.csv --catalog b.csv             # stack catalogs
 vmpt --jpg img.jpg --wcs wcs.fits --catalog targets.csv          # JPG + WCS pair
+vmpt --jpg img.jpg --wcs wcs.fits --v3pa 209                      # start at a given roll
 vmpt examples download                                           # fetch example_a370 + example_r0600
+vmpt --version                                                   # print version and exit
 ```
+
+`--v3pa DEG` sets the initial V3 position angle; `--apa DEG` sets it via
+the NIRSpec aperture PA instead (`APA = V3 PA + V3IdlYAngle`). `vmpt
+--version` (also `-version` / `-V`) prints the installed version.
 
 The wheel itself is ~20 MB (just the MSA grid + dispersion table).
 The two example datasets (~64 MB combined) are fetched on demand
@@ -140,7 +150,7 @@ pip install -r requirements.txt
 ### Verify the install
 
 ```bash
-pytest tests/    # 183 passed, 5 skipped; ~15 seconds
+pytest tests/    # 238 passed, 5 skipped; ~20 seconds
 ```
 
 If everything's green, the tool is ready. If `pytest` complains about
@@ -395,13 +405,12 @@ the user's purposes.
 
 ### Image: FITS
 
-In the **Input** tab, click the primary **Browse…** button to pick a
-FITS file from disk. If you prefer to paste a path directly, click
-**Edit path** to reveal the text input; the input also auto-reveals
-itself whenever a path is populated (so paths set by Browse, by
-``--fits`` on the command line, or by typing all stay visible).
-First HDU with image data is auto-selected; the WCS comes from that
-HDU's header.
+In the **Input** tab, click **📷 Load image…** to open the load dialog,
+keep the source on **FITS image**, and **Browse…** for a FITS file from
+disk (the chosen path shows in the field beneath). The dialog closes and
+the full-page spinner takes over while it loads. First HDU with image
+data is auto-selected; the WCS comes from that HDU's header. (You can
+also pass ``--fits PATH`` on the command line to open one at startup.)
 
 The figure has a fixed pixel aspect — the canvas is sized to the
 image's pixel W:H exactly, so 1 image pixel always renders as N×N
@@ -413,9 +422,10 @@ space surrounds it.
 
 For fields where you have a pretty RGB JPG but the WCS lives in a
 separate FITS header (this is what tools like
-[fitsmap](https://github.com/ryanhausen/fitsmap) produce), put the
-WCS-only FITS path in "Sidecar FITS path" and the JPG path in "JPG
-path". Order matters — set the sidecar first.
+[fitsmap](https://github.com/ryanhausen/fitsmap) produce), open
+**📷 Load image…**, switch the source to **JPG/PNG + WCS sidecar**, and
+Browse for the sidecar FITS first, then the JPG. Order matters — set the
+sidecar before the image.
 
 The JPG can be tens of millions of pixels; vMPT downsamples to ≤6000
 on the longest edge and rescales the WCS accordingly.
@@ -455,7 +465,8 @@ in real catalogs.
 
 #### Multi-catalog
 
-Click **Add** in the Input tab to layer multiple catalogs at once.
+Open **🎯 Load catalog…** and click **Add** to layer multiple catalogs
+at once (add several in a row without leaving the dialog).
 Each loaded catalog gets a coloured chip in the catalog list — its
 markers on the canvas use the same colour, so it's clear which
 catalog a target came from. Per-row checkbox toggles visibility;
@@ -561,8 +572,9 @@ A multi-config plan also writes a `config_N/` subfolder per pointing.
 
    ![APT MSA Planning Tool — Plans](docs/apt_screenshot_load_MPT_plan.png)
 
-   *A vMPT v1.4.0 two-config plan imported into MPT — its two pointings
-   (`c1e1`, `c2e1`) appear under **Pointings**.*
+   *A vMPT plan imported into MPT — here a two-config plan, its two
+   pointings (`c1e1`, `c2e1`) under **Pointings**; vMPT v1.5.0 plans up
+   to five configs, each loading as its own pointing.*
 
 3. **Finish the design**: set the **Nod Pattern** column to **3-Shutter
    Slitlet** (vMPT plans 3-shutter slitlets), then set exposures/dithers.

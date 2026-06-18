@@ -56,7 +56,7 @@ filenames for that run. The general flow:
    ![APT MSA Source Importer](apt_screenshot_load_catalog.png)
 
    *APT's MSA Source Importer — set File Format to "Whitespace Separated"
-   for a vMPT v1.4.0 `<catalog>_APT_catalog.cat`.*
+   for a vMPT `<catalog>_APT_catalog.cat`.*
 
 2. **Import the plan.** Open the **MSA Planning Tool → Plans** tab and, in
    the **Plan Selection** box, click **Import Plan(s)** → choose
@@ -66,9 +66,10 @@ filenames for that run. The general flow:
 
    ![APT MSA Planning Tool — Plans](apt_screenshot_load_MPT_plan.png)
 
-   *The imported vMPT v1.4.0 plan in MPT's **Plans** tab — a 2-config plan
-   shows its two pointings (`c1e1`, `c2e1`) under **Pointings**; use
-   **Create / Update Observation** to turn it into an APT observation.*
+   *The imported vMPT plan in MPT's **Plans** tab — here a 2-config plan
+   shows its two pointings (`c1e1`, `c2e1`) under **Pointings** (v1.5.0
+   plans up to five, each its own pointing); use **Create / Update
+   Observation** to turn it into an APT observation.*
 
 3. **Finish the design.** In the observation set the **Nod Pattern**
    column to **3-Shutter Slitlet** (vMPT plans 3-shutter slitlets), then

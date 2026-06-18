@@ -1,19 +1,21 @@
 # Multiple MPT configurations
 
-Since **v1.4.0** vMPT can plan up to **two MPT configurations** — each an
-independent pointing plus its own set of open shutters, exactly like
-APT/MPT, where a single MSA program can carry several configs. Two
-configs are two separate exposures: their spectra never collide with
-each other (only within a config), and a source can be split across
-them or deliberately repeated.
+vMPT can plan up to **five MPT configurations** — each an independent
+pointing plus its own set of open shutters, exactly like APT/MPT, where
+a single MSA program can carry several configs. (Two configs arrived in
+**v1.4.0**; the cap rose to five in **v1.5.0**.) Each config is a
+separate exposure: their spectra never collide with each other (only
+within a config), and a source can be split across them or deliberately
+repeated.
 
 ## The configs block (Pointing tab)
 
 Beneath **Open optimizer…** you'll find:
 
-- **Number of configs** — a spinner, 1 (default) or 2. Bumping it to 2
-  creates a second, empty config that starts at the current pointing.
-  Dropping back to 1 hides Config 2 but keeps its picks in memory.
+- **Number of configs** — a spinner, 1 (default) to 5. Bumping it
+  creates the extra, empty configs, each starting at the current
+  pointing. Dropping the count back down hides the higher configs but
+  keeps their picks in memory.
 - **Working on** — which config you're editing. Manual shutter clicks,
   the spec-overlap overlay, and the live status bar all act on the
   **active** config only. Switching configs swaps the pointing widgets
@@ -24,7 +26,8 @@ Beneath **Open optimizer…** you'll find:
 ### Which config am I editing?
 
 In multi-config mode the active config is shown three ways, all sharing
-one colour per config (**Config 1 = blue, Config 2 = magenta**):
+one colour per config (**1 = blue, 2 = magenta, 3 = green, 4 = orange,
+5 = violet**):
 
 - a bright **✎ CONFIG k / N** chip pinned to the always-visible top bar.
   The chip is also a **one-click switcher** — click it to cycle to the
@@ -38,35 +41,43 @@ one colour per config (**Config 1 = blue, Config 2 = magenta**):
 
 Each config remembers its own pointing, so you can:
 
-- put both configs at the **same** pointing but pick disjoint shutters
-  — the canonical way to observe two sources whose spectra would
+- put configs at the **same** pointing but pick disjoint shutters
+  — the canonical way to observe sources whose spectra would
   collide if opened together (split them across exposures); or
 - put them at **different** pointings to cover more of the field.
 
 The disperser/filter is shared across configs in this release.
 
-## Auto-producing both configs with the optimizer
+## Auto-producing all configs with the optimizer
 
-With **Number of configs = 2**, one click of **Run optimization**
-produces a complete 2-config plan using a *sequential-greedy* search:
+With **Number of configs = N** (up to 5), one click of **Run
+optimization** produces a complete N-config plan using a
+*sequential-greedy* search:
 
 1. Optimize **Config 1** over the full candidate pool.
 2. Charge Config 1 #1's observed sources against their
    max-observation budget.
-3. Optimize **Config 2** over whatever sources still have budget.
+3. Optimize **Config 2** over whatever sources still have budget,
+   then **Config 3** over the residual after that, … and so on
+   through Config N.
 
 The results modal then shows a **single combined table** — one row per
-*plan* (Config 1 #k + Config 2 #k), rendered as two lines (a C1 line and
-a C2 line) that share a **combined score** on the left, with each
-config's own score and ΔRA/ΔDec/ΔPA on its line. Above it sits a
-**✔ Apply recommended plan #1** button (fills both configs at once), and
-each row has its own **Apply** so you can pick a different pairing.
+*plan* (Config 1 #k + … + Config N #k), rendered as one colour-coded
+line per config that all share a **combined score** on the left, with
+each config's own score and ΔRA/ΔDec/ΔPA on its line. Above it sits a
+**✔ Apply recommended plan #1** button (fills every config at once), and
+each row has its own **Apply** so you can pick a different set.
 
 Hover any **Score** to see the top placed sources and, where a config
-dropped some, the breakdown by reason. A Config 2 line often shows a
-"**−K**" suffix — those are sources skipped because Config 1 already
-observed them under the max-configs cap; a one-line legend appears above
-the table whenever any plan drops sources.
+dropped some, the breakdown by reason. A later config's line often shows
+a "**−K**" suffix — those are sources skipped because an earlier config
+already observed them under the max-configs cap; a one-line legend
+appears above the table whenever any plan drops sources.
+
+> Running five passes is practical because the per-trial shutter
+> assignment uses a polynomial inverse of the MSA map (v1.5.0),
+> ~20–40× faster than the previous interpolation — see the
+> [optimizer notes](optimizer.md).
 
 All three methods behave exactly as designed — Democracy maximizes the
 count, Meritocracy the summed weight, Hierarchy the priority tiers — the
@@ -105,7 +116,7 @@ selected source across all live configs:
 
 | Column | Meaning |
 |---|---|
-| Cfg | which config — colour-coded (1 = blue, 2 = magenta) to match the chip |
+| Cfg | which config — colour-coded (1 blue, 2 magenta, 3 green, 4 orange, 5 violet) to match the chip |
 | Source ID | catalog id |
 | RA / Dec / Pri / Weight / Mag / z | from the loaded catalog |
 | λ_blue / λ_red | the spectrum's on-detector wavelength coverage (μm) for this source's shutter |

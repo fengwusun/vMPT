@@ -7,7 +7,7 @@ A two-minute tour. Assumes you've already run `pip install jwst-vmpt`
 
 ```bash
 vmpt
-# browser opens at http://localhost:5099/vmpt by default
+# browser opens at http://localhost:5006/vmpt by default
 # pass --port to use a different port
 ```
 
@@ -15,8 +15,8 @@ If a tab doesn't open automatically, visit the URL yourself.
 
 ## 2. Load an example
 
-In the **Input** tab (left sidebar), click one of the two example
-buttons:
+In the **Input** tab (left sidebar), click **📷 Load image…**, keep the
+source on **Example field**, and click one of the two example buttons:
 
 - **Load Abell 370 example** — JWST/NIRCam F182M + F200W + F210M
   three-band FITS (~42 MB). Includes a target catalog and an APT
@@ -70,10 +70,10 @@ optional collision protection, then `Run optimization`. The top-10
 solutions appear in a results table; click `Apply #N` to set the
 pointing and auto-open slitlets for the matched targets.
 
-Planning **two exposures**? Bump *Number of configs* to 2 (beneath the
-optimizer) — one Run then returns a complete 2-config plan, and *Max
-configs per source* = 1 keeps the second config from re-observing the
-first's targets. See [Multiple configurations](multiconfig.md).
+Planning **multiple exposures**? Bump *Number of configs* up to 5
+(beneath the optimizer) — one Run then returns a complete N-config plan,
+and *Max configs per source* = 1 keeps later configs from re-observing
+earlier ones' targets. See [Multiple configurations](multiconfig.md).
 
 ## 6. Save / share
 

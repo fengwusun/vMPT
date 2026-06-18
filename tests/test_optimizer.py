@@ -431,3 +431,146 @@ def test_flux_objective_uses_weights():
     # The two top-scoring pointings can differ; at minimum the best
     # absolute score numbers should differ (count vs weighted flux).
     assert r_num["score"][0] != pytest.approx(r_flux["score"][0])
+
+
+# ---------------------------------------------------------------------
+# Polynomial inverse map (fast path) — equivalence with CloughTocher
+# ---------------------------------------------------------------------
+
+
+@pytest.fixture
+def _restore_inverse_toggle():
+    """Save/restore the module-level USE_POLY_INVERSE flag so tests that
+    force the CloughTocher reference path don't leak state."""
+    import vmpt.optimizer as O
+    saved = O.USE_POLY_INVERSE
+    yield O
+    O.USE_POLY_INVERSE = saved
+
+
+def test_poly_inverse_builds_and_passes_self_check():
+    """The degree-4 polynomial inverse must fit the MSA grid to well
+    under a hundredth of a shutter (so the fast path is actually used,
+    not silently falling back to CloughTocher)."""
+    import vmpt.optimizer as O
+    O._poly_cache = None  # force a fresh fit
+    polys = O._build_poly_inverse()
+    assert polys is not None, "poly inverse failed its residual self-check"
+    assert len(polys) == 4
+
+
+def test_poly_inverse_matches_cloughtocher(_restore_inverse_toggle):
+    """Across a grid of pointings, the polynomial fast path must agree
+    with the CloughTocher reference: identical integer (q, s, d) for
+    every co-detected source, and ≥ 99.5 % detection agreement (the
+    only disagreements are sources at the convex-hull edge)."""
+    O = _restore_inverse_toggle
+    rng = np.random.default_rng(7)
+    ra0, dec0, pa0 = 53.16, -27.79, 110.0
+    cosd = np.cos(np.deg2rad(dec0))
+    n = 600
+    ras = ra0 + rng.uniform(-110, 110, n) / 3600.0 / cosd
+    decs = dec0 + rng.uniform(-110, 110, n) / 3600.0
+
+    def sweep(use_poly):
+        O.USE_POLY_INVERSE = use_poly
+        ev = PointingEvaluator(ras, decs, centration="CONSTRAINED",
+                               slit_length=3)
+        out = []
+        for dra in np.linspace(-20, 20, 5):
+            for ddec in np.linspace(-20, 20, 5):
+                for dpa in (-3.0, 0.0, 3.0):
+                    rp = ra0 + dra / 3600.0 / cosd
+                    dp = dec0 + ddec / 3600.0
+                    det, _, (q, s, d) = ev.evaluate(rp, dp, pa0 + dpa)
+                    out.append((det, q, np.rint(s), np.rint(d)))
+        return out
+
+    poly = sweep(True)
+    ct = sweep(False)
+
+    flips = sum(int(np.sum(p[0] != c[0])) for p, c in zip(poly, ct))
+    total_det = sum(int(c[0].sum()) for c in ct)
+    mismatch = 0
+    for (pd, pq, ps, pdd), (cd, cq, cs, cdd) in zip(poly, ct):
+        both = cd  # CloughTocher-detected
+        mismatch += int(np.sum((pq[both] != cq[both])
+                               | (ps[both] != cs[both])
+                               | (pdd[both] != cdd[both])))
+    assert mismatch == 0, (
+        f"poly placed {mismatch} co-detected sources in a different "
+        f"shutter than CloughTocher")
+    # The corner-quadrilateral hull gate (see `_poly_in_quad`) makes the
+    # polynomial's detection region match CloughTocher's exactly, so there
+    # should be no detection disagreement at all (a tiny tolerance guards
+    # against a sub-shutter boundary fp edge case).
+    assert flips <= 0.0005 * total_det, (
+        f"detection disagreement {flips}/{total_det} exceeds 0.05 %")
+
+
+# ---------------------------------------------------------------------
+# Multi-config sequential-greedy budget (the invariant the N-pass
+# optimizer driver in main.py relies on)
+# ---------------------------------------------------------------------
+
+
+def _sequential_greedy(ras, decs, n_pass, eff_max, *, seed_box=20.0):
+    """Mirror the driver's per-pass loop: optimize, charge the best
+    pick's observed sources against the cap, re-optimize on the residual.
+    Returns the per-config observed boolean masks."""
+    ra0, dec0, pa0 = float(np.mean(ras)), float(np.mean(decs)), 110.0
+    ev = PointingEvaluator(ras, decs, centration="CONSTRAINED", slit_length=3)
+    n = len(ras)
+    observed_total = np.zeros(n, dtype=int)
+    effective_max = np.full(n, eff_max, dtype=float)
+    per_cfg = []
+    for _ in range(n_pass):
+        budget = effective_max > observed_total
+        ev._budget = budget
+        ev._budget_enabled = not bool(budget.all())
+        g = grid_search(ev, ra0, dec0, pa0,
+                        dra_arcsec=seed_box, ddec_arcsec=seed_box, dpa_deg=4,
+                        n_ra=11, n_dec=11, n_pa=5)
+        det, _, _ = ev.evaluate(float(g["ra"][0]), float(g["dec"][0]),
+                                float(g["pa"][0]))
+        det = det & budget
+        per_cfg.append(det.copy())
+        observed_total = observed_total + det.astype(int)
+    return per_cfg, observed_total
+
+
+def test_sequential_greedy_disjoint_when_max_configs_one():
+    """With max_configs == 1, five sequential configs must be pairwise
+    disjoint — no source is ever observed twice."""
+    rng = np.random.default_rng(11)
+    ra0, dec0 = 53.16, -27.79
+    cosd = np.cos(np.deg2rad(dec0))
+    n = 800
+    ras = ra0 + rng.uniform(-120, 120, n) / 3600.0 / cosd
+    decs = dec0 + rng.uniform(-120, 120, n) / 3600.0
+    per_cfg, total = _sequential_greedy(ras, decs, n_pass=5, eff_max=1)
+    assert total.max() <= 1, "a source was observed more than its cap of 1"
+    for i in range(len(per_cfg)):
+        for j in range(i + 1, len(per_cfg)):
+            assert not np.any(per_cfg[i] & per_cfg[j]), (
+                f"configs {i} and {j} share a source under max_configs=1")
+    # Greedy: each config observes no more than the previous one.
+    counts = [int(m.sum()) for m in per_cfg]
+    assert counts[0] > 0
+    assert counts == sorted(counts, reverse=True), (
+        f"greedy config counts should be non-increasing; got {counts}")
+
+
+def test_sequential_greedy_allows_reobservation_when_max_configs_two():
+    """With max_configs == 2, a source may be observed in two configs
+    but never a third."""
+    rng = np.random.default_rng(12)
+    ra0, dec0 = 53.16, -27.79
+    cosd = np.cos(np.deg2rad(dec0))
+    n = 800
+    ras = ra0 + rng.uniform(-120, 120, n) / 3600.0 / cosd
+    decs = dec0 + rng.uniform(-120, 120, n) / 3600.0
+    _, total = _sequential_greedy(ras, decs, n_pass=3, eff_max=2)
+    assert total.max() <= 2, "a source exceeded its cap of 2 observations"
+    assert int((total == 2).sum()) > 0, (
+        "expected at least one source observed twice under max_configs=2")

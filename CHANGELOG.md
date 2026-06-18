@@ -4,6 +4,160 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [1.5.0] — 2026-06-18
+
+Up to **five** simultaneous MPT configurations, and a large optimizer
+speedup that makes planning that many masks at once practical.
+
+### Up to five MPT configurations
+
+The simultaneous-config cap is lifted from two to **five**. Everything
+that was config-aware now scales to N: the *Number of configs* spinner
+goes to 5, the **CONFIG k/N** chip cycles through all live configs
+(1→2→…→N→1), and each config gets its own accent colour drawn from a
+five-hue palette — **Config 1 blue, 2 magenta, 3 green, 4 orange, 5
+violet**. The active config's MSA quadrant boundary is a solid grid in
+its colour; every idle config is a faint dashed outline (no fill) at its
+own pointing, so all the masks are legible on the canvas at once. The
+chip, the *Editing Config k* banner, the boundary, and the MPT-viewer
+Cfg column all share one colour per config.
+
+The optimizer now plans **N configs in one run**. *Number of configs =
+N* runs N sequential-greedy passes: it optimizes Config 1, charges that
+pointing's observed sources against their max-configs cap, then
+optimizes Config 2 on the residual budget, and so on. The results modal
+shows one combined table where each row is a *plan* (Config 1 #k + … +
+Config N #k) with one colour-coded line per config — its own count,
+Σweight, and ΔRA/ΔDec/ΔPA offsets — and a combined headline score. **✔
+Apply recommended plan #1** fills all N configs in a single click; the
+per-row Apply does the same for the k-th solution of each. A source's
+`max_configs` (set per-target in the catalog editor, or globally in the
+optimizer's Advanced settings) still governs how many configs may
+re-observe it — so disjoint masks (`max_configs = 1`, the default) or
+deliberate repeats (`max_configs = 2`) both fall out of the same budget.
+
+### Much faster optimization
+
+The pointing search's per-trial bottleneck — a `CloughTocher2D`
+interpolation of the MSA (ax, ay) → (shutter) map, evaluated on every
+one of the ~10⁴ trial pointings — is replaced by a degree-4 polynomial
+inverse fit once per quadrant from the MSA grid (in normalised
+coordinates for numerical stability). Validated **out-of-sample against
+the forward MSA grid itself** (not against the interpolator it replaces):
+max error **2×10⁻⁴ shutters** across the interior *and* all four edge
+bands — about 0.1 mas, ~1000× below the centration tolerances — with
+identical integer (q, s, d) for every co-detected source and identical
+best scores. A 4-corner quadrilateral hull gate reproduces
+CloughTocher's reject-outside-the-field behaviour so the polynomial
+can't fabricate a rim detection by extrapolating. It runs **~20–40×
+faster** (the speedup grows with catalog size): a five-config plan that
+would have taken ~10 minutes now finishes in ~20 seconds. The reference
+CloughTocher path is retained as an automatic fallback (if the
+polynomial ever fails its construction-time self-check) and for the
+equivalence tests.
+
+### UI polish
+
+- The **MPT tab** is now just three buttons — **📥 Import…**,
+  **💾 Save session…**, **📤 Export to APT…** — each opening a focused
+  pop-up dialog, replacing the long stacked tab. **Import** uses an
+  "Import from" dropdown to pick the source (APT/MPT plan JSON, shutter
+  CSV, APT `.aptx`/program ID, or a saved vMPT session — *Load session*
+  now lives here). Browse-only: the *Edit path* toggle is gone; the
+  chosen path simply shows in the field beneath each **Browse…**.
+- **Cleaner dialogs across the board.** Every pop-up now shares a
+  gradient header, rounded inputs with a focus ring, and tidy section
+  labels; the optimizer's "What do these mean?" is a quiet inline link
+  instead of a boxed full-width button.
+- **Defaults:** planning now starts at **1 configuration** and the
+  optimizer's **Refine top N** defaults to **5**.
+- The **optimizer results modal** is wider so the multi-config combined
+  table fits without horizontal scrolling — the per-config Score column
+  and the per-plan **Apply** button are fully visible even for 4–5
+  configs.
+- **Hierarchy** Score cells now list only the tiers that actually placed
+  a source (the empty `P5:0` clutter is dropped), with the complete
+  per-tier breakdown — including empty tiers — available on hover, so a
+  dominant tier can no longer be hidden by clipping.
+- **Loading a session always shows the spinner.** The restore (image
+  decode + catalog reloads + overlay rebuild — up to ~10 s) now runs
+  after the overlay paints, so clicking *Load session* gives immediate
+  feedback instead of a frozen window. The spinner stays up until the
+  work (including any image load it triggers) finishes.
+- **Input tab simplified to match the MPT tab.** Image and catalog
+  loading now live behind two launcher buttons — **📷 Load image…**
+  (dropdown source: example field / FITS / JPG+PNG + WCS sidecar) and
+  **🎯 Load catalog…** — replacing the long stack of path-pickers. The
+  loaded-catalog list (toggle / reorder / remove), the display filters,
+  and *Edit catalog…* stay inline. Load dialogs **auto-close** when a
+  load starts (the full-page spinner takes over); the MPT *Import* dialog
+  now auto-closes on load too. The old *Edit path* toggle is gone
+  (Browse-only; the chosen path shows in the field).
+- **Consistent section headers** across the **Input**, **Pointing**, and
+  **Settings** tabs (uppercase, divider-topped) so every tab reads the
+  same way, and tightened spacing + trimmed verbose help so each tab
+  **fits without scrolling**. Pointing keeps its key controls inline and
+  directly editable — Disperser/Filter, the V3 PA slider with by-hand
+  **V3 PA / APA** inputs, the **Compute allowed V3 PA** (visibility)
+  button, and the **Open optimizer…** + **View MPT catalog…** launchers
+  are all visible at once; nothing moved into dialogs.
+- **Hover help** on every section title (e.g. *Optimize MSA pointing*,
+  *Rotation*, *MPT configurations*) and on the main action buttons
+  (*Open optimizer…*, *View MPT catalog…*, *Load image…*, *Import…*, …) —
+  a short inline description appears on hover (a help cursor marks the
+  titles). Each tab's content also gets a little **left/right padding** so
+  it isn't flush against the panel edge. The **tab sidebar has a shallow
+  tint** (with a divider edge) so it reads as a distinct panel without
+  washing out the **section titles**, which are now a darker slate for
+  clear contrast. The **tab strip itself is restyled** — each tab is a
+  bordered, lightly-filled button (active tab white with a blue top
+  accent, hover highlight) so it plainly reads as clickable.
+
+### Added
+
+- **`vmpt --version`.** The CLI now prints the installed version and
+  exits (also accepts `-version` and `-V`).
+
+### Fixed
+
+- **Oversized "Overwrite existing file?" dialog.** The confirm-overwrite
+  modal stretched to nearly the full viewport height (a tall, mostly
+  empty box). As a fixed-position Bokeh root the card inherited a
+  full-height layout with `!important`, which a plain inline style or a
+  document rule can't override; it now pins its height to `fit-content`
+  with an inline `!important` on open, so the dialog is only as tall as
+  its message + buttons (with an 85vh cap + scroll as a safety net).
+- **Catalog editor scroll jump on edit.** Editing a cell while a column
+  sort was active flung the table back toward the top: Bokeh re-sorts on
+  every data change and the view followed the edited row to its new
+  sorted position. The editor now snapshots the scroll position the
+  instant you click into a cell (before the edit commits) and pins the
+  viewport back after the re-render, so you keep your place while editing
+  a long, sorted catalog. Header-click sorting still scrolls to the top
+  as before (it reorders the view without changing the data, so the new
+  scroll-keep never fires for it). The numeric-column coercion that runs
+  after each edit was also switched from a full `source.data` rewrite to
+  a targeted `patch()` so an ~1800-row table isn't re-serialised on every
+  keystroke-commit.
+- **Off-frame rendering.** Operable / stuck-open / spectral-overlap
+  shutters and catalog target markers that project *outside* the image
+  cutout (at pixel x<0 / y<0 or beyond the image width/height) were
+  culled and never drawn — the view-bounds used for culling were clamped
+  to the image extent rather than the actual visible range. They now
+  render whenever that region is on screen (the MSA can extend past a
+  small image, and the image is often letterboxed inside the canvas);
+  `on_ranges_update` re-culls on every pan/zoom so off-image content
+  appears as you scroll to it.
+
+### Command line
+
+- New startup flags **`--v3pa DEG`** and **`--apa DEG`** set the initial
+  pointing roll (e.g. `./run.sh … --v3pa 209` or `vmpt … --apa 209`).
+  `--apa` is the NIRSpec aperture PA and is converted to V3 PA via
+  `APA = V3 PA + V3IdlYAngle`; `--v3pa` wins if both are given. The roll
+  is applied after the image/catalogs load, so the MSA overlay renders
+  at the requested angle immediately.
+
 ## [1.4.0] — 2026-06-14
 
 Multiple MPT configurations (APT-style), a read-only catalog viewer of

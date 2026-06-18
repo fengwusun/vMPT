@@ -37,6 +37,7 @@ from bokeh.models import (
     Div,
     GlobalInlineStyleSheet,
     HoverTool,
+    InlineStyleSheet,
     HTMLTemplateFormatter,
     MultiChoice,
     NumberEditor,
@@ -240,14 +241,23 @@ HELPPANEL_W = 340    # right help panel (Quick guide + rotating tip)
 # Per-config accent colours — shared by the top-bar CONFIG chip, the MSA
 # quadrant outline (active solid + idle dashed), and the MPT-viewer Cfg
 # column so the "which config" colour language is identical everywhere.
-_CONFIG_COLORS = ["#1f6fc0", "#b5179e", "#2a9d3a"]
+# Five distinct, high-contrast accent hues — one per simultaneous
+# config. Order is the cycling order of the CONFIG chip:
+#   C1 blue · C2 magenta · C3 green · C4 orange · C5 violet.
+_CONFIG_COLORS = ["#1f6fc0", "#b5179e", "#2a9d3a", "#e8590c", "#7048e8"]
+
+# The maximum number of simultaneous configs equals the number of
+# distinct accent colours, so every live config is always
+# colour-distinguishable on the canvas, chip, and MPT viewer.
+_MAX_CONFIGS = len(_CONFIG_COLORS)
 
 
 def _config_color(idx: int) -> str:
-    """Accent colour for config ``idx`` (0-based); clamps to the palette
-    ends for out-of-range indices."""
+    """Accent colour for config ``idx`` (0-based). Rotates through the
+    palette (mod) so any index maps to a colour — though in practice
+    ``idx`` never exceeds ``_MAX_CONFIGS - 1``."""
     idx = max(0, int(idx))
-    return _CONFIG_COLORS[idx] if idx < len(_CONFIG_COLORS) else _CONFIG_COLORS[-1]
+    return _CONFIG_COLORS[idx % len(_CONFIG_COLORS)]
 
 
 # Catalogs with more sources than this trigger the full-page loading
@@ -263,10 +273,10 @@ _LARGE_CATALOG_N = 1000
 _MODAL_HEADER_STYLES = {
     "cursor": "move",
     "user-select": "none",
-    "background": "#d6e4f5",
-    "border-bottom": "1px solid #b9c8dc",
+    "background": "linear-gradient(180deg, #eef4fc 0%, #d9e6f7 100%)",
+    "border-bottom": "1px solid #c2d2e6",
     "border-radius": "6px 6px 0 0",
-    "padding": "6px 12px 6px 14px",
+    "padding": "9px 14px 9px 16px",
     # Extend the header to the modal card's edges by negating its
     # internal padding (cards use 16px 18px).
     "margin": "-16px -18px 12px -18px",
@@ -358,48 +368,6 @@ session_load_browse_btn = Button(label="Browse…", button_type="primary", width
 export_dir_browse_btn = Button(label="Browse…", button_type="primary", width=120)
 
 
-def _wrap_path_picker(text_input, browse_btn, *,
-                      header_html: str = "", edit_label: str = "Edit path"):
-    """Wrap a (path TextInput + Browse button) pair so Browse is the
-    primary affordance and the path TextInput is hidden behind an
-    "Edit path" toggle.
-
-    The TextInput stays hidden when empty but auto-reveals as soon as
-    it has a value (so paths populated by Browse, by autoload, or by
-    direct typing all surface to the user). Clicking the toggle
-    re-hides it. This keeps the Input + MPT tabs tidy by default
-    without forcing power-users to lose visibility of their loaded
-    paths.
-    """
-    visible_now = bool((text_input.value or "").strip())
-    text_input.visible = visible_now
-    edit_btn = Button(
-        label=("Hide path" if visible_now else edit_label),
-        button_type="default", width=80, height=26,
-        css_classes=["vmpt-help-toggle"],
-    )
-
-    def _toggle(_e=None):
-        text_input.visible = not text_input.visible
-        edit_btn.label = "Hide path" if text_input.visible else edit_label
-
-    edit_btn.on_click(_toggle)
-
-    def _on_value(attr, old, new):
-        # Auto-reveal when a path is filled (Browse pick or autoload),
-        # but keep the user's manual toggle state otherwise.
-        if (new or "").strip() and not text_input.visible:
-            text_input.visible = True
-            edit_btn.label = "Hide path"
-    text_input.on_change("value", _on_value)
-
-    parts = []
-    if header_html:
-        parts.append(Div(text=header_html, width=SIDEBAR_W - 20))
-    parts.append(row(browse_btn, edit_btn, spacing=6))
-    parts.append(text_input)
-    return column(*parts, spacing=2)
-
 # Catalog filters — hide-able. Numeric thresholds; leave blank/empty to skip.
 catalog_priority_input = TextInput(
     title="Show priority class ≤ (blank = all)", value="", placeholder="e.g. 3",
@@ -426,11 +394,10 @@ apa_input = TextInput(
     width=_HALF_W,
 )
 pa_help_div = Div(text=(
-    "<small><b>V3 PA</b>: JWST V3 axis PA on sky (drives the overlay). "
-    f"<b>NIRSpec APA</b>: aperture PA of NRS_FULL_MSA = V3PA + {V3_IDL_Y_ANGLE:.2f}° "
-    "(mod 360). APT/MPT calls this NIRSpec's 'Aperture PA'. "
+    f"<small style='color:#7a8699'>APA = V3 PA + {V3_IDL_Y_ANGLE:.2f}° "
+    "(NRS_FULL_MSA) · "
     "<a href='https://jwst-docs.stsci.edu/jwst-observatory-characteristics-and-performance/"
-    "jwst-position-angles-ranges-and-offsets' target='_blank'>JDox reference</a>.</small>"
+    "jwst-position-angles-ranges-and-offsets' target='_blank'>JDox</a></small>"
 ), width=SIDEBAR_W - 20)
 
 # Visibility window query (jwst_gtvt) — date input + button on one row.
@@ -454,7 +421,7 @@ visibility_div = Div(text="<small>Allowed V3 PA windows appear here.</small>",
 opt_dra_input = TextInput(title="ΔRA (arcsec)", value="30", width=_HALF_W)
 opt_ddec_input = TextInput(title="ΔDec (arcsec)", value="30", width=_HALF_W)
 opt_dpa_input = TextInput(title="ΔPA (deg)", value="30", width=_HALF_W)
-opt_n_top_input = TextInput(title="Refine top N", value="10", width=_HALF_W)
+opt_n_top_input = TextInput(title="Refine top N", value="5", width=_HALF_W)
 opt_method_select = Select(
     title="Method",
     # (value, label) tuples — keep the internal value short (Python
@@ -494,9 +461,24 @@ opt_method_help_div = Div(
 opt_method_help_toggle = Button(
     label="ⓘ What do these mean?",
     button_type="default",
-    width=SIDEBAR_W - 20,
+    width=210,
     height=24,
     css_classes=["vmpt-help-toggle"],
+    # The document-level <style> can't reach a Button's <button> (it lives
+    # in the widget's shadow root), so inject a stylesheet into that root
+    # to render this as a quiet inline link rather than a boxed button.
+    stylesheets=[InlineStyleSheet(css="""
+      .bk-btn, button {
+        background: transparent !important; border: 0 !important;
+        box-shadow: none !important; color: #4a7ab8 !important;
+        text-align: left !important; padding: 2px 0 !important;
+        font-size: 12px !important; font-weight: 400 !important;
+        cursor: pointer;
+      }
+      .bk-btn:hover, button:hover {
+        color: #1a3b66 !important; text-decoration: underline;
+      }
+    """)],
 )
 
 
@@ -864,16 +846,48 @@ _cat_edit_css = Div(text="""
   }
   /* The ⓘ help toggle next to the Method dropdown. Subtler than a
      normal button — looks like a link rather than a button. */
-  .vmpt-help-toggle button {
-    background: transparent;
-    border: 0;
-    color: #5a6b85;
+  .vmpt-help-toggle button, .vmpt-help-toggle .bk-btn {
+    background: transparent !important;
+    border: 1px solid transparent !important;
+    box-shadow: none !important;
+    color: #5a6b85 !important;
+    font-weight: 400 !important;
     text-align: left;
     padding: 2px 0;
     font-size: 12px;
     cursor: pointer;
   }
-  .vmpt-help-toggle button:hover { color: #1a3b66; }
+  .vmpt-help-toggle button:hover, .vmpt-help-toggle .bk-btn:hover {
+    color: #1a3b66 !important; text-decoration: underline;
+  }
+  /* ---- Shared polish for every pop-up dialog (.vmpt-modal-card) ---- */
+  .vmpt-modal-header h3 {
+    margin: 0; font-size: 15px; font-weight: 600;
+    color: #21344f; letter-spacing: .01em;
+  }
+  /* Text inputs, selects, spinners inside dialogs: consistent, rounded,
+     with a clear focus ring. Scoped to modals so the sidebar is untouched. */
+  .vmpt-modal-card .bk-input {
+    border: 1px solid #cbd5e3; border-radius: 6px;
+    padding: 5px 9px; background: #fff;
+    transition: border-color .12s, box-shadow .12s;
+  }
+  .vmpt-modal-card .bk-input:focus {
+    border-color: #6f9fd8; outline: none;
+    box-shadow: 0 0 0 3px rgba(95, 140, 210, 0.18);
+  }
+  /* Widget titles (labels above inputs): quieter, consistent. */
+  .vmpt-modal-card .bk-input-group > label,
+  .vmpt-modal-card label.bk-input-group-text {
+    font-size: 11.5px; font-weight: 500; color: #51607a;
+  }
+  /* Default buttons in dialogs get the same rounded corners. */
+  .vmpt-modal-card .bk-btn { border-radius: 6px; }
+  /* A subtle section divider/label helper used inside the new dialogs. */
+  .vmpt-modal-section {
+    font-size: 10px; font-weight: 700; letter-spacing: .05em;
+    text-transform: uppercase; color: #8a93a6; margin: 2px 0 0;
+  }
 </style>
 """, width=0, height=0)
 cat_edit_undo_btn = Button(label="↶ Undo", button_type="default", width=100)
@@ -1130,7 +1144,7 @@ opt_open_btn = Button(
 # the active config. Default is a single config so v1.3.x behaviour is
 # unchanged until the user opts in.
 mpt_num_configs_spinner = Spinner(
-    low=1, high=2, step=1, value=1, width=_HALF_W,
+    low=1, high=_MAX_CONFIGS, step=1, value=1, width=_HALF_W,
     title="Number of configs",
 )
 mpt_config_select = Select(
@@ -1480,13 +1494,13 @@ opt_modal_progress_box = column(
 # so the Apply button lines up natively with its cells — the previous
 # parallel "HTML table + buttons column" pattern drifted out of
 # alignment because Bokeh column spacing accumulated between buttons.
-opt_modal_results_summary = Div(text="", width=560)
-opt_modal_results_rows = column(spacing=0, width=560)
+opt_modal_results_summary = Div(text="", width=820)
+opt_modal_results_rows = column(spacing=0, width=820)
 opt_modal_results_box = column(
     opt_modal_results_summary,
     opt_modal_results_rows,
     spacing=4,
-    width=560,
+    width=820,
     visible=False,
 )
 
@@ -1511,11 +1525,11 @@ opt_modal_card = column(
     opt_modal_close_btn,
     visible=False,
     spacing=10,
-    # Wider than before to accommodate the Hierarchy mode's per-tier
-    # breakdown in the Score column (e.g. "P0:4·P1:12·P2:30 (46)" —
-    # ~200 px) plus the rest of the row (~480 px) and the modal's
-    # inner padding (~36 px).
-    width=740,
+    # Sized to fit the widest table — the multi-config combined view
+    # (rank + combined + per-config Cfg/Δ/Score + Apply ≈ 800 px) plus
+    # the modal's inner padding (~36 px) — so neither the Score column
+    # nor the Apply button needs horizontal scrolling.
+    width=860,
     css_classes=["vmpt-modal-card"],
     styles={
         "position": "fixed",
@@ -1546,9 +1560,10 @@ _opt_run: dict = {}
 # stamp guarantees a fresh `change` event even when the same row is
 # re-applied (Bokeh dedupes identical values).
 opt_apply_trigger = TextInput(value="", visible=False)
-# v1.4.0: applies BOTH configs of a 2-config plan in one click. The JS
-# confirm sets a fresh stamp; the Python handler reads the two best
-# pointings out of `_opt_run` and applies each to its config.
+# v1.4.0 (N configs since v1.5.0): applies ALL configs of a multi-config
+# plan in one click. The JS confirm sets a fresh stamp; the Python handler
+# reads each config's best pointing out of `_opt_run["pass_results"]` and
+# applies it to that config.
 opt_apply_both_trigger = TextInput(value="", visible=False)
 
 # Full-page loading overlay — a centered translucent backdrop with an
@@ -1938,6 +1953,349 @@ apt_plan_select = Select(
     visible=False,
 )
 apt_load_btn = Button(label="Load selected plan", button_type="primary", disabled=True)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# MPT-tab pop-up dialogs — Import / Save / Export
+# ─────────────────────────────────────────────────────────────────────
+# The MPT tab is just three buttons that open these dialogs, so the
+# sidebar stays short and the three workflows (bring something IN / save
+# a vMPT session / write the APT deliverables) read as distinct actions.
+# All three reuse the shared `.vmpt-modal-*` styling. Browse-only: each
+# Browse button fills the path field shown beneath it (no Edit toggle).
+_MPT_DLG_W = 560
+
+# Give the reused import/save/export widgets one consistent dialog width…
+for _w in (mpt_json_path_input, mpt_csv_path_input, apt_path_input,
+           apt_program_input, session_load_path_input,
+           session_save_path_input, export_dir_input,
+           mpt_plan_select, apt_plan_select,
+           mpt_load_btn, mpt_csv_load_btn, apt_fetch_btn, apt_load_btn,
+           session_load_btn, session_save_btn, export_btn):
+    _w.width = _MPT_DLG_W
+# …and show the path fields directly (the chosen path reads as text).
+for _w in (mpt_json_path_input, mpt_csv_path_input, apt_path_input,
+           session_load_path_input, session_save_path_input,
+           export_dir_input):
+    _w.visible = True
+
+
+def _mpt_dlg_card_styles():
+    return {
+        "position": "fixed", "top": "50%", "left": "50%",
+        "transform": "translate(-50%, -50%)", "background": "white",
+        "border": "1px solid #c0c8d6", "border-radius": "8px",
+        "box-shadow": "0 12px 36px rgba(0, 30, 80, 0.32)",
+        "padding": "16px 18px", "z-index": "1000",
+        "max-height": "90vh", "overflow-y": "auto",
+    }
+
+
+def _mpt_dlg_backdrop():
+    return Div(text="", width=0, height=0, visible=False, styles={
+        "position": "fixed", "top": "0", "left": "0",
+        "right": "0", "bottom": "0",
+        "background": "rgba(20, 30, 50, 0.40)", "z-index": "999",
+    })
+
+
+def _mpt_dlg_header(title, close_x):
+    return row(
+        Div(text=f"<h3>{title}</h3>", sizing_mode="stretch_width"),
+        close_x,
+        css_classes=["vmpt-modal-header"], styles=_MODAL_HEADER_STYLES,
+        sizing_mode="stretch_width",
+    )
+
+
+def _mpt_dlg_caption(text):
+    return Div(text=f"<div style='font-size:12px; color:#5a6b85; "
+                    f"margin:-2px 0 2px'>{text}</div>", width=_MPT_DLG_W)
+
+
+def _mpt_dlg_section(text):
+    return Div(text=f"<div class='vmpt-modal-section'>{text}</div>",
+               width=_MPT_DLG_W)
+
+
+# ── Import dialog (dropdown-picker chooses the source) ───────────────
+import_modal_close_x = Button(label="×", button_type="default", width=32,
+                              height=28, css_classes=["vmpt-modal-x"])
+import_modal_close_btn = Button(label="Close", button_type="default", width=90)
+import_source_select = Select(
+    title="Import from", value="APT / MPT plan (JSON)",
+    options=["APT / MPT plan (JSON)", "Shutter mask (CSV)",
+             "APT program (.aptx or ID)", "vMPT session"],
+    width=_MPT_DLG_W,
+)
+_imp_grp_json = column(
+    _mpt_dlg_section("Plan JSON exported by APT / MPT"),
+    row(mpt_json_browse_btn), mpt_json_path_input, mpt_plan_select, mpt_load_btn,
+    spacing=6, width=_MPT_DLG_W,
+)
+_imp_grp_csv = column(
+    _mpt_dlg_section("Shutter-mask CSV (open mask only)"),
+    row(mpt_csv_browse_btn), mpt_csv_path_input, mpt_csv_load_btn,
+    spacing=6, width=_MPT_DLG_W, visible=False,
+)
+_imp_grp_apt = column(
+    _mpt_dlg_section("APT .aptx file on disk, or a JWST program ID from STScI"),
+    row(apt_path_browse_btn), apt_path_input, apt_program_input,
+    apt_fetch_btn, apt_plan_select, apt_load_btn,
+    spacing=6, width=_MPT_DLG_W, visible=False,
+)
+_imp_grp_session = column(
+    _mpt_dlg_section("Restore a saved vMPT session / workspace"),
+    row(session_load_browse_btn), session_load_path_input, session_load_btn,
+    spacing=6, width=_MPT_DLG_W, visible=False,
+)
+_IMPORT_GROUPS = {
+    "APT / MPT plan (JSON)": _imp_grp_json,
+    "Shutter mask (CSV)": _imp_grp_csv,
+    "APT program (.aptx or ID)": _imp_grp_apt,
+    "vMPT session": _imp_grp_session,
+}
+
+
+def _on_import_source(attr, old, new):
+    for _k, _g in _IMPORT_GROUPS.items():
+        _g.visible = (_k == new)
+
+
+import_source_select.on_change("value", _on_import_source)
+import_modal_backdrop = _mpt_dlg_backdrop()
+import_modal_card = column(
+    _mpt_dlg_header("Import", import_modal_close_x),
+    _mpt_dlg_caption("Bring an existing plan, shutter mask, APT program, or "
+                     "saved vMPT session into the canvas."),
+    import_source_select,
+    _imp_grp_json, _imp_grp_csv, _imp_grp_apt, _imp_grp_session,
+    row(import_modal_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+# ── Save dialog ──────────────────────────────────────────────────────
+save_modal_close_x = Button(label="×", button_type="default", width=32,
+                            height=28, css_classes=["vmpt-modal-x"])
+save_modal_close_btn = Button(label="Close", button_type="default", width=90)
+save_modal_backdrop = _mpt_dlg_backdrop()
+save_modal_card = column(
+    _mpt_dlg_header("Save session", save_modal_close_x),
+    _mpt_dlg_caption("Write a vMPT session bundle you can re-open later or "
+                     "share with a collaborator."),
+    _mpt_dlg_section("Save to"),
+    row(session_save_browse_btn), session_save_path_input, session_save_btn,
+    row(save_modal_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+# ── Export dialog ────────────────────────────────────────────────────
+export_modal_close_x = Button(label="×", button_type="default", width=32,
+                              height=28, css_classes=["vmpt-modal-x"])
+export_modal_close_btn = Button(label="Close", button_type="default", width=90)
+export_modal_backdrop = _mpt_dlg_backdrop()
+export_modal_card = column(
+    _mpt_dlg_header("Export to APT", export_modal_close_x),
+    _mpt_dlg_caption(f"Write an eMPT bundle + {MPT_PLAN_FILENAME} + an "
+                     f"APT-importable .cat for this plan."),
+    _mpt_dlg_section("Output directory"),
+    row(export_dir_browse_btn), export_dir_input, export_btn,
+    row(export_modal_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+
+def _open_import_modal():
+    import_modal_backdrop.visible = True
+    import_modal_card.visible = True
+
+
+def _close_import_modal():
+    import_modal_backdrop.visible = False
+    import_modal_card.visible = False
+
+
+def _open_save_modal():
+    save_modal_backdrop.visible = True
+    save_modal_card.visible = True
+
+
+def _close_save_modal():
+    save_modal_backdrop.visible = False
+    save_modal_card.visible = False
+
+
+def _open_export_modal():
+    export_modal_backdrop.visible = True
+    export_modal_card.visible = True
+
+
+def _close_export_modal():
+    export_modal_backdrop.visible = False
+    export_modal_card.visible = False
+
+
+import_modal_close_x.on_click(_close_import_modal)
+import_modal_close_btn.on_click(_close_import_modal)
+save_modal_close_x.on_click(_close_save_modal)
+save_modal_close_btn.on_click(_close_save_modal)
+export_modal_close_x.on_click(_close_export_modal)
+export_modal_close_btn.on_click(_close_export_modal)
+
+# MPT-tab launcher buttons (the tab itself is just these three).
+mpt_open_import_btn = Button(label="📥  Import…", button_type="primary",
+                             width=SIDEBAR_W - 20, height=40)
+mpt_open_save_btn = Button(label="💾  Save session…", button_type="primary",
+                           width=SIDEBAR_W - 20, height=40)
+mpt_open_export_btn = Button(label="📤  Export to APT…", button_type="success",
+                             width=SIDEBAR_W - 20, height=40)
+mpt_open_import_btn.on_click(_open_import_modal)
+mpt_open_save_btn.on_click(_open_save_modal)
+mpt_open_export_btn.on_click(_open_export_modal)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Input-tab pop-up dialogs — Load image / Load catalog
+# ─────────────────────────────────────────────────────────────────────
+# Same pattern as the MPT tab: the Input tab is a couple of launcher
+# buttons (+ the live catalog list), and the file-picking lives in
+# dialogs. Reuses the shared `_mpt_dlg_*` helpers + modal CSS.
+
+
+def _tab_caption(text):
+    """Small grey one-liner under a launcher button on a tab."""
+    return Div(text=f"<div style='font-size:11px; color:#7a8699; "
+                    f"margin:0 0 12px 2px'>{text}</div>", width=SIDEBAR_W - 20)
+
+
+def _section_header(label, tip=""):
+    """Uppercase, divider-topped group heading shared by the tabs. When
+    `tip` is given the title shows a native hover tooltip (and a help
+    cursor) so users get inline documentation for that group."""
+    attr = f' title="{tip}"' if tip else ""
+    cursor = "help" if tip else "default"
+    return Div(
+        text=f"<div{attr} style='font-size:11px; font-weight:700; "
+             f"letter-spacing:.04em; text-transform:uppercase; color:#3f4d66; "
+             f"cursor:{cursor}; margin:5px 0 0; border-top:1px solid #d3dae6; "
+             f"padding-top:4px'>{label}</div>",
+        width=SIDEBAR_W - 20, margin=(0, 0, 0, 0),
+    )
+
+
+# Dialog widths for the relocated pickers (Browse-only; path shown beneath).
+for _w in (fits_path_input, jpg_path_input, sidecar_path_input,
+           catalog_path_input):
+    _w.width = _MPT_DLG_W
+    _w.visible = True
+for _w in (example_a370_btn, example_r0600_btn):
+    _w.width = (_MPT_DLG_W - 8) // 2
+catalog_add_btn.width = 140
+
+# ── Load image dialog (dropdown picker: example / FITS / JPG+WCS) ─────
+load_image_close_x = Button(label="×", button_type="default", width=32,
+                            height=28, css_classes=["vmpt-modal-x"])
+load_image_close_btn = Button(label="Close", button_type="default", width=90)
+load_image_source_select = Select(
+    title="Image source", value="Example field",
+    options=["Example field", "FITS image", "JPG / PNG + WCS sidecar"],
+    width=_MPT_DLG_W,
+)
+_img_grp_example = column(
+    _mpt_dlg_section("Quick-start example fields"),
+    row(example_a370_btn, example_r0600_btn, spacing=8),
+    spacing=6, width=_MPT_DLG_W,
+)
+_img_grp_fits = column(
+    _mpt_dlg_section("Local FITS image (WCS read from its header)"),
+    row(fits_browse_btn), fits_path_input,
+    spacing=6, width=_MPT_DLG_W, visible=False,
+)
+_img_grp_jpg = column(
+    _mpt_dlg_section("JPG / PNG + a WCS sidecar FITS"),
+    _mpt_dlg_caption("Pick the WCS sidecar first, then the image."),
+    row(sidecar_browse_btn), sidecar_path_input,
+    row(jpg_browse_btn), jpg_path_input,
+    spacing=6, width=_MPT_DLG_W, visible=False,
+)
+_IMAGE_GROUPS = {
+    "Example field": _img_grp_example,
+    "FITS image": _img_grp_fits,
+    "JPG / PNG + WCS sidecar": _img_grp_jpg,
+}
+
+
+def _on_image_source(attr, old, new):
+    for _k, _g in _IMAGE_GROUPS.items():
+        _g.visible = (_k == new)
+
+
+load_image_source_select.on_change("value", _on_image_source)
+load_image_modal_backdrop = _mpt_dlg_backdrop()
+load_image_modal_card = column(
+    _mpt_dlg_header("Load image", load_image_close_x),
+    _mpt_dlg_caption("Load a background image — an example field, a FITS file, "
+                     "or a JPG/PNG with a WCS sidecar."),
+    load_image_source_select,
+    _img_grp_example, _img_grp_fits, _img_grp_jpg,
+    row(load_image_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+# ── Load catalog dialog ──────────────────────────────────────────────
+load_catalog_close_x = Button(label="×", button_type="default", width=32,
+                              height=28, css_classes=["vmpt-modal-x"])
+load_catalog_close_btn = Button(label="Close", button_type="default", width=90)
+load_catalog_modal_backdrop = _mpt_dlg_backdrop()
+load_catalog_modal_card = column(
+    _mpt_dlg_header("Load catalog", load_catalog_close_x),
+    _mpt_dlg_caption("Add a target catalog (CSV / ASCII / FITS with ID, RA, "
+                     "Dec). Add several to layer them; toggle / reorder / "
+                     "remove them from the Input tab."),
+    _mpt_dlg_section("Catalog file"),
+    row(catalog_browse_btn), catalog_path_input, catalog_add_btn,
+    row(load_catalog_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+
+def _open_load_image_modal():
+    load_image_modal_backdrop.visible = True
+    load_image_modal_card.visible = True
+
+
+def _close_load_image_modal():
+    load_image_modal_backdrop.visible = False
+    load_image_modal_card.visible = False
+
+
+def _open_load_catalog_modal():
+    load_catalog_modal_backdrop.visible = True
+    load_catalog_modal_card.visible = True
+
+
+def _close_load_catalog_modal():
+    load_catalog_modal_backdrop.visible = False
+    load_catalog_modal_card.visible = False
+
+
+load_image_close_x.on_click(_close_load_image_modal)
+load_image_close_btn.on_click(_close_load_image_modal)
+load_catalog_close_x.on_click(_close_load_catalog_modal)
+load_catalog_close_btn.on_click(_close_load_catalog_modal)
+
+load_image_open_btn = Button(label="📷  Load image…", button_type="primary",
+                             width=SIDEBAR_W - 20, height=40)
+load_catalog_open_btn = Button(label="🎯  Load catalog…", button_type="primary",
+                               width=SIDEBAR_W - 20, height=40)
+load_image_open_btn.on_click(_open_load_image_modal)
+load_catalog_open_btn.on_click(_open_load_catalog_modal)
+
 
 # Status bar — wide strip above the figure showing pointing / PA /
 # disperser / open-shutter count / spec-conflict count. Always visible
@@ -2876,14 +3234,18 @@ def refresh_overlays() -> None:
     else:
         src_idle_msa_outline.data = dict(xs=[], ys=[], cfg=[], color=[])
 
-    # Cull to the current visible figure bounds (post-zoom), clipped to the
-    # image. With the current view-bbox approach, all three shutter-flavour
-    # layers (operable, stuck-open, spectral-overlap) reuse one mask.
+    # Cull to the current visible figure bounds (post-zoom). Use the ACTUAL
+    # range — NOT clamped to the image extent — so shutters that project
+    # outside the image cutout still render whenever that region is on
+    # screen (the MSA can extend past a small image, and the image is often
+    # letterboxed inside the canvas, leaving operable area beyond [0,W]×
+    # [0,H]). `on_ranges_update` re-runs refresh_overlays on every pan/zoom,
+    # so off-image shutters appear as soon as the user scrolls to them. All
+    # three shutter-flavour layers (operable, stuck-open, spectral-overlap)
+    # reuse the one mask.
     try:
-        vx0 = max(0.0, min(float(fig.x_range.start), W))
-        vx1 = max(0.0, min(float(fig.x_range.end), W))
-        vy0 = max(0.0, min(float(fig.y_range.start), H))
-        vy1 = max(0.0, min(float(fig.y_range.end), H))
+        vx0, vx1 = float(fig.x_range.start), float(fig.x_range.end)
+        vy0, vy1 = float(fig.y_range.start), float(fig.y_range.end)
         view_bbox = (min(vx0, vx1), max(vx0, vx1), min(vy0, vy1), max(vy0, vy1))
     except (TypeError, ValueError):
         view_bbox = (0.0, float(W), 0.0, float(H))
@@ -3434,7 +3796,19 @@ def refresh_overlays() -> None:
     if show_targets and cat is not None:
         coords = SkyCoord(cat.ra_deg, cat.dec_deg, unit=u.deg, frame="icrs")
         x, y = _world_to_pixel(coords, wcs)
-        mask = (x >= 0) & (x < W) & (y >= 0) & (y < H)
+        # Cull to the visible view (NOT the image cutout) so sources that
+        # project beyond the image edge — at x<0 / y<0 or past W/H — still
+        # render once that area is on screen; `on_ranges_update` re-runs
+        # this on pan/zoom. The margin keeps a marker whose centre sits
+        # just outside the view from popping in/out at the edge.
+        # Non-finite projections (degenerate WCS far off-field) are dropped.
+        _vx0, _vx1, _vy0, _vy1 = view_bbox
+        _cm = 50.0
+        mask = (
+            np.isfinite(x) & np.isfinite(y)
+            & (x >= _vx0 - _cm) & (x <= _vx1 + _cm)
+            & (y >= _vy0 - _cm) & (y <= _vy1 + _cm)
+        )
         # Apply optional catalog filters (priority class ≤, magnitude ≤).
         try:
             pr_cutoff = float(catalog_priority_input.value.strip())
@@ -4257,6 +4631,7 @@ def on_fits_path(attr, old, new):
         _set_status(f"FITS path not found: {p}", "err")
         return
     _show_loading(f"Loading FITS: {Path(p).name}…")
+    _close_load_image_modal()
     _deferred(_load_fits_from_path, p)
 
 
@@ -4273,6 +4648,7 @@ def on_sidecar_path(attr, old, new):
     jpg_p = jpg_path_input.value.strip()
     if jpg_p and Path(jpg_p).exists():
         _show_loading(f"Loading JPG + WCS sidecar…")
+        _close_load_image_modal()
         _deferred(_load_jpg_pair_from_paths, jpg_p, p)
     else:
         _set_status("Sidecar set. Now enter a JPG path.", "info")
@@ -4292,6 +4668,7 @@ def on_jpg_path(attr, old, new):
         _set_status("Enter a sidecar FITS path first.", "warn")
         return
     _show_loading(f"Loading JPG: {Path(jpg_p).name}… (large JPGs take 5–10 s)")
+    _close_load_image_modal()
     _deferred(_load_jpg_pair_from_paths, jpg_p, side_p)
 
 
@@ -4309,6 +4686,7 @@ def on_catalog_path(attr, old, new):
         _set_status(f"Catalog path not found: {p}", "err")
         return
     _show_loading(f"Loading catalog: {Path(p).name}…")
+    _close_load_catalog_modal()
     _deferred(_load_catalog_from_path, p)
 
 
@@ -4322,6 +4700,7 @@ def on_catalog_add():
         _set_status(f"Catalog path not found: {p}", "err")
         return
     _show_loading(f"Loading catalog: {Path(p).name}…")
+    _close_load_catalog_modal()
     _deferred(_load_catalog_from_path, p)
 
 
@@ -5343,6 +5722,21 @@ def on_session_load():
         _set_status(f"Session load failed: {e}", "err")
         return
 
+    # Loading a session can take several seconds (image decode + catalog
+    # loads + overlay rebuild), so always show the spinner immediately,
+    # then do the heavy work on the next tick once the overlay has painted.
+    _show_loading("Loading session…")
+    _close_import_modal()  # session load lives in the Import dialog
+    _deferred(_apply_loaded_session, sess)
+
+
+def _apply_loaded_session(sess) -> None:
+    # If we trigger an image load below (by changing a path input), that
+    # loader's own `finally` hides the spinner when its slow decode ends —
+    # so we leave it up in that case; otherwise we hide it ourselves at
+    # the end. (`_show_loading`'s 60 s safety timeout is the backstop.)
+    triggered_image = False
+
     # Apply pointing/PA/disperser/shutters FIRST so they survive even if the
     # image fails to load. We push them straight into state and the widgets
     # rather than via on_change handlers so a missing image doesn't abort
@@ -5434,9 +5828,15 @@ def on_session_load():
                 )
             else:
                 sidecar_path_input.value = sidecar
-                jpg_path_input.value = str(img_path)  # triggers JPG load
+                _new_jpg = str(img_path)
+                if jpg_path_input.value != _new_jpg:
+                    jpg_path_input.value = _new_jpg  # triggers JPG load + spinner
+                    triggered_image = True
         elif ext in (".fits", ".fit", ".fts"):
-            fits_path_input.value = str(img_path)  # triggers FITS load
+            _new_fits = str(img_path)
+            if fits_path_input.value != _new_fits:
+                fits_path_input.value = _new_fits  # triggers FITS load + spinner
+                triggered_image = True
         else:
             image_note = f" Unknown image extension {ext!r}; load manually."
     elif sess.image_path:
@@ -5490,6 +5890,9 @@ def on_session_load():
         f"{len(state['highlighted'])} highlighted.{image_note}{catalog_note}",
         "warn" if (image_note or catalog_note) else "ok", clear_after=14,
     )
+    # An in-flight image load hides the spinner itself; otherwise hide now.
+    if not triggered_image:
+        _hide_loading()
 
 
 session_save_btn.on_click(on_session_save)
@@ -5630,6 +6033,7 @@ def on_mpt_load():
 def _apply_plan(plan) -> None:
     """Apply an MPTPlan to the live UI state: pointing, V3 PA, disperser,
     and the unfolded open-shutter set."""
+    _close_import_modal()  # plan loads (JSON / .aptx) come from the Import dialog
     _push_history()
     if plan.ra_deg is not None and plan.dec_deg is not None:
         ra_input.value = f"{plan.ra_deg:.6f}"
@@ -5675,6 +6079,7 @@ def on_mpt_csv_load():
     except ValueError as e:
         _set_status(f"Shutter CSV parse failed: {e}", "err")
         return
+    _close_import_modal()
     _push_history()
     _set_open_shutters({(sh.q, sh.s, sh.d): sh for sh in opens})
     refresh_overlays()
@@ -6434,7 +6839,7 @@ def _switch_active_config(idx: int) -> None:
 
 
 def _ensure_n_configs(n: int) -> None:
-    """Grow/cap the live config list to `n` (1 or 2).
+    """Grow/cap the live config list to `n` (1.._MAX_CONFIGS).
 
     New configs are born with pointing = None ("inherit the live pointing
     when first activated"), NOT a creation-time snapshot — otherwise a
@@ -6443,7 +6848,7 @@ def _ensure_n_configs(n: int) -> None:
     would jump the MSA off the image. `_switch_active_config` keeps the
     current widgets when the target config's pointing is None, so a
     never-positioned config simply shares wherever you are now."""
-    n = max(1, min(2, int(n)))
+    n = max(1, min(_MAX_CONFIGS, int(n)))
     while len(state["configs"]) < n:
         state["configs"].append(
             _new_config(_config_label(len(state["configs"])))
@@ -7243,34 +7648,40 @@ def _on_cat_edit_data_change(attr, old, new):
     # them numerically; StringEditor commits a string on every cell
     # edit and we coerce here so the column doesn't drift to mixed
     # types (which silently re-enables lexicographic sort).
-    needs_fix = False
-    new_dict = {k: list(v) for k, v in new.items()}
+    #
+    # Apply the coercion as a targeted `source.patch()` of just the
+    # string-typed cells (the one the user edited, plus any stragglers)
+    # rather than reassigning the whole `source.data` — otherwise an
+    # ~1800-row table gets re-serialised on every numeric edit. The patch
+    # fires a `patching` event that `_cat_edit_scroll_restore_js` (below)
+    # listens for to pin the viewport back, so editing a cell doesn't
+    # fling the table to the top when a column sort is active.
+    patches: dict = {}
     for col in ("priority", "weight", "z"):
-        if col not in new_dict:
+        if col not in new:
             continue
-        vals = new_dict[col]
-        if not any(isinstance(v, str) for v in vals):
-            continue
-        coerced = []
-        for v in vals:
-            if isinstance(v, (int, float)) and not (
-                isinstance(v, float) and not np.isfinite(v)
-            ):
-                coerced.append(float(v))
+        col_patches = []
+        for i, v in enumerate(new[col]):
+            if not isinstance(v, str):
                 continue
-            s = ("" if v is None else str(v)).strip()
+            s = v.strip()
             if not s or s.lower() in ("nan", "none", "null", "--"):
-                coerced.append(float("nan"))
+                fv = float("nan")
             else:
                 try:
-                    coerced.append(float(s))
+                    fv = float(s)
                 except ValueError:
-                    coerced.append(float("nan"))
-        new_dict[col] = coerced
-        needs_fix = True
-    if needs_fix:
-        # Suppress recursion: setting `data` would re-trigger us.
-        _cat_edit_set_data_silently(new_dict)
+                    fv = float("nan")
+            col_patches.append((i, fv))
+        if col_patches:
+            patches[col] = col_patches
+    if patches:
+        # Suppress recursion: patch() re-triggers this listener.
+        _cat_edit_suppress["flag"] = True
+        try:
+            _cat_edit_source.patch(patches)
+        finally:
+            _cat_edit_suppress["flag"] = False
 
 
 def _on_cat_edit_undo():
@@ -7873,6 +8284,40 @@ _cat_edit_install_js = CustomJS(
 curdoc().js_on_event(DocumentReady, _cat_edit_install_js)
 _cat_edit_source.js_on_change("data", _cat_edit_install_js)
 
+# Hover tooltips on the main action buttons. A Bokeh Button renders its
+# <button> inside the widget's shadow root, so the document-level <style>
+# can't add a `title`; instead we walk the shadow DOM on DocumentReady
+# (+ a few retries for async-rendered widgets) and set the native title
+# attribute by matching the button label. (Section *titles* get their
+# tooltips directly via the `title=` attr in `_section_header`.)
+_btn_tips_install_js = CustomJS(code="""
+const TIPS = [
+  ["Open optimizer", "Search (RA, Dec, V3 PA) for the placement that captures the most targets in operable, well-centred shutters. Inside: count / weight / priority-tier ranking, the ΔRA/ΔDec/ΔPA box, collision protection, and per-config budgets."],
+  ["View MPT catalog", "List the sources placed in open shutters across all configs, with each source's wavelength coverage and any detector gap."],
+  ["Compute allowed V3 PA", "Query the JWST visibility tool for the V3 PA range allowed on the entered date."],
+  ["Load image", "Open a background image: an example field, a FITS file, or a JPG/PNG with a WCS sidecar."],
+  ["Load catalog", "Add a target catalog (CSV / ASCII / FITS with ID, RA, Dec). Add several to layer them."],
+  ["Edit catalog", "Spreadsheet-style catalog editor: edit / sort / delete rows, set per-source constraints, save as CSV."],
+  ["Import", "Bring in an APT/MPT plan (JSON), a shutter-mask CSV, an APT program (.aptx / ID), or a saved vMPT session."],
+  ["Save session", "Write a vMPT session bundle you can reopen later or share with a collaborator."],
+  ["Export to APT", "Write the eMPT bundle + the APT-importable plan + .cat for this design."],
+  ["Reset display to defaults", "Restore layers, slitlet size, overlay alpha / stroke, and canvas size to their defaults."]
+];
+function setTitles(root){
+  let bs; try { bs = root.querySelectorAll("button"); } catch (e) { return; }
+  bs.forEach(function(b){
+    const t = (b.textContent || "").replace(/\\s+/g, " ").trim();
+    if (!t) return;
+    for (const kv of TIPS){ if (t.indexOf(kv[0]) !== -1){ if (b.title !== kv[1]) b.title = kv[1]; break; } }
+  });
+  root.querySelectorAll("*").forEach(function(e){ if (e.shadowRoot) setTitles(e.shadowRoot); });
+}
+function applyTips(){ try { setTitles(document); } catch (e) {} }
+applyTips();
+[600, 1800, 4000].forEach(function(ms){ setTimeout(applyTips, ms); });
+""")
+curdoc().js_on_event(DocumentReady, _btn_tips_install_js)
+
 
 # Install the global the top-bar CONFIG chip's onclick calls. Stamps the
 # `_config_chip_signal` data so the Python `_on_config_chip_signal`
@@ -8102,6 +8547,71 @@ if (!window.__vmpt_sort_scroll_installed) {
 curdoc().js_on_event(DocumentReady, _cat_edit_sort_scroll_js)
 _cat_edit_source.js_on_change("data", _cat_edit_sort_scroll_js)
 
+# Keep the user's scroll position when they edit a cell. When a column
+# sort is active, Bokeh re-sorts the table on every data change and the
+# view follows the moved row — so committing an edit otherwise flings the
+# viewport to wherever the edited row lands, which is jarring when editing
+# a long catalog. The fix is two parts:
+#   • SETUP: attach a capture-phase `mousedown` listener to the editor's
+#     SlickGrid viewport that snapshots the scroll position the instant
+#     the user presses on a cell — i.e. BEFORE the edit commits and the
+#     re-sort jumps the view. (Capturing later, on the commit, is too
+#     late: the jump has already happened.) Attached with a short retry
+#     since the viewport only renders once the editor modal is open.
+#   • RESTORE: on every `patching` event (the client cell-commit and the
+#     server-side numeric coercion both fire one), pin the viewport back
+#     to the snapshot after the re-render settles.
+# Keyed to `patching`/`mousedown` only, so it never touches header-click
+# sorts (those reorder the view without patching source.data) — the
+# deliberate scroll-to-top-after-sort behaviour above is preserved.
+_VMPT_FIND_CAT_VP = """
+function _vmptCatVP() {
+    const out = [];
+    (function walk(root) {
+        root.querySelectorAll('.slick-viewport').forEach(v => out.push(v));
+        root.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+    })(document);
+    return out.find(v => v.scrollHeight > 1000 && v.offsetParent !== null)
+        || out.find(v => v.scrollHeight > 1000) || null;
+}
+"""
+_cat_edit_scroll_setup_js = CustomJS(code=_VMPT_FIND_CAT_VP + """
+let tries = 0;
+(function attach() {
+    const vp = _vmptCatVP();
+    if (!vp) { if (tries++ < 25) setTimeout(attach, 150); return; }
+    window.__vmptCatVP = vp;
+    if (!vp.__vmptKeep) {
+        vp.__vmptKeep = true;
+        vp.__vmptSaved = null;
+        // Snapshot the scroll the instant the user presses on a cell —
+        // before the edit commits and the table re-sorts.
+        vp.addEventListener('mousedown', () => { vp.__vmptSaved = vp.scrollTop; }, true);
+    }
+})();
+""")
+_cat_edit_scroll_restore_js = CustomJS(code=_VMPT_FIND_CAT_VP + """
+let vp = window.__vmptCatVP;
+if (!vp || vp.offsetParent === null || vp.scrollHeight < 1000) {
+    vp = _vmptCatVP();
+    window.__vmptCatVP = vp;
+}
+if (!vp || vp.__vmptSaved == null) return;
+const saved = vp.__vmptSaved;
+const restore = () => {
+    const max = vp.scrollHeight - vp.clientHeight;
+    vp.scrollTop = Math.max(0, Math.min(saved, max));
+};
+// Re-pin across the synchronous re-sort and any async follow-up render.
+setTimeout(restore, 0);
+setTimeout(restore, 90);
+setTimeout(restore, 240);
+""")
+curdoc().js_on_event(DocumentReady, _cat_edit_scroll_setup_js)
+_cat_edit_source.js_on_change("data", _cat_edit_scroll_setup_js)
+catalog_edit_btn.js_on_click(_cat_edit_scroll_setup_js)
+_cat_edit_source.js_on_change("patching", _cat_edit_scroll_restore_js)
+
 
 def _apply_optimizer_result(
     ra_p: float, dec_p: float, pa_v3: float,
@@ -8235,7 +8745,7 @@ opt_apply_trigger.on_change("value", _on_opt_apply_trigger)
 
 
 def _on_opt_apply_both_trigger(attr, old, new):
-    """Apply a 2-config plan in one click: Config 1 #k + Config 2 #k.
+    """Apply an N-config plan in one click: Config 1 #k + … + Config N #k.
 
     The trigger payload is ``"<rank>,<stamp>"`` (rank is 0-based); each
     config is filled from its own k-th solution (clamped to range)."""
@@ -8246,26 +8756,26 @@ def _on_opt_apply_both_trigger(attr, old, new):
         k = int(str(new).split(",", 1)[0])
     except (ValueError, IndexError):
         k = 0
-    r1 = _opt_run.get("pass1_results")
-    r2 = _opt_run.get("pass2_results")
-    if not r1 or len(r1.get("score", [])) == 0:
+    # Leading run of configs that produced solutions (matches the table).
+    results: list = []
+    for r in (_opt_run.get("pass_results") or []):
+        if len(r.get("score", [])) == 0:
+            break
+        results.append(r)
+    if not results:
         return
-    k1 = max(0, min(k, len(r1["score"]) - 1))
-    _apply_optimizer_result(
-        float(r1["ra"][k1]), float(r1["dec"][k1]), float(r1["pa"][k1]),
-        clear_existing=True, config_idx=0,
-    )
-    if r2 and len(r2.get("score", [])) > 0:
-        k2 = max(0, min(k, len(r2["score"]) - 1))
+    for ci, r in enumerate(results):
+        kk = max(0, min(k, len(r["score"]) - 1))
         _apply_optimizer_result(
-            float(r2["ra"][k2]), float(r2["dec"][k2]), float(r2["pa"][k2]),
-            clear_existing=True, config_idx=1,
+            float(r["ra"][kk]), float(r["dec"][kk]), float(r["pa"][kk]),
+            clear_existing=True, config_idx=ci,
         )
     # Leave the user on Config 1 to review.
     _switch_active_config(0)
     _opt_hide_modal()
-    _set_status(f"Applied 2-config plan #{k + 1} (Config 1 + Config 2).",
-                "ok", clear_after=12)
+    _set_status(
+        f"Applied {len(results)}-config plan #{k + 1} "
+        f"(Config 1 … Config {len(results)}).", "ok", clear_after=12)
 
 
 opt_apply_both_trigger.on_change("value", _on_opt_apply_both_trigger)
@@ -8436,8 +8946,10 @@ def _opt_build_result_rows(
         total_i = (int(totals[i]) if totals is not None and i < len(totals)
                    else None)
         if is_hierarchy:
+            # Only show tiers that actually placed a source — dropping the
+            # "P5:0" empties keeps the label short and readable.
             breakdown_label = " · ".join(
-                f"P{int(t)}:{c}" for t, c in breakdowns[i]
+                f"P{int(t)}:{c}" for t, c in breakdowns[i] if c > 0
             )
             if total_i is not None:
                 score_label = f"{breakdown_label}  ({total_i})"
@@ -8614,35 +9126,45 @@ def _opt_render_results_in_modal(
     opt_modal_results_rows.children = rows_built
 
 
-def _opt_render_pair_results(
-    res1: dict, res2: dict, ra_ref: float, dec_ref: float, pa_ref: float,
+def _opt_render_multi_results(
+    results_list: list, ra_ref: float, dec_ref: float, pa_ref: float,
     n_sources: int, *, method: str = "Democracy",
 ) -> None:
-    """2-config (auto-both) results as ONE combined table.
+    """N-config (auto-all) results as ONE combined table.
 
-    Each row is a *plan* = Config 1 #k + Config 2 #k, rendered as two
-    lines (one per config) sharing a combined headline score, with each
-    config's own score and ΔRA/ΔDec/ΔPA on its line. The per-plan Apply
-    fills BOTH configs at once. Config 2 is optimized against Config 1
-    #1's budget, so plan #1 is the consistent recommended pairing; lower
-    rows pair the k-th best of each config independently.
+    Each row is a *plan* = Config 1 #k + Config 2 #k + … + Config N #k,
+    rendered as one line per config sharing a combined headline score,
+    with each config's own score and ΔRA/ΔDec/ΔPA on its line. The
+    per-plan Apply fills ALL configs at once. Config j is optimized
+    against the cumulative budget of configs 1..j-1 (each at its own #1),
+    so plan #1 is the consistent recommended set; lower rows pair the
+    k-th best of each config independently.
     """
-    n1 = len(res1.get("score", []))
-    n2 = len(res2.get("score", []))
-    if n1 == 0:
-        _opt_render_results_in_modal(res1, ra_ref, dec_ref, pa_ref,
-                                     n_sources, method=method)
+    # Keep the leading run of configs that produced solutions. Under the
+    # monotonic per-pass budget, once one config finds nothing the later
+    # ones are empty too, so this keeps config index == display position.
+    results: list = []
+    for r in results_list:
+        if len(r.get("score", [])) == 0:
+            break
+        results.append(r)
+    if len(results) == 0:
+        _opt_render_results_in_modal(
+            results_list[0] if results_list else {"score": []},
+            ra_ref, dec_ref, pa_ref, n_sources, method=method)
         return
-    if n2 == 0:
-        # No complementary Config 2 found — show Config 1 alone.
-        _opt_render_results_in_modal(res1, ra_ref, dec_ref, pa_ref,
+    if len(results) == 1:
+        # Only Config 1 found targets — show the single-config table.
+        _opt_render_results_in_modal(results[0], ra_ref, dec_ref, pa_ref,
                                      n_sources, method=method)
-        _set_status(
-            "Config 2 found no additional targets under the current "
-            "max-configs cap — showing Config 1 only.",
-            "warn", clear_after=12,
-        )
+        if len(results_list) > 1:
+            _set_status(
+                "Configs beyond #1 found no additional targets under the "
+                "current max-configs cap — showing Config 1 only.",
+                "warn", clear_after=12,
+            )
         return
+    n_cfg = len(results)
 
     cos_dec = np.cos(np.deg2rad(dec_ref))
     is_hier = method == "Hierarchy"
@@ -8665,7 +9187,11 @@ def _opt_render_pair_results(
         if is_merit:
             lbl = f"Σw {sw:.0f} ({cnt})" if sw is not None else f"{cnt}"
         elif is_hier and breakdowns is not None and k < len(breakdowns):
-            tb = " · ".join(f"P{int(t)}:{c}" for t, c in breakdowns[k])
+            # Visible label shows only tiers that placed a source; the
+            # full breakdown (incl. empty tiers) goes in the hover tooltip
+            # below, so the cell stays short even with many tiers.
+            tb = " · ".join(f"P{int(t)}:{c}"
+                            for t, c in breakdowns[k] if c > 0)
             lbl = f"{tb} ({cnt})" if tb else f"{cnt}"
         else:
             lbl = f"{cnt}"
@@ -8675,6 +9201,13 @@ def _opt_render_pair_results(
         # reason (budget / collision / spectral). Mirrors the single-
         # config table so the prominent "−K" on Config 2 is explained.
         tip_lines: list = []
+        # Full per-tier breakdown (incl. empty tiers) for Hierarchy, so a
+        # clipped Score cell never hides a tier.
+        if is_hier and breakdowns is not None and k < len(breakdowns):
+            full_tb = " · ".join(f"P{int(t)}:{c}" for t, c in breakdowns[k])
+            if full_tb:
+                tip_lines.append(f"Tiers: {full_tb}")
+                tip_lines.append("")
         tt = (top_targets[k] if top_targets is not None
               and k < len(top_targets) else None)
         if tt:
@@ -8710,61 +9243,62 @@ def _opt_render_pair_results(
             dpa=(pa_i - pa_ref + 180.0) % 360.0 - 180.0,
         )
 
-    def _combined(pa: dict, pb: dict) -> str:
-        """Combined headline across the two configs (disjoint under the
+    def _combined(parts: list) -> str:
+        """Combined headline across all configs (disjoint under the
         max-configs cap, so counts/weights simply add)."""
+        cnt = sum(p["cnt"] for p in parts)
         if is_merit:
-            return f"Σw {pa['sw'] + pb['sw']:.0f} ({pa['cnt'] + pb['cnt']})"
-        return f"{pa['cnt'] + pb['cnt']}"
+            return f"Σw {sum(p['sw'] for p in parts):.0f} ({cnt})"
+        return f"{cnt}"
 
-    p1a, p1b = _parts(res1, 0), _parts(res2, 0)
+    p_first = [_parts(r, 0) for r in results]
     # Legend for the "−K" suffix — shown only when some plan actually
-    # drops sources (almost always Config 2, where the max-configs cap
-    # skips sources Config 1 already claimed). Hover a Score for the
-    # exact per-reason breakdown.
-    n_plans_pre = min(len(res1.get("score", [])), len(res2.get("score", [])), 10)
+    # drops sources (usually later configs, where the max-configs cap
+    # skips sources earlier configs already claimed). Hover a Score for
+    # the exact per-reason breakdown.
+    n_plans_pre = min(min(len(r.get("score", [])) for r in results), 10)
     _any_drop = any(
-        (_parts(res1, k)["lbl"].find("−") >= 0
-         or _parts(res2, k)["lbl"].find("−") >= 0)
+        any(_parts(r, k)["lbl"].find("−") >= 0 for r in results)
         for k in range(n_plans_pre)
     )
     drop_legend = (
         " <span style='color:#8a5a00'>“<b>−K</b>” = sources that landed in "
-        "shutters but were skipped (usually because the other config already "
+        "shutters but were skipped (usually because another config already "
         "observed them under the max-configs cap; hover a Score for the "
         "breakdown).</span>"
         if _any_drop else ""
     )
     opt_modal_results_summary.text = (
         f"<div style='font-size:12px; margin-bottom:4px'>"
-        f"<b>2-config plan</b> · {n_sources} candidate sources · "
+        f"<b>{n_cfg}-config plan</b> · {n_sources} candidate sources · "
         f"<b>Method:</b> {method}. Each row is a plan "
-        f"(<b>Config 1 #k + Config 2 #k</b>) — combined score on the left, "
-        f"each config's own score + offsets on its line. "
-        f"<b>Recommended: plan #1</b> = <b>{_combined(p1a, p1b)}</b> combined. "
-        f"Config 2 is optimized against Config 1 #1's budget, so plan #1 is "
-        f"the consistent pairing. Offsets are from the search centre.{drop_legend}</div>"
+        f"(<b>Config 1 #k + … + Config {n_cfg} #k</b>) — combined score on "
+        f"the left, each config's own score + offsets on its line. "
+        f"<b>Recommended: plan #1</b> = <b>{_combined(p_first)}</b> combined. "
+        f"Each config is optimized against the cumulative budget of the "
+        f"earlier ones, so plan #1 is the consistent set. Offsets are from "
+        f"the search centre.{drop_legend}</div>"
     )
 
     # Banner: one-click apply of the recommended plan (#1).
     apply_both_btn = Button(
-        label=f"✔ Apply recommended plan #1  ({_combined(p1a, p1b)} combined)",
+        label=f"✔ Apply recommended plan #1  ({_combined(p_first)} combined)",
         button_type="primary", width=380, height=30,
     )
     apply_both_btn.js_on_click(CustomJS(
         args=dict(trig=opt_apply_both_trigger),
-        code="""
-        if (!window.confirm("Apply the recommended 2-config plan (#1)?\\n\\n"
-            + "This CLEARS and refills BOTH Config 1 and Config 2.")) {
+        code=f"""
+        if (!window.confirm("Apply the recommended {n_cfg}-config plan (#1)?\\n\\n"
+            + "This CLEARS and refills all {n_cfg} configs.")) {{
             return;
-        }
+        }}
         trig.value = "0," + Date.now() + "_" + Math.random();
         """,
     ))
 
     HEADER_BG = "#eef2f8"
     ROW_H = 24
-    score_w = 188 if is_hier else 150 if is_merit else 72
+    score_w = 250 if is_hier else 150 if is_merit else 72
     W = dict(rank=30, comb=98, cfg=34, dra=80, ddec=80, dpa=74,
              score=score_w, apply=150)
     total_w = sum(W.values())
@@ -8802,10 +9336,10 @@ def _opt_render_pair_results(
         spacing=0, width=total_w,
     )
 
-    n_plans = min(n1, n2, 10)
+    n_plans = min(min(len(r["score"]) for r in results), 10)
     plan_blocks: list = []
     for k in range(n_plans):
-        pa, pb = _parts(res1, k), _parts(res2, k)
+        parts_k = [_parts(r, k) for r in results]
         bg = "#f7f9fc" if k % 2 else "#ffffff"
         apply_btn = Button(
             label=f"Apply plan #{k + 1}" if k == 0 else f"Plan #{k + 1}",
@@ -8815,37 +9349,46 @@ def _opt_render_pair_results(
         apply_btn.js_on_click(CustomJS(
             args=dict(trig=opt_apply_both_trigger),
             code=f"""
-            if (!window.confirm("Apply 2-config plan #{k + 1}?\\n\\n"
-                + "This CLEARS and refills BOTH Config 1 and Config 2.")) {{
+            if (!window.confirm("Apply {n_cfg}-config plan #{k + 1}?\\n\\n"
+                + "This CLEARS and refills all {n_cfg} configs.")) {{
                 return;
             }}
             trig.value = "{k}," + Date.now() + "_" + Math.random();
             """,
         ))
-        line1 = row(
-            _cell(str(k + 1), W["rank"], bold=True, bg=bg),
-            _cell(_combined(pa, pb), W["comb"], bold=True, bg=bg),
-            _cell("C1", W["cfg"], bg=bg),
-            _cell(f"{pa['dra']:+.2f}″", W["dra"], mono=True, align="right", bg=bg),
-            _cell(f"{pa['ddec']:+.2f}″", W["ddec"], mono=True, align="right", bg=bg),
-            _cell(f"{pa['dpa']:+.3f}°", W["dpa"], mono=True, align="right", bg=bg),
-            _cell(pa["score_html"], W["score"], bg=bg),
-            apply_btn,
-            spacing=0, width=total_w,
-        )
-        line2 = row(
-            _cell("", W["rank"], bg=bg),
-            _cell("", W["comb"], bg=bg),
-            _cell("C2", W["cfg"], bg=bg),
-            _cell(f"{pb['dra']:+.2f}″", W["dra"], mono=True, align="right", bg=bg),
-            _cell(f"{pb['ddec']:+.2f}″", W["ddec"], mono=True, align="right", bg=bg),
-            _cell(f"{pb['dpa']:+.3f}°", W["dpa"], mono=True, align="right", bg=bg),
-            _cell(pb["score_html"], W["score"], bg=bg),
-            _cell("", W["apply"], bg=bg),
-            spacing=0, width=total_w,
-        )
+        # One line per config; the first carries the rank, combined score
+        # and the per-plan Apply button, the rest just their own offsets.
+        lines: list = []
+        for ci, pk in enumerate(parts_k):
+            cfg_cell = _cell(
+                f"<b style='color:{_config_color(ci)}'>C{ci + 1}</b>",
+                W["cfg"], bg=bg)
+            offsets = (
+                _cell(f"{pk['dra']:+.2f}″", W["dra"], mono=True,
+                      align="right", bg=bg),
+                _cell(f"{pk['ddec']:+.2f}″", W["ddec"], mono=True,
+                      align="right", bg=bg),
+                _cell(f"{pk['dpa']:+.3f}°", W["dpa"], mono=True,
+                      align="right", bg=bg),
+                _cell(pk["score_html"], W["score"], bg=bg),
+            )
+            if ci == 0:
+                lines.append(row(
+                    _cell(str(k + 1), W["rank"], bold=True, bg=bg),
+                    _cell(_combined(parts_k), W["comb"], bold=True, bg=bg),
+                    cfg_cell, *offsets, apply_btn,
+                    spacing=0, width=total_w,
+                ))
+            else:
+                lines.append(row(
+                    _cell("", W["rank"], bg=bg),
+                    _cell("", W["comb"], bg=bg),
+                    cfg_cell, *offsets,
+                    _cell("", W["apply"], bg=bg),
+                    spacing=0, width=total_w,
+                ))
         plan_blocks.append(column(
-            line1, line2, spacing=0, width=total_w,
+            *lines, spacing=0, width=total_w,
             styles={"border-bottom": "2px solid #d8dee8"},
         ))
 
@@ -9169,25 +9712,44 @@ def _opt_de_step() -> None:
                 breakdowns.append(per_tier)
             refined["tier_breakdown"] = breakdowns
 
-        # ── Multi-config (v1.4.0): after Config 1's DE finishes, run a
-        # second pass for Config 2 on a reduced budget (sequential greedy).
-        if _opt_run.get("n_pass", 1) >= 2 and _opt_run.get("pass", 1) == 1:
-            _opt_run["pass1_results"] = dict(refined)
+        # ── Multi-config (v1.4.0; generalised to N passes in v1.5.0) ──
+        # Sequential greedy: after each config's DE finishes, charge its
+        # best pointing's observed sources against their max-configs cap
+        # and, while configs remain, launch a fresh search for the next
+        # one on the reduced budget. Each refined result is stashed in
+        # `pass_results` (index i = config i).
+        n_pass = int(_opt_run.get("n_pass", 1))
+        cur = int(_opt_run.get("pass", 1))            # 1-based pass number
+        if n_pass >= 2:
+            _opt_run.setdefault("pass_results", []).append(dict(refined))
+
+        if n_pass >= 2 and cur < n_pass:
             ev = _opt_run["evaluator"]
-            best = (float(refined["ra"][0]), float(refined["dec"][0]),
-                    float(refined["pa"][0]))
+            # Sources observed by this config's best pick. `ev` still
+            # carries the budget this config ran under, so `det_best` is
+            # already disjoint from earlier configs except where a source's
+            # max_configs cap permits re-observation.
             try:
-                det_best, _, _ = ev.evaluate(*best)
-                observed = det_best.astype(int)
+                det_best, _, _ = ev.evaluate(
+                    float(refined["ra"][0]), float(refined["dec"][0]),
+                    float(refined["pa"][0]))
+                observed_now = det_best.astype(int)
             except Exception:  # noqa: BLE001
-                observed = np.zeros(len(_opt_run["effective_max"]), dtype=int)
+                observed_now = np.zeros(
+                    len(_opt_run["effective_max"]), dtype=int)
+            observed_total = _opt_run.get("observed_total")
+            if observed_total is None:
+                observed_total = np.zeros_like(observed_now)
+            observed_total = observed_total + observed_now
+            _opt_run["observed_total"] = observed_total
             eff = np.asarray(_opt_run["effective_max"], dtype=float)
-            budget2 = np.asarray(eff > observed, dtype=bool)
-            ev._budget = budget2
-            ev._budget_enabled = not bool(budget2.all())
-            _opt_run["budgets"][1] = budget2.copy()
-            # Reset the state machine for a fresh Config 2 search.
-            _opt_run["pass"] = 2
+            budget_next = np.asarray(eff > observed_total, dtype=bool)
+            ev._budget = budget_next
+            ev._budget_enabled = not bool(budget_next.all())
+            # budgets[config_index]: the next config is index `cur` (0-based).
+            _opt_run["budgets"][cur] = budget_next.copy()
+            # Reset the state machine for a fresh search of the next config.
+            _opt_run["pass"] = cur + 1
             _opt_run["phase"] = "grid"
             _opt_run["grid_idx"] = 0
             _opt_run["grid_scores"] = np.zeros(
@@ -9200,21 +9762,21 @@ def _opt_de_step() -> None:
                 _opt_run.pop(_k, None)
             _opt_run["started"] = _now()
             _opt_update_progress(
-                "Config 2: optimizing on the remaining budget…", 0.0)
+                f"Config {cur + 1} of {n_pass}: optimizing on the "
+                f"remaining budget…", 0.0)
             curdoc().add_next_tick_callback(_opt_drive)
             return
 
-        if _opt_run.get("n_pass", 1) >= 2:
-            _opt_run["pass2_results"] = dict(refined)
-            _opt_render_pair_results(
-                _opt_run.get("pass1_results") or refined, refined,
+        if n_pass >= 2:
+            _opt_render_multi_results(
+                _opt_run.get("pass_results") or [refined],
                 _opt_run["ra_ref"], _opt_run["dec_ref"], _opt_run["pa_ref"],
                 _opt_run["n_sources"],
                 method=_opt_run.get("method", "Democracy"),
             )
             _set_status(
-                "Optimization complete: 2-config plan ready. Apply a row "
-                "or the recommended plan.", "ok", clear_after=12,
+                f"Optimization complete: {n_pass}-config plan ready. Apply "
+                f"a row or the recommended plan.", "ok", clear_after=12,
             )
         else:
             _opt_render_results_in_modal(
@@ -9607,7 +10169,7 @@ def on_optimize():
     # against their cap. effective_max[i] = per-source override (Catalog
     # max_configs) if set, else the optimizer-modal global default (blank
     # = unlimited → +inf).
-    n_pass = max(1, min(2, int(mpt_num_configs_spinner.value or 1)))
+    n_pass = max(1, min(_MAX_CONFIGS, int(mpt_num_configs_spinner.value or 1)))
     _gmax_text = (opt_global_max_configs_input.value or "").strip()
     try:
         global_max = float(_gmax_text) if _gmax_text else np.inf
@@ -9695,14 +10257,15 @@ def on_optimize():
         "protect_mask": protect_mask_evaluator,
         "protect_mode_idx": protect_mode_idx,
         "protect_threshold": opt_protect_threshold_input.value,
-        # ── Multi-config (v1.4.0) ──
-        "n_pass": n_pass,            # 1 or 2 (= requested config count)
-        "pass": 1,                   # current pass
-        "n_total": n_total,          # grid points (for pass-2 grid reset)
+        # ── Multi-config (v1.4.0; up to _MAX_CONFIGS passes in v1.5.0) ──
+        "n_pass": n_pass,            # requested config count (1.._MAX_CONFIGS)
+        "pass": 1,                   # current pass (1-based)
+        "n_total": n_total,          # grid points (for per-pass grid reset)
         "effective_max": effective_max,
-        "pass1_results": None,       # stored after pass 1
-        # Per-config evaluator budgets used by Apply: config 0 → None
-        # (no budget), config 1 → the pass-2 budget mask.
+        "pass_results": [],          # one refined dict per config, in order
+        "observed_total": None,      # cumulative observed count across passes
+        # Per-config evaluator budgets used by Apply: config 0 → None (no
+        # budget); config k → the cumulative budget after configs 0..k-1.
         "budgets": {0: None},
     })
 
@@ -9981,8 +10544,17 @@ overwrite_modal_card = column(
     row(overwrite_modal_yes_btn, overwrite_modal_no_btn, spacing=10),
     spacing=10,
     width=560,
+    # As a fixed-position Bokeh root this column otherwise inherits a
+    # full-viewport height (a near-empty 100vh box). "min" asks Bokeh to
+    # shrink-wrap; the real enforcement is `_overwrite_modal_fit_js` below
+    # (Bokeh's layout sets the height with !important, so only an inline
+    # !important can shrink it). `max-height` + scroll is a safety net.
+    height_policy="min",
     visible=False,
-    css_classes=["vmpt-modal-card"],
+    # `vmpt-confirm-card` is a unique hook for the fit-to-content JS below
+    # (the title lives in a nested shadow root, so we can't find this card
+    # by its text — a dedicated class is the reliable handle).
+    css_classes=["vmpt-modal-card", "vmpt-confirm-card"],
     styles={
         "position": "fixed",
         "top": "50%", "left": "50%",
@@ -9993,8 +10565,28 @@ overwrite_modal_card = column(
         "box-shadow": "0 10px 32px rgba(0, 30, 80, 0.3)",
         "padding": "16px 18px",
         "z-index": "1021",
+        "max-height": "85vh",
+        "overflow-y": "auto",
     },
 )
+# Bokeh's layout CSS forces the card to a full-viewport height with
+# `!important`; a plain inline style or a document rule can't beat it, so
+# pin the height to its content with an inline `!important` whenever the
+# dialog opens (the only declaration that wins).
+_overwrite_modal_fit_js = CustomJS(code="""
+if (!cb_obj.visible) return;
+const pin = () => {
+    const out = [];
+    (function w(r){
+        r.querySelectorAll('.vmpt-confirm-card').forEach(e => out.push(e));
+        r.querySelectorAll('*').forEach(el => { if (el.shadowRoot) w(el.shadowRoot); });
+    })(document);
+    if (out[0]) out[0].style.setProperty('height', 'fit-content', 'important');
+};
+pin();
+setTimeout(pin, 30);
+""")
+overwrite_modal_card.js_on_change("visible", _overwrite_modal_fit_js)
 
 # Stash the pending callback here while the user decides. Keying by a
 # dict (not a closure variable) so the JS-free Python handlers stay
@@ -10108,141 +10700,150 @@ catalog_hover_modal_top_close_btn.on_click(_close_catalog_hover_modal)
 # Pick (instrument, layers, slitlet, filters, undo/clear) →
 # Save (session save/load, APT export).
 
+# A little left/right breathing room inside every tab, created within the
+# tab's own column so the Tabs/sidebar widths are unchanged.
+_TAB_PAD = {"padding": "2px 4px 0 8px"}
+
 image_tab = TabPanel(title="Input", child=column(
-    Div(text="<b>Image</b> — try an example:"),
-    row(example_a370_btn, example_r0600_btn),
-    _wrap_path_picker(
-        fits_path_input, fits_browse_btn,
-        header_html="<small><b>or</b> a local FITS:</small>",
-    ),
-    Div(text="<small><b>or</b> JPG + sidecar FITS:</small>"),
-    _wrap_path_picker(
-        sidecar_path_input, sidecar_browse_btn,
-        header_html="<small>Sidecar FITS (WCS)</small>",
-    ),
-    _wrap_path_picker(
-        jpg_path_input, jpg_browse_btn,
-        header_html="<small>JPG / PNG</small>",
-    ),
-    Div(text="<b>Catalogs</b> <small>(CSV / ASCII / FITS with ID, RA, DEC; "
-             "you can load multiple — each can be toggled on/off or removed)</small>"),
-    _wrap_path_picker(
-        catalog_path_input, catalog_browse_btn,
-        header_html="",
-    ),
-    row(catalog_add_btn),
+    Div(text="<div style='font-size:12px; color:#5a6b85; margin:2px 0 6px'>"
+             "Load a background image and target catalogs.</div>",
+        width=SIDEBAR_W - 20),
+    load_image_open_btn,
+    _tab_caption("An example field, a local FITS, or a JPG/PNG + WCS sidecar."),
+    load_catalog_open_btn,
+    _tab_caption("CSV / ASCII / FITS with ID, RA, Dec — add several to layer."),
+    _section_header("Loaded catalogs",
+                    "Target catalogs layered on the image. Tick to show/hide, "
+                    "▲▼ to reorder draw order, ✕ to remove."),
     catalog_list_column,
     catalog_edit_btn,
+    _section_header("Display filters",
+                    "Show only catalog sources at or below these limits; "
+                    "leave blank to show all."),
     catalog_priority_input,
     catalog_mag_input,
-    width=SIDEBAR_W - 20,
+    width=SIDEBAR_W - 6, styles=_TAB_PAD,
 ))
 
 aim_tab = TabPanel(title="Pointing", child=column(
-    Div(text="<b>Disperser / Filter</b>"),
+    _section_header("Disperser / filter",
+                    "NIRSpec disperser + filter — sets the wavelength range and "
+                    "the dispersed-spectrum length used for collision checks."),
     disperser_filter_select,
-    Div(text="<b>Pointing center</b>"),
+    _section_header("Pointing center",
+                    "Sky RA/Dec the MSA aperture is centred on. Shift-click the "
+                    "image to move it."),
     row(ra_input, dec_input),
-    Div(text="<b>Rotation</b>"),
+    _section_header("Rotation",
+                    "Aperture roll on sky. Type the V3 PA or NIRSpec APA "
+                    "directly (APA = V3 PA + 138.575°)."),
     v3pa_slider,
     row(v3pa_input, apa_input),
     pa_help_div,
-    Div(text="<b>Visibility window</b>"),
+    _section_header("Visibility window",
+                    "Compute the V3 PA range JWST allows for a given date "
+                    "(from the JWST visibility tool)."),
     row(visibility_date_input, visibility_btn),
     visibility_div,
-    Div(text="<b>Optimize MSA pointing</b> "
-             "<small>(grid search + refine, hMPT-derived)</small>"),
-    Div(text=("<small style='color:#5a6b85; line-height:1.4'>"
-              "Configure the search (method, ΔRA / ΔDec / ΔPA, "
-              "collision protection, …) and run it from a single "
-              "dialog. Results land in the same modal as before.</small>"),
-        width=SIDEBAR_W - 20),
+    _section_header("Optimize MSA pointing",
+                    "Search (RA, Dec, V3 PA) for the placement that captures the "
+                    "most targets in operable, well-centred shutters — by count, "
+                    "weight, or priority tier. Opens the optimizer dialog."),
     opt_open_btn,
-    Div(text="<b>MPT configurations</b> "
-             "<small>(APT-style; each is a separate exposure)</small>"),
+    _section_header("MPT configurations",
+                    "Plan up to 5 separate exposures (APT-style); choose how many "
+                    "and which one you're editing. 'View MPT catalog…' lists the "
+                    "sources placed across all of them."),
     row(mpt_num_configs_spinner, mpt_config_select, spacing=10),
     mpt_active_config_div,
     mpt_view_btn,
-    width=SIDEBAR_W - 20,
+    width=SIDEBAR_W - 6, styles=_TAB_PAD,
 ))
 
 pick_tab = TabPanel(title="Settings", child=column(
-    Div(text="<b>Layers</b>"),
+    _section_header("Layers", "Show or hide overlay layers on the canvas."),
     layers_box,
-    Div(text="<b>Slitlet</b>"),
+    _section_header("Slitlet",
+                    "Number of shutters opened per click, and whether clicks "
+                    "snap to the nearest operable shutter."),
     slitlet_select,
     snap_box,
-    Div(text="<b>Overlay appearance</b>"),
+    _section_header("Overlay appearance",
+                    "Per-layer transparency (alpha) and outline width."),
     overlay_layer_select,
     overlay_alpha_slider,
     overlay_stroke_slider,
-    Div(text="<b>Canvas</b> <small style='color:#5a6b85'>(pixels)</small>"),
+    _section_header("Canvas (pixels)", "On-screen size of the image canvas."),
     row(canvas_x_spinner, canvas_y_spinner, spacing=10),
-    Div(text="<b>Customise display</b>"),
+    _section_header("Customise display",
+                    "Choose which fields appear in the top status bar and the "
+                    "catalog hover tooltip."),
     stats_bar_open_btn,
     catalog_hover_open_btn,
-    Div(text="<b>Actions</b>"),
+    _section_header("Actions",
+                    "Undo the last pick, clear all open shutters, or reset "
+                    "display settings to defaults."),
     row(undo_btn, clear_btn),
     reset_prefs_btn,
-    width=SIDEBAR_W - 20,
+    width=SIDEBAR_W - 6, styles=_TAB_PAD,
 ))
 
 # MPT tab — everything to do with APT / MPT plans: import (from JSON,
 # shutter CSV, or .aptx archive / program ID), the session save/load
 # round-trip for collaboration, and the eMPT export bundle.
+def _mpt_tab_caption(text):
+    return Div(text=f"<div style='font-size:11px; color:#7a8699; "
+                    f"margin:0 0 12px 2px'>{text}</div>", width=SIDEBAR_W - 20)
+
+
 mpt_tab = TabPanel(title="MPT", child=column(
-    Div(text="<b>Import a plan</b>"),
-    _wrap_path_picker(
-        mpt_json_path_input, mpt_json_browse_btn,
-        header_html="<small>From a single MPT JSON</small>",
-    ),
-    mpt_plan_select,
-    mpt_load_btn,
-    Div(text="<hr style='border:none; border-top:1px dashed #d8dee8; "
-             "margin:8px 0'/>"),
-    _wrap_path_picker(
-        mpt_csv_path_input, mpt_csv_browse_btn,
-        header_html="<small>Or a shutter CSV (open-mask only)</small>",
-    ),
-    mpt_csv_load_btn,
-    Div(text="<hr style='border:none; border-top:1px dashed #d8dee8; "
-             "margin:8px 0'/>"),
-    _wrap_path_picker(
-        apt_path_input, apt_path_browse_btn,
-        header_html="<small>Or straight from an APT <code>.aptx</code> file or program ID</small>",
-    ),
-    apt_program_input,
-    apt_fetch_btn,
-    apt_plan_select,
-    apt_load_btn,
-    Div(text="<hr style='border:none; border-top:2px solid #d8dee8; "
-             "margin:12px 0 6px 0'/>"),
-    Div(text="<b>Save / share session</b>"),
-    _wrap_path_picker(
-        session_save_path_input, session_save_browse_btn,
-        header_html="<small>Save destination</small>",
-    ),
-    session_save_btn,
-    _wrap_path_picker(
-        session_load_path_input, session_load_browse_btn,
-        header_html="<small>Load from session file</small>",
-    ),
-    session_load_btn,
-    Div(text="<hr style='border:none; border-top:2px solid #d8dee8; "
-             "margin:12px 0 6px 0'/>"),
-    Div(text=f"<b>Export to APT</b> "
-             f"<small>(eMPT bundle + <code>{MPT_PLAN_FILENAME}</code>)</small>"),
-    _wrap_path_picker(
-        export_dir_input, export_dir_browse_btn,
-        header_html="<small>Output directory</small>",
-    ),
-    export_btn,
-    width=SIDEBAR_W - 20,
+    Div(text="<div style='font-size:12px; color:#5a6b85; margin:2px 0 6px'>"
+             "Move plans in and out of vMPT — each opens a dialog.</div>",
+        width=SIDEBAR_W - 20),
+    mpt_open_import_btn,
+    _mpt_tab_caption("An APT/MPT plan, shutter mask, APT program, "
+                     "or a saved vMPT session."),
+    mpt_open_save_btn,
+    _mpt_tab_caption("A shareable vMPT session bundle (your full picking state)."),
+    mpt_open_export_btn,
+    _mpt_tab_caption(f"The eMPT bundle + {MPT_PLAN_FILENAME} + an "
+                     "APT-importable .cat."),
+    width=SIDEBAR_W - 6, styles=_TAB_PAD,
 ))
+
+# Tab strip styling. Document-level CSS can't reach the Tabs' shadow
+# root (see the _MODAL_HEADER_STYLES note), so the tab buttons are
+# styled via a per-widget InlineStyleSheet. Each tab gets a visible
+# border + light fill so it reads as a clickable button even at rest;
+# the active tab is white with a blue top accent, and hovering an
+# inactive tab highlights it.
+_SIDEBAR_TABS_CSS = """
+.bk-header { border-bottom: 1px solid #c2d2e6; padding-bottom: 0; }
+.bk-tab {
+  padding: 4px 13px;
+  margin-right: 3px;
+  border: 1px solid #cdd8e8;
+  border-top: 2px solid transparent;
+  border-radius: 6px 6px 0 0;
+  background: #f6f8fc;
+  color: #41557a;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background .12s, color .12s, border-color .12s;
+}
+.bk-tab:hover { background: #e6eef9; color: #163a63; border-color: #9db8da; }
+.bk-tab.bk-active {
+  background: #ffffff;
+  border-color: #9db8da;
+  border-top: 2px solid #2f6fb3;
+  color: #163a63;
+}
+"""
 
 sidebar_tabs = Tabs(
     tabs=[image_tab, aim_tab, pick_tab, mpt_tab],
     width=SIDEBAR_W,
+    stylesheets=[InlineStyleSheet(css=_SIDEBAR_TABS_CSS)],
 )
 
 # Sidebar (no stats — stats now live above the figure as a wide bar).
@@ -10259,6 +10860,11 @@ sidebar = column(
         # (42 px tall) so the last widget in any tab isn't covered.
         "max-height": "calc(100vh - 46px)",
         "padding-bottom": "8px",
+        # A shallow tint — distinct from the white central canvas but light
+        # enough that the (darkened) section titles read clearly; a crisp
+        # divider keeps the panel edge defined.
+        "background": "#eef1f7",
+        "border-right": "1px solid #d3dae6",
     },
 )
 
@@ -10307,6 +10913,18 @@ curdoc().add_root(catalog_hover_modal_card)
 # stacks above every other modal.
 curdoc().add_root(overwrite_modal_backdrop)
 curdoc().add_root(overwrite_modal_card)
+# MPT-tab dialogs (Import / Save / Export).
+curdoc().add_root(import_modal_backdrop)
+curdoc().add_root(import_modal_card)
+curdoc().add_root(save_modal_backdrop)
+curdoc().add_root(save_modal_card)
+curdoc().add_root(export_modal_backdrop)
+curdoc().add_root(export_modal_card)
+# Input-tab dialogs (Load image / Load catalog).
+curdoc().add_root(load_image_modal_backdrop)
+curdoc().add_root(load_image_modal_card)
+curdoc().add_root(load_catalog_modal_backdrop)
+curdoc().add_root(load_catalog_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.
@@ -10492,7 +11110,7 @@ def _apply_prefs(prefs: dict) -> None:
                 pass
         if "default_num_configs" in prefs:
             try:
-                v = max(1, min(2, int(prefs["default_num_configs"])))
+                v = max(1, min(_MAX_CONFIGS, int(prefs["default_num_configs"])))
                 mpt_num_configs_spinner.value = v
                 _ensure_n_configs(v)
             except (ValueError, TypeError):
@@ -10618,15 +11236,17 @@ reset_prefs_btn.on_click(_on_reset_prefs)
 # actual loading. Loads are deferred to the next IO tick so the
 # document is fully wired before we trigger heavy work.
 def _parse_startup_args(argv: list[str]) -> dict:
-    """Tolerant parser for `--fits`, `--jpg`, `--wcs`, `--catalog` (repeatable).
+    """Tolerant parser for `--fits`, `--jpg`, `--wcs`, `--catalog`
+    (repeatable), and a default roll via `--v3pa` or `--apa` (degrees).
 
     Unknown args are silently ignored — Bokeh prefixes some of its own
     flags before --args and we don't want to throw on them."""
-    out: dict = {"fits": None, "jpg": None, "wcs": None, "catalogs": []}
+    out: dict = {"fits": None, "jpg": None, "wcs": None, "catalogs": [],
+                 "v3pa": None, "apa": None}
     i = 0
     while i < len(argv):
         a = argv[i]
-        if a in ("--fits", "--jpg", "--wcs") and i + 1 < len(argv):
+        if a in ("--fits", "--jpg", "--wcs", "--v3pa", "--apa") and i + 1 < len(argv):
             out[a[2:]] = argv[i + 1]
             i += 2
         elif a == "--catalog" and i + 1 < len(argv):
@@ -10700,6 +11320,30 @@ def _autoload_from_args() -> None:
             _show_loading(f"Loading catalog: {Path(c).name}…")
             _deferred(_load_catalog_from_path, c, on_complete=cb)
         steps.append(step_cat)
+
+    # Default pointing roll from --v3pa / --apa. Applied LAST (after the
+    # image + catalogs load) so the MSA overlay renders at the requested
+    # angle. --v3pa wins if both are given. APA = V3 PA + V3IdlYAngle.
+    pa_target = None
+    try:
+        if args.get("v3pa") is not None:
+            pa_target = float(args["v3pa"]) % 360.0
+        elif args.get("apa") is not None:
+            pa_target = (float(args["apa"]) - V3_IDL_Y_ANGLE) % 360.0
+    except (TypeError, ValueError):
+        _set_status("--v3pa / --apa must be a number in degrees; ignoring.",
+                    "err")
+
+    if pa_target is not None:
+        def step_pa(cb, v=pa_target):
+            _sync_pa_widgets(v)
+            # Re-render the overlay at the new roll only if an image is
+            # loaded; otherwise just leaving the PA widgets set is enough.
+            if state.get("image") is not None:
+                _rebuild_shutter_catalog_index()
+                refresh_overlays()
+            cb()
+        steps.append(step_pa)
 
     # Chain runner — each step calls its `cb` (= run_next) in `finally`
     # so the next step starts only after the previous one releases.

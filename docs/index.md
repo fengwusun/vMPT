@@ -69,7 +69,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   - Democracy / Meritocracy / Hierarchy + shutter-collision
     protection.
 * - **[Multiple configurations](multiconfig.md)**
-  - Plan up to two APT-style MPT configs, the auto-both optimizer, the
+  - Plan up to five APT-style MPT configs, the auto-all optimizer, the
     max-configs cap, the MPT catalog viewer, and multi-source shutters.
 * - **[Catalogs](catalogs.md)**
   - CSV / ASCII / FITS columns, multi-catalog stacking, weights,

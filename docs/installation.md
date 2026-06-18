@@ -17,8 +17,14 @@ The console script `vmpt` accepts the same flags as the legacy
 vmpt --port 5010                                                 # different port
 vmpt --fits img.fits --catalog a.csv --catalog b.csv             # stack catalogs
 vmpt --jpg img.jpg --wcs wcs.fits --catalog targets.csv          # JPG + WCS pair
+vmpt --jpg img.jpg --wcs wcs.fits --v3pa 209                      # start at a given roll
 vmpt examples download                                           # grab example_a370 + example_r0600
+vmpt --version                                                   # print version and exit
 ```
+
+`--v3pa DEG` / `--apa DEG` set the initial pointing roll (V3 PA, or the
+NIRSpec aperture PA — `APA = V3 PA + V3IdlYAngle`; `--v3pa` wins if both
+are given). `vmpt --version` (also `-version` / `-V`) prints the version.
 
 The wheel itself is ~20 MB (includes the MSA grid + per-shutter
 dispersion table with all 9 supported disperser/filter combos).
@@ -43,7 +49,7 @@ git clone https://github.com/fengwusun/vMPT.git
 cd vMPT
 pip install -e .            # editable install, picks up local edits
 ./run.sh                    # same as `vmpt` after install
-pytest tests/               # 188 passed, 5 skipped
+pytest tests/               # 238 passed, 5 skipped
 ```
 
 ### STScI's `stenv`

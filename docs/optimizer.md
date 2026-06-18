@@ -15,6 +15,19 @@ either — the MSA geometry, coordinate transforms, and constraint
 machinery are independently implemented, and the search algorithm
 is a simpler version than hMPT's.
 
+```{note}
+**Speed (v1.5.0).** Every trial pointing has to map each source's
+(ax, ay) position to a shutter. That map was previously a
+`CloughTocher2D` interpolation evaluated afresh on all ~10⁴ trial
+pointings — the dominant cost. It is now a degree-4 polynomial fit
+once per quadrant from the MSA grid (in normalised coordinates),
+which reproduces the shutter assignment essentially exactly
+(max residual 2×10⁻⁴ shutters) while running **~20–40× faster**.
+This is what makes the multi-pass [N-config](multiconfig.md) search
+practical — a five-config plan drops from minutes to ~20 s. The
+reference interpolation is kept as an automatic fallback.
+```
+
 ## Method
 
 Three modes, picked from the **Method** dropdown:
