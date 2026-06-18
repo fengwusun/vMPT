@@ -23,7 +23,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
-from bokeh.events import DoubleTap, RangesUpdate, Tap
+from bokeh.events import DoubleTap, MouseLeave, MouseMove, RangesUpdate, Tap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.events import DocumentReady
@@ -1588,6 +1588,8 @@ help_toggle_btn = Button(label="Show help", button_type="default", width=110)
 # `_advance_tip` registered as a periodic callback further down.
 _TIPS = [
     ("🎯", "Pick mode", "Click anywhere on the image — vMPT snaps to the nearest operable shutter and opens an <b>N-shutter slitlet</b> (set N=1/2/3/5 in the <b>Setting</b> tab)."),
+    ("⌨️", "Pan with the keyboard", "Glide the view with <b>W&nbsp;A&nbsp;S&nbsp;D</b> or the <b>arrow keys</b> — like dragging, but hands stay on the keys. Hold <b>Shift</b> for bigger steps. (Pauses while you're typing in a field.)", True),
+    ("🔲", "Space toggles one shutter", "Hover any operable shutter and tap <b>Space</b> to open or close <b>just that shutter</b> — independent of the N-shutter slitlet size. Handy for fine-tuning a mask cell by cell.", True),
     ("✋", "Move the pointing", "<b>Shift + click</b> anywhere on the image to recentre the pointing on that spot. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks the current pointing."),
     ("🔁", "Toggle a slitlet", "Click an already-open shutter to close it. Its slitlet siblings come down with it."),
     ("🎨", "Cyan flag", "Double-click a shutter to toggle a <span style='color:#0aa;font-weight:600'>cyan highlight</span> — a visual flag for your own review. It's not exported."),
@@ -1602,6 +1604,7 @@ _TIPS = [
     ("🛰️", "Two ways to load APT", "<b>MPT</b> tab → either point at a local <code>.aptx</code>, or just type a JWST program ID (e.g. <code>1208</code>) and vMPT pulls it from STScI."),
     ("🚀", "Pre-load via run.sh", "Start the app with files ready: <code>./run.sh --fits img.fits --catalog tgts.csv</code>. Use <code>--jpg + --wcs</code> for JPG/sidecar. <code>--port 5010</code> picks a different port."),
     ("🧮", "Optimize MSA pointing", "<b>Pointing</b> tab → bottom panel. Set ΔRA/ΔDec/ΔPA (zero on any axis = freeze it) and click Run. Get the top 10 (RA, Dec, V3 PA) ranked by sources placed."),
+    ("🔀", "Plan up to 5 configs", "Need more than one pointing? Set <b>Number of configs</b> (<b>Pointing</b> → MPT configurations) up to 5. Each gets its own colour, and the optimizer fills them in turn so they cover different sources, not duplicates.", True),
     ("📝", "Edit catalog inline", "<b>Input</b> tab → <b>Edit catalog…</b>. Double-click any cell to edit. Click 🗑️ on a row to delete it. ↶ Undo / ↷ Redo revert mistakes. Save as CSV or commit back to the live catalog."),
     ("🎴", "Layer multiple catalogs", "Click <b>Add</b> in the Input tab to layer several catalogs. Each gets its own colour. ▲ / ▼ reorder the stack; ✕ removes one; checkbox toggles visibility."),
     ("🖼️", "Pixel-perfect canvas", "Image pixels are always rendered 1:1 — resizing the window letterboxes around the canvas instead of stretching the image. Aspect lock is set automatically when you load."),
@@ -1629,8 +1632,17 @@ tip_div = Div(
 def _render_tip(idx: int) -> str:
     """One-tip card. Each render carries an explicit @keyframes block so a
     fresh DOM swap (Bokeh redoes the inner HTML when `text` changes) restarts
-    the fade-in animation."""
-    emoji, header, body = _TIPS[idx % len(_TIPS)]
+    the fade-in animation. A tip may carry an optional 4th element — a truthy
+    `is_new` flag — which adds a red NEW pill to its header."""
+    tip = _TIPS[idx % len(_TIPS)]
+    emoji, header, body = tip[0], tip[1], tip[2]
+    is_new = len(tip) > 3 and tip[3]
+    badge = (
+        '<span style="background:#e8453c; color:#fff; font-size:8.5px; '
+        'font-weight:800; letter-spacing:0.5px; padding:1px 5px; '
+        'border-radius:8px; margin-left:7px; vertical-align:middle;">NEW</span>'
+        if is_new else ''
+    )
     return (
         '<style>'
         '@keyframes vmpt-tip-fadein { '
@@ -1644,7 +1656,7 @@ def _render_tip(idx: int) -> str:
         '  <div>'
         '    <div style="font-weight: 700; color: #8a6300; letter-spacing: 0.3px; '
         '                margin-bottom: 3px; font-size: 11.5px; text-transform: uppercase;">'
-        f'      Tip · {header}'
+        f'      Tip · {header}{badge}'
         '    </div>'
         f'    <div>{body}</div>'
         '  </div>'
@@ -1709,6 +1721,7 @@ help_div = Div(
 <ul>
   <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Setting</b>.</li>
   <li><b>Click</b> → opens N-shutter slitlet at the nearest operable shutter. Click an open shutter to close the slitlet.</li>
+  <li><b>Hover + Space</b> → toggle <b>just the one</b> hovered shutter open/close (ignores the slitlet size; operable shutters only).</li>
   <li><b>Double-click</b> → toggles <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
   <li>Layers (Setting tab → <b>Layers</b>):
     <ul>
@@ -1741,8 +1754,8 @@ help_div = Div(
 </ul>
 <b>Interactions</b>
 <ul>
-  <li><b>Wheel</b>: zoom · <b>Drag</b>: pan · <b>Box zoom</b>: toolbar → drag</li>
-  <li><b>Reset</b>: toolbar · <b>Undo</b>: Setting → <b>Undo last</b></li>
+  <li><b>Wheel</b>: zoom · <b>Drag</b> or <b>W A S D</b> / <b>arrows</b>: pan (<b>Shift</b> = bigger steps) · <b>Box zoom</b>: toolbar → drag</li>
+  <li><b>Hover + Space</b>: toggle the single hovered shutter · <b>Reset</b>: toolbar · <b>Undo</b>: Setting → <b>Undo last</b></li>
 </ul>
 </div>
 <p style='margin:4px 0'>Full reference in <code>README.md</code> · file roles in <code>CONTEXT.md</code>.</p>
@@ -3332,11 +3345,45 @@ def refresh_overlays() -> None:
     stuck_buffer: dict[int, int] = {}
     stuck_counts: dict[int, int] = {}
     user_counts: dict[int, int] = {}
-    if user_groups or stuck_keys:
+
+    # Base alpha per category — slider-controlled in Settings →
+    # Overlay appearance, persisted via the prefs system, stashed
+    # on `state`. Per-polygon alpha = min(1, base × n_conflicts)
+    # where n_conflicts is the total dispersing-source count
+    # overlapping that shutter. Read here (before the accumulation)
+    # because the spec-overlap cache signature includes them.
+    base_alpha_stuck = float(state.get("overlap_base_alpha_stuck", 0.20))
+    base_alpha_user = float(state.get("overlap_base_alpha_user", 0.20))
+    base_alpha_both = float(state.get("overlap_base_alpha_both", 0.20))
+
+    # ── Spec-overlap memoization ──────────────────────────────────────
+    # The conflict identification + colour assignment below is purely a
+    # function of the open-shutter mask, the disperser/filter, and the
+    # alpha sliders — it does NOT depend on the pointing, the V3 PA, or
+    # the zoom (those only enter at *projection* time, in the `_iv` /
+    # `_partition_and_project` calls further down). But refresh_overlays
+    # re-runs on every pan/zoom (RangesUpdate), and for dense masks the
+    # global accumulation + colouring is hundreds of ms. So we memoise
+    # the four view-independent outputs (the three alpha dicts + the
+    # affected-index set) keyed by that signature, and on a pure pan/zoom
+    # reuse them — only the cheap render-time cull (`_iv`) re-runs.
+    _open_sig = frozenset(
+        (q, s, d, getattr(sh, "target_id", None))
+        for (q, s, d), sh in state["open_shutters"].items()
+    )
+    _overlap_sig = (
+        _open_sig, state["disperser"], state["filter"],
+        base_alpha_stuck, base_alpha_user, base_alpha_both,
+    )
+    _overlap_cache = state.get("_spec_overlap_cache")
+    _overlap_cached = (
+        _overlap_cache is not None and _overlap_cache[0] == _overlap_sig
+    )
+
+    if (not _overlap_cached) and (user_groups or stuck_keys):
         v2_overlap = float(v2_overlap_distance(state["disperser"], state["filter"]))
         s_arr = (np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) % (171 * 365)) // 365
         q_arr = np.arange(_V2_OFFSETS_ALL.size, dtype=np.int64) // (171 * 365) + 1
-        in_view_op = in_view & (_FLAT_REASON == 0)
 
         # Per-shutter on-detector x/y range (loaded lazily by combo).
         # Two complementary uses:
@@ -3420,11 +3467,23 @@ def refresh_overlays() -> None:
         hit_sources: dict[int, set[tuple[str, int]]] = {}
 
         # Broadened candidate mask: include stuck-open shutters too so
-        # we can detect user-pick ↔ stuck-open touching collisions.
-        # The silver-edge layer keeps its own `in_view_op` (operable
-        # only); this `in_view_candidates` is just for the contamination
-        # accumulator.
-        in_view_candidates = in_view & (_FLAT_REASON != 1)
+        # we can detect user-pick ↔ stuck-open touching collisions. The
+        # silver-edge layer computes its own operable-AND-in-view mask
+        # further down; this `in_view_candidates` is just for the
+        # contamination accumulator.
+        #
+        # IMPORTANT — the contamination computation is **view-INDEPENDENT**.
+        # A shutter's overlap colour (purple / orange / pink) is a property
+        # of the open mask + disperser + pointing, NOT of where the user is
+        # currently looking. Culling the candidate set to the visible view
+        # made the conflict identification — and therefore the colours —
+        # change with zoom/pan (a conflicting partner scrolling off-screen
+        # would silently demote its whole band purple→orange→pink). So we
+        # accumulate over ALL operable + stuck shutters across the MSA here;
+        # the result is culled to the view only at render time (the
+        # `_partition_and_project` calls below), keeping the polygon count
+        # bounded without making the colours depend on the viewport.
+        in_view_candidates = _FLAT_REASON != 1
 
         def _accumulate(
             source_type: str,
@@ -3466,6 +3525,18 @@ def refresh_overlays() -> None:
                     state["disperser"], state["filter"],
                     q_o, s_center, d_o,
                 )
+                # Same detector half = both quadrants that fold onto this
+                # detector (Q1/Q3 → NRS1, Q2/Q4 → NRS2). The spectrograph
+                # optics map the partner quadrants onto the SAME detector
+                # rows: Q1 s=k and Q3 s=k land within ~3 px in detector-y
+                # (less than one 5-px shutter) — verified against the
+                # `y_nrs*` grids — so matching the partner quadrant by `s`
+                # here is correct (a real, same-row collision), NOT over-
+                # firing. Do NOT restrict this to `q_arr == q_o`: the large
+                # V2 separation between the quadrants is irrelevant because
+                # `s` already encodes the (shared) detector row, and the
+                # restriction would silently drop the real Q1↔Q3 / Q2↔Q4
+                # collisions.
                 partners = NRS1_QUADS if q_o in NRS1_QUADS else NRS2_QUADS
                 same_det = np.isin(q_arr, list(partners))
                 anchor_flat = (
@@ -3497,11 +3568,24 @@ def refresh_overlays() -> None:
                 _drift_for_debug = slope_k * dv2  # noqa: F841
                 different_col = d_arr != (d_o - 1)
                 near_v2 = different_col & (np.abs(dv2) < v2_overlap)
-                half_extent = (max(ss) - min(ss)) // 2 + (max(ss) - min(ss)) % 2
-                s_pred = s_arr - ((s_center - 1) + row_offset)
-                direct_row = np.abs(s_pred) <= half_extent
-                buffer_row = (np.abs(s_pred) <= (half_extent + SHVAL_S_TOLERANCE)
-                               ) & (~direct_row)
+                # Cross-dispersion footprint = the slitlet's ACTUAL open rows
+                # [s_lo, s_hi] ± the ±1 buffer — NOT s_center ± half_extent.
+                # The centre-based form is symmetric around a *rounded* centre,
+                # which skews even-shutter slitlets: a 2-shutter slitlet at
+                # s=[112,113] rounds its centre to 112 and so reaches one row
+                # LOWER than the 3-shutter slitlet [112,113,114] that contains
+                # it — letting a subset flag a collision its own superset does
+                # not. Anchoring on [s_lo, s_hi] makes the band monotonic in
+                # the open set (superset band ⊇ subset band). For odd slitlets
+                # it is identical to the old centre form. row_offset (tilt) = 0.
+                s_lo0 = (min(ss) - 1) + row_offset   # lowest open row (0-based)
+                s_hi0 = (max(ss) - 1) + row_offset   # highest open row (0-based)
+                direct_row = (s_arr >= s_lo0) & (s_arr <= s_hi0)
+                buffer_row = (
+                    (s_arr >= s_lo0 - SHVAL_S_TOLERANCE)
+                    & (s_arr <= s_hi0 + SHVAL_S_TOLERANCE)
+                    & (~direct_row)
+                )
 
                 # === SUBTRACTIVE: x-range filter ===
                 # Drops candidates whose spectrum doesn't physically
@@ -3651,15 +3735,6 @@ def refresh_overlays() -> None:
         for i in set(stuck_direct) | set(stuck_buffer):
             stuck_counts[i] = stuck_direct.get(i, 0) + stuck_buffer.get(i, 0)
 
-    # Base alpha per category — slider-controlled in Settings →
-    # Overlay appearance, persisted via the prefs system, stashed
-    # on `state`. Per-polygon alpha = min(1, base × n_conflicts)
-    # where n_conflicts is the total dispersing-source count
-    # overlapping that shutter.
-    base_alpha_stuck = float(state.get("overlap_base_alpha_stuck", 0.20))
-    base_alpha_user = float(state.get("overlap_base_alpha_user", 0.20))
-    base_alpha_both = float(state.get("overlap_base_alpha_both", 0.20))
-
     def _partition_and_project(
         idx_to_alpha: dict[int, float],
     ) -> dict:
@@ -3743,9 +3818,27 @@ def refresh_overlays() -> None:
         elif n_total_s >= 1:
             stuck_only_alpha[i] = min(1.0, base_alpha_stuck * n_total_s)
 
-    src_spec_overlap_stuck.data = _partition_and_project(stuck_only_alpha)
-    src_spec_overlap_user.data = _partition_and_project(user_only_alpha)
-    src_spec_overlap_both.data = _partition_and_project(both_alpha)
+    # On a cache hit the accumulation + colouring above were skipped (the
+    # `if (not _overlap_cached) …` gate and the empty `all_idx` loop), so
+    # restore the four view-independent outputs from the cache. On a miss
+    # we just computed them — stash them for the next pan/zoom.
+    if _overlap_cached:
+        (stuck_only_alpha, user_only_alpha,
+         both_alpha, all_idx) = _overlap_cache[1]
+    else:
+        state["_spec_overlap_cache"] = (
+            _overlap_sig,
+            (stuck_only_alpha, user_only_alpha, both_alpha, all_idx),
+        )
+
+    # The colours above are computed globally (view-independent); cull to
+    # the visible view ONLY here, at render time, so the polygon count
+    # stays bounded while a shutter's colour never depends on the zoom.
+    def _iv(alpha):
+        return {i: a for i, a in alpha.items() if in_view[i]}
+    src_spec_overlap_stuck.data = _partition_and_project(_iv(stuck_only_alpha))
+    src_spec_overlap_user.data = _partition_and_project(_iv(user_only_alpha))
+    src_spec_overlap_both.data = _partition_and_project(_iv(both_alpha))
 
     # Aggregate index set for the "operable silver-edge" filter
     # below — every shutter that's affected by ANY overlap (any of
@@ -4861,7 +4954,7 @@ def _sky_to_v2v3(sky: SkyCoord, fiducial: SkyCoord, pa_v3: float) -> tuple[float
     return v2_off + MSA_V2_REF, v3_off + MSA_V3_REF
 
 
-def _rebuild_shutter_catalog_index() -> None:
+def _rebuild_shutter_catalog_index_core() -> None:
     """Vectorised: for every catalog source visible at the current pointing
     + PA, find the nearest operable shutter and bucket the source id under
     that shutter. The result lives in state['shutter_to_catids'] as
@@ -4920,6 +5013,17 @@ def _rebuild_shutter_catalog_index() -> None:
     state["shutter_to_catids"] = bucket
 
 
+def _rebuild_shutter_catalog_index() -> None:
+    """Rebuild the source↔shutter footprint index, then re-derive the
+    catalog tags of any *raw-mask* open shutters (loaded from a shutter
+    CSV, role 'manual') so the MPT catalog reflects what those shutters
+    observe at the current pointing — no optimizer run required, and kept
+    in sync as the pointing / PA / catalog changes. Deliberate picks
+    (manual clicks, optimizer results) are left untouched."""
+    _rebuild_shutter_catalog_index_core()
+    _retag_manual_opens_from_catalog()
+
+
 def _shutter_source_id(q: int, s: int, d: int) -> str | None:
     """Return the catalog source id (as a string) that falls inside this
     shutter, or None if none does. If multiple sources land in the same
@@ -4949,6 +5053,49 @@ def _open_shutter_ids(sh) -> list[str]:
         if tid is not None and str(tid) != "":
             ids = [str(tid)]
     return ids
+
+
+def _retag_manual_opens_from_catalog() -> int:
+    """Re-derive the catalog source ids of the active config's *raw-mask*
+    open shutters from the current footprint index.
+
+    A shutter mask loaded from CSV carries no source ids (every shutter is
+    anonymous, ``role='manual'``), so the MPT catalog would be empty until
+    the optimizer ran. This attributes each such shutter the catalog
+    source(s) that fall inside it at the current pointing — exactly the
+    match a hand-pick or the optimizer would make — so the MPT catalog
+    populates straight from a loaded mask and stays in sync when the
+    pointing / PA / catalog changes.
+
+    Only ``role='manual'`` shutters are touched; deliberate picks (manual
+    clicks and optimizer results, role 'target'/'sky', which carry their
+    own ids) are never clobbered. Returns the number of raw-mask shutters
+    that now carry at least one catalog id.
+    """
+    opens = state.get("open_shutters") or {}
+    if not opens:
+        return 0
+    matched = 0
+    for key, sh in list(opens.items()):
+        if getattr(sh, "role", None) != "manual":
+            continue
+        q, s, d = key
+        ids = _shutter_source_ids(q, s, d)
+        primary = ids[0] if ids else None
+        # Replace (don't mutate in place) so undo snapshots holding the old
+        # object are unaffected; skip if nothing actually changed.
+        if _open_shutter_ids(sh) != ids or getattr(sh, "target_id", None) != primary:
+            opens[key] = OpenShutter(q=q, s=s, d=d, target_id=primary,
+                                     role="manual", target_ids=list(ids))
+        if ids:
+            matched += 1
+    # Keep an open MPT-catalog viewer live as the pointing/catalog changes.
+    try:
+        if mpt_view_modal_card.visible:
+            _mpt_view_refresh()
+    except NameError:
+        pass
+    return matched
 
 
 def _nearest_shutter(v2_target: float, v3_target: float,
@@ -5127,6 +5274,47 @@ def _open_or_toggle_slitlet_at(q: int, s: int, d: int, target_id: str | None) ->
             _set_status(
                 f"Opened {n_added}-shutter slitlet at ({q},{s},{d}).", "ok"
             )
+    refresh_overlays()
+
+
+def _toggle_single_shutter_at(q: int, s: int, d: int) -> None:
+    """Toggle exactly ONE shutter open↔closed, independent of the
+    N-shutter slitlet setting. Used by the hover + spacebar shortcut.
+
+    - If the shutter is open, close just that shutter (its slitlet
+      siblings, if any, stay open — this targets the single hovered cell).
+    - If it's closed and operable, open just that one shutter (N=1), with
+      the usual auto-match to a catalog source inside it.
+    - A closed, non-operable shutter (stuck-open / failed-closed) is left
+      alone with a warning.
+    """
+    key = (q, s, d)
+    is_open = key in state["open_shutters"]
+    if not is_open and not OPERABLE[q - 1, s - 1, d - 1]:
+        _set_status(f"Shutter ({q},{s},{d}) isn't operable — can't open it.",
+                    "warn")
+        return
+    _push_history()
+    if is_open:
+        state["open_shutters"].pop(key)
+        _set_status(f"Closed shutter ({q},{s},{d}).", "ok")
+    else:
+        # Force a single-shutter open regardless of the slitlet-height
+        # setting by borrowing _add_slitlet with N temporarily pinned to 1
+        # (keeps its catalog auto-match + merge behaviour).
+        saved_h = state["slitlet_height"]
+        state["slitlet_height"] = 1
+        try:
+            _add_slitlet(q, s, d, target_id=None)
+        finally:
+            state["slitlet_height"] = saved_h
+        opened = state["open_shutters"].get(key)
+        auto_id = opened.target_id if opened else None
+        if auto_id:
+            _set_status(f"Opened single shutter ({q},{s},{d}); "
+                        f"matched catalog source {auto_id}.", "ok")
+        else:
+            _set_status(f"Opened single shutter ({q},{s},{d}).", "ok")
     refresh_overlays()
 
 
@@ -6082,10 +6270,23 @@ def on_mpt_csv_load():
     _close_import_modal()
     _push_history()
     _set_open_shutters({(sh.q, sh.s, sh.d): sh for sh in opens})
+    # Auto-match the loaded mask against the source catalog so the MPT
+    # catalog populates without a pre-run of the optimizer. (Rebuild the
+    # footprint index first in case the catalog changed since the last
+    # pointing update; the rebuild also performs the re-tag, but we call it
+    # again to capture the match count for the status line.)
+    _rebuild_shutter_catalog_index()
+    matched = _retag_manual_opens_from_catalog()
     refresh_overlays()
+    _mpt_view_refresh()
+    cat = state.get("catalog")
+    if cat is not None and len(getattr(cat, "ra_deg", [])):
+        extra = (f" — {matched} matched to catalog sources "
+                 f"(MPT catalog populated)")
+    else:
+        extra = " — load a catalog to populate the MPT catalog"
     _set_status(
-        f"Loaded shutter CSV: {len(opens)} open shutters (no slitlet "
-        f"grouping or target IDs — CSV doesn't carry that info).",
+        f"Loaded shutter CSV: {len(opens)} open shutters{extra}.",
         "ok", clear_after=12,
     )
 
@@ -7015,9 +7216,9 @@ def _mpt_view_refresh() -> None:
 
     if not rows:
         mpt_view_summary_div.text = (
-            "<span style='color:#5a6b85'>No sources selected yet. Open "
-            "shutters by hand or run the optimizer, then reopen this "
-            "viewer.</span>"
+            "<span style='color:#5a6b85'>No sources selected yet. Load a "
+            "shutter mask, open shutters by hand, or run the optimizer — "
+            "any of these populates this list (with a catalog loaded).</span>"
         )
         return
     per_cfg: dict = {}
@@ -8514,6 +8715,143 @@ curdoc().js_on_event(DocumentReady, _cat_edit_clipboard_js)
 # Re-install on every catalog populate too — covers the case where
 # the page never fired DocumentReady (rare) or the function got wiped.
 _cat_edit_source.js_on_change("data", _cat_edit_clipboard_js)
+
+# ── Keyboard panning of the canvas ───────────────────────────────────
+# WASD and the arrow keys pan the figure view (shift the x/y ranges),
+# mirroring a left-drag with the pan tool: a fixed fraction of the
+# visible span per press (proportional to zoom), and holding a key
+# auto-repeats for a glide. Shift = coarser step. The shift is by the
+# *signed* span so it stays correct on the flipped RA axis (← always
+# moves the view left on screen, etc.). Skipped while a text field is
+# focused or any modal is open, so it never steals the arrow keys from
+# inputs or the catalog editor's cell navigation. Pure client-side, so
+# panning is instant (no server round-trip per keypress).
+# Keyboard-pan → re-render bridge. A JS `setv` on the ranges (below) pans
+# the view but — unlike the drag pan tool — does NOT emit a RangesUpdate
+# event, so `on_ranges_update` never fires and the shutter overlays don't
+# re-cull to the newly exposed region. The keypan handler bumps this
+# source once the pan settles (debounced, mirroring drag-pan's
+# render-on-release); Python then re-runs refresh_overlays.
+keypan_trigger = ColumnDataSource(data=dict(n=[0]))
+keypan_trigger.on_change("data", lambda attr, old, new: refresh_overlays())
+# Park the trigger source on an invisible, zero-size renderer so the CDS
+# is part of the figure's (hence the document's) model graph. Without a
+# renderer the CDS is only referenced by the CustomJS args and never gets
+# serialized into the session, so a JS `.data` write would never sync back
+# to Python. The figure's DataRange1d is pinned to `img_glyph` above, so
+# this phantom point can never affect auto-ranging or appear on screen.
+fig.scatter(x="n", y="n", source=keypan_trigger,
+            size=0, fill_alpha=0, line_alpha=0)
+
+# Hover + spacebar → toggle the single hovered shutter. The keydown handler
+# (below) reads the last hover position (tracked in JS via MouseMove) and
+# writes it here; Python then snaps to the nearest shutter and toggles it.
+# Same phantom-renderer trick as keypan_trigger so the JS `.data` write
+# syncs back to the server.
+spacetoggle_trigger = ColumnDataSource(data=dict(x=[0.0], y=[0.0], n=[0]))
+fig.scatter(x="x", y="y", source=spacetoggle_trigger,
+            size=0, fill_alpha=0, line_alpha=0)
+
+
+def _on_spacebar_toggle(attr, old, new) -> None:
+    """Toggle the single shutter under the cursor (from the hover position
+    the keydown handler stashed). Mirrors on_tap's snap-to-nearest, but
+    always acts on ONE shutter via `_toggle_single_shutter_at`."""
+    img = state["image"]
+    fiducial = _pointing_skycoord()
+    if img is None or fiducial is None:
+        return
+    try:
+        xs = spacetoggle_trigger.data.get("x") or []
+        ys = spacetoggle_trigger.data.get("y") or []
+        x_data, y_data = float(xs[0]), float(ys[0])
+    except (TypeError, ValueError, IndexError):
+        return
+    try:
+        sky = img.wcs.pixel_to_world(x_data, y_data)
+        v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
+        nearest = _nearest_shutter(v2, v3, require_operable=False,
+                                   max_dist_arcsec=0.5)
+    except Exception:  # noqa: BLE001
+        return
+    if nearest is None:
+        return  # cursor wasn't over a shutter
+    q, s, d = nearest
+    _toggle_single_shutter_at(q, s, d)
+
+
+spacetoggle_trigger.on_change("data", _on_spacebar_toggle)
+
+_canvas_keypan_js = CustomJS(
+    args=dict(xr=fig.x_range, yr=fig.y_range, trig=keypan_trigger,
+              trig2=spacetoggle_trigger), code="""
+if (window.__vmptKeypanInstalled) return;
+window.__vmptKeypanInstalled = true;
+const KEYS = {
+  ArrowLeft:'L', a:'L', A:'L', ArrowRight:'R', d:'R', D:'R',
+  ArrowUp:'U',   w:'U', W:'U', ArrowDown:'D',  s:'D', S:'D',
+};
+function modalOpen() {
+  const out = [];
+  (function walk(r){
+    r.querySelectorAll('.vmpt-modal-card').forEach(c => out.push(c));
+    r.querySelectorAll('*').forEach(el => { if (el.shadowRoot) walk(el.shadowRoot); });
+  })(document);
+  return out.some(c => c.offsetParent !== null);
+}
+document.addEventListener('keydown', function(e) {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const isSpace = (e.key === ' ' || e.code === 'Space');
+  const dir = KEYS[e.key];
+  if (!isSpace && !dir) return;
+  // Bokeh widgets render their <input>/<select> inside shadow roots, so
+  // document.activeElement is the shadow HOST — pierce into the focused
+  // shadow tree to find the real focused element, else arrows/WASD/space
+  // would fire while the user is typing in a field (filters, V3 PA, …).
+  let ae = document.activeElement;
+  while (ae && ae.shadowRoot && ae.shadowRoot.activeElement) ae = ae.shadowRoot.activeElement;
+  if (ae) {
+    const tag = (ae.tagName || '').toUpperCase();
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || ae.isContentEditable) return;
+  }
+  if (modalOpen()) return;
+  // Spacebar → toggle the single shutter currently under the cursor. Only
+  // fires while the mouse is over the canvas (hover position known); off
+  // the canvas we leave the key alone (don't swallow it / scroll the page).
+  if (isSpace) {
+    const h = window.__vmptHoverXY;
+    if (!h) return;
+    e.preventDefault();
+    trig2.data = {x: [h.x], y: [h.y],
+                  n: [(((trig2.data.n || [0])[0]) | 0) + 1]};
+    return;
+  }
+  if (xr.start == null || xr.end == null || yr.start == null || yr.end == null) return;
+  e.preventDefault();
+  const f = e.shiftKey ? 0.25 : 0.10;
+  const dx = xr.end - xr.start, dy = yr.end - yr.start;
+  if      (dir === 'R') xr.setv({start: xr.start + f*dx, end: xr.end + f*dx});
+  else if (dir === 'L') xr.setv({start: xr.start - f*dx, end: xr.end - f*dx});
+  else if (dir === 'U') yr.setv({start: yr.start + f*dy, end: yr.end + f*dy});
+  else if (dir === 'D') yr.setv({start: yr.start - f*dy, end: yr.end - f*dy});
+  // Re-cull the shutter overlays to the new view once the pan settles.
+  // Debounced so holding a key (key-repeat) glides smoothly and only
+  // refreshes after the last step, like the drag pan tool on release.
+  if (window.__vmptKeypanTimer) clearTimeout(window.__vmptKeypanTimer);
+  window.__vmptKeypanTimer = setTimeout(function() {
+    trig.data = {n: [(((trig.data.n || [0])[0]) | 0) + 1]};
+  }, 200);
+}, true);
+""")
+curdoc().js_on_event(DocumentReady, _canvas_keypan_js)
+
+# Track the cursor's data-space position over the canvas so the spacebar
+# shortcut (above) knows which shutter is hovered. MouseMove fires only over
+# the plot frame and `cb_obj.x/y` are already in image-pixel data coords —
+# pure JS, no server round-trip. MouseLeave clears it so spacebar off the
+# canvas is a no-op.
+fig.js_on_event(MouseMove, CustomJS(code="window.__vmptHoverXY = {x: cb_obj.x, y: cb_obj.y};"))
+fig.js_on_event(MouseLeave, CustomJS(code="window.__vmptHoverXY = null;"))
 
 # When the user clicks a SlickGrid column header to sort, the table
 # stays at whatever row was on screen — so a sort hidden 200 rows

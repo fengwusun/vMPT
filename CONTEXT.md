@@ -54,7 +54,7 @@ data/
 scripts/
 └── precompute_dispersion_cutoffs.py  (re-)generates dispersion_cutoffs.npz
 
-tests/                 pytest suite (110+ tests; ~10 s)
+tests/                 pytest suite (248 tests; ~30 s)
 example_a370/          Abell 370 FITS (44 MB)
 example_r0600/         RXCJ0600 JPG + sidecar (240 MB)
 exports/               default output dir
@@ -318,6 +318,27 @@ If the slitlet has no caller-supplied `target_id`, `_add_slitlet`
 looks up `state["shutter_to_catids"]` for each opened shutter and
 adopts the first catalog source ID it finds. All shutters in the
 slitlet share that ID. The status bar surfaces the auto-match.
+
+**Single-shutter toggle (v1.6.0).** `_toggle_single_shutter_at(q,s,d)`
+opens/closes exactly one shutter regardless of `slitlet_height` —
+opening borrows `_add_slitlet` with N pinned to 1 (so the catalog
+auto-match still runs), closing pops just that key (siblings stay).
+It's driven by **hover + Space**: a `MouseMove` JS handler stashes the
+cursor's data coords, the shared keydown handler (the same one that does
+WASD/arrow panning, `_canvas_keypan_js`) writes them to the
+`spacetoggle_trigger` CDS on Space, and `_on_spacebar_toggle` snaps to
+the nearest shutter and toggles it. Both the keypan and space triggers
+are parked on invisible zero-size glyphs so their JS `.data` writes sync
+back to the server.
+
+**Raw-mask auto-match (v1.6.0).** `_retag_manual_opens_from_catalog()`
+re-derives the catalog source IDs of `role='manual'` open shutters
+(those a shutter-mask CSV creates, with no IDs) from
+`state["shutter_to_catids"]`, so the MPT catalog populates straight from
+a loaded mask — no optimizer run. It runs inside
+`_rebuild_shutter_catalog_index()`, so it re-matches on every pointing /
+PA / catalog change. Deliberate picks (`role='target'/'sky'`) are never
+touched.
 
 ---
 
@@ -841,7 +862,7 @@ _hide_loading()` clause guarantees it disappears even on error.
 ## Tests
 
 ```
-pytest tests/    # 110+ tests, ~10 s
+pytest tests/    # 248 tests, ~30 s
 ```
 
 Notable coverage:

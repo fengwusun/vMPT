@@ -133,8 +133,23 @@ A **Show columns** chip picker hides/reorders columns, and rows are
 drag-reorderable.
 
 A source that lands in more than one config appears once per config.
-**Save as CSV** writes the table out for sharing. The viewer is empty
-until you pick a shutter or run the optimizer.
+**Save as CSV** writes the table out for sharing. The viewer fills in as
+soon as you pick a shutter, run the optimizer, **or load a shutter-mask
+CSV** (see below).
+
+### Populating it from a loaded shutter mask (v1.6.0)
+
+Importing a shutter-mask CSV (MPT tab → *Import* → *Shutter CSV*) used to
+leave the MPT catalog empty until you ran the optimizer, because the
+mask's open shutters carry no source IDs. As of **v1.6.0** vMPT
+cross-matches each open shutter against the loaded source catalog at the
+current pointing and tags it with the source(s) inside it — so the viewer
+populates **straight from the mask, no optimizer run needed**. The match
+re-runs automatically whenever the pointing, V3 PA, or catalog changes,
+so it always reflects what the mask observes *now*. (The mask CSV has no
+pointing of its own, so set the pointing the mask was designed for to get
+meaningful matches.) Only raw-mask shutters are auto-tagged; hand-picked
+slitlets and optimizer results keep their own assignments.
 
 ## Multi-source shutters
 

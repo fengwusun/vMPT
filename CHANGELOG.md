@@ -4,6 +4,91 @@ All notable changes to vMPT are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this
 project adheres to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+## [1.6.0] — 2026-06-18
+
+Faster, more hands-on mask building — pan with the keyboard, toggle a
+single shutter on hover, and let a loaded shutter mask populate the MPT
+catalog straight away — plus correctness and speed fixes to the
+spectral-overlap colours.
+
+### Added
+
+- **Hover + Space toggles a single shutter.** Point the cursor at any
+  operable shutter and tap **Space** to open or close *just that one
+  shutter*, independent of the N-shutter slitlet size — handy for
+  fine-tuning a mask cell by cell. Opening auto-matches a catalog source
+  inside the shutter (like a click); closing removes only the hovered
+  cell, leaving any slitlet siblings open. It's ignored while a text field
+  is focused or a dialog is open, and only fires while the cursor is over
+  the canvas.
+
+- **Loaded shutter masks auto-populate the MPT catalog.** Importing a
+  shutter-mask CSV now cross-matches its open shutters against the loaded
+  source catalog at the current pointing and tags each shutter with the
+  catalog source(s) inside it — so the *View MPT catalog…* list fills in
+  immediately, **no optimizer run required**. The match refreshes
+  automatically whenever the pointing, V3 PA, or catalog changes. Only
+  raw-mask shutters (anonymous, `role='manual'`) are auto-tagged;
+  hand-picked slitlets and optimizer results keep their own source
+  assignments untouched.
+
+- **Keyboard panning of the canvas.** **W A S D** and the **arrow keys**
+  pan the view, mirroring a left-drag with the pan tool — a fixed
+  fraction of the visible span per press (proportional to zoom), holding
+  a key glides, and **Shift** pans coarser. The shift is by the signed
+  span so the direction stays correct on the flipped RA axis. Ignored
+  while a text field is focused or any dialog is open, so it never steals
+  the arrow keys from inputs or the catalog editor. Once the pan settles
+  the shutter overlays re-cull to the newly exposed region — exactly like
+  releasing a drag-pan — so panning into a fresh area brings its shutters
+  into view rather than leaving it blank.
+
+### Fixed
+
+- **Even-shutter slitlets no longer over-report spectral conflicts.** The
+  cross-dispersion contamination band was modelled as `s_center ±
+  half_extent`, symmetric around a *rounded* centre — which skewed
+  even-shutter slitlets so a 2-shutter slitlet reached one detector row
+  lower than the 3-shutter slitlet that contains it. A 2-shutter pick
+  could therefore flash a purple "Mask Conflict" that its own 3-shutter
+  superset didn't. The band is now anchored on the slitlet's actual open
+  rows `[s_lo, s_hi]`, so it's monotonic in the open set (a superset's
+  band always contains its subset's). Odd-shutter slitlets are unchanged.
+
+- **Spectral-overlap colours no longer change with zoom.** The
+  purple/orange/pink ("Mask Conflict" / "Masked" / "Mask Stuck")
+  classification is a property of the open-shutter mask, the disperser/
+  filter and the pointing — **not** of where you happen to be looking.
+  Previously the conflict accumulator was culled to the visible viewport,
+  so zooming or panning a contaminating partner off-screen silently
+  demoted a shutter's colour (purple → orange → pink) even though nothing
+  about the mask had changed; zooming back in flipped it back. The
+  accumulation now runs over the whole MSA and is culled to the view only
+  at render time, so a shutter keeps the same colour at every zoom level.
+  Most visible on dense imported shutter masks (e.g. a full
+  `…_shutters.csv` with hundreds of opens).
+
+### Performance
+
+- **Spectral-overlap computation is memoized.** Because the conflict
+  identification + colouring is view-independent (see *Fixed* above) but
+  `refresh_overlays` re-runs on every pan/zoom, the result is now cached
+  by `(open-shutter mask, disperser, filter, overlay-alpha sliders)` and
+  reused on a pure pan/zoom — only the cheap render-time cull re-runs.
+  This removes the per-wheel-tick recompute that the always-global
+  accumulation would otherwise cost on large masks. The cache invalidates
+  automatically whenever any of those inputs change.
+
+### Changed
+
+- **Help-panel tips refreshed.** The rotating tip library gained entries
+  for keyboard panning (**W A S D** / arrows) and multi-config planning
+  (up to 5), and tips can now carry a small red **NEW** badge to flag
+  recently added features. The persistent *Quick guide → Interactions*
+  line now lists the keyboard-pan keys alongside wheel-zoom and drag-pan.
+
 ## [1.5.0] — 2026-06-18
 
 Up to **five** simultaneous MPT configurations, and a large optimizer

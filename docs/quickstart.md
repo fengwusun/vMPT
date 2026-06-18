@@ -53,9 +53,13 @@ Switch to the **Settings** tab → choose `N-shutter slitlet` (default
 - **Click** → opens an N-shutter slitlet at the nearest operable
   shutter.
 - **Click an open shutter** → closes it (and its siblings).
+- **Hover + Space** → toggle *just the one* hovered shutter open/close,
+  independent of the slitlet size (operable shutters only) — for
+  fine-tuning a mask cell by cell.
 - **Double-click** → toggles a cyan visual highlight (not exported).
 - **Shift-click** → moves the pointing centre to that location.
-- **Mouse wheel** → zoom.
+- **Mouse wheel** → zoom; **drag** or **W A S D / arrow keys** → pan
+  (hold **Shift** for bigger steps).
 
 Loaded a catalog? vMPT auto-tags every opened slitlet with the
 catalog source ID whose footprint falls inside any opened shutter.

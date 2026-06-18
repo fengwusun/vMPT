@@ -77,11 +77,15 @@ def _run_overlap_for_case(
             )
             different_col = d_arr != (d_o - 1)
             near_v2 = different_col & (np.abs(dv2) < v2_overlap)
-            half_extent = (max(ss) - min(ss)) // 2 + (max(ss) - min(ss)) % 2
-            s_pred = s_arr - ((s_center - 1) + row_offset)
-            direct_row = np.abs(s_pred) <= half_extent
+            # Band anchored on the slitlet's actual rows [s_lo, s_hi] ± buffer
+            # (mirrors vmpt.main; monotonic in the open set, unlike the old
+            # s_center ± half_extent which skewed even-shutter slitlets).
+            s_lo0 = (min(ss) - 1) + row_offset
+            s_hi0 = (max(ss) - 1) + row_offset
+            direct_row = (s_arr >= s_lo0) & (s_arr <= s_hi0)
             buffer_row = (
-                (np.abs(s_pred) <= (half_extent + SHVAL_S_TOLERANCE))
+                (s_arr >= s_lo0 - SHVAL_S_TOLERANCE)
+                & (s_arr <= s_hi0 + SHVAL_S_TOLERANCE)
                 & (~direct_row)
             )
             idx_direct = np.where(
@@ -137,11 +141,15 @@ def _run_overlap_for_case(
             )
             different_col = d_arr != (d_o - 1)
             near_v2 = different_col & (np.abs(dv2) < v2_overlap)
-            half_extent = (max(ss) - min(ss)) // 2 + (max(ss) - min(ss)) % 2
-            s_pred = s_arr - ((s_center-1) + row_offset)
-            direct_row = np.abs(s_pred) <= half_extent
+            # Band anchored on the slitlet's actual rows [s_lo, s_hi] ± buffer
+            # (mirrors vmpt.main; monotonic in the open set, unlike the old
+            # s_center ± half_extent which skewed even-shutter slitlets).
+            s_lo0 = (min(ss) - 1) + row_offset
+            s_hi0 = (max(ss) - 1) + row_offset
+            direct_row = (s_arr >= s_lo0) & (s_arr <= s_hi0)
             buffer_row = (
-                (np.abs(s_pred) <= (half_extent + SHVAL_S_TOLERANCE))
+                (s_arr >= s_lo0 - SHVAL_S_TOLERANCE)
+                & (s_arr <= s_hi0 + SHVAL_S_TOLERANCE)
                 & (~direct_row)
             )
             in_view_candidates = flat_reason != 1

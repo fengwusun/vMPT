@@ -32,7 +32,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   open slitlets touch (boundary rows adjacent, no operable row
   between) — the conflict propagates along the colliding slitlets'
   entire dispersion bands. Alpha stacks with the number of dispersing
-  sources hitting each shutter. Undo / redo at will.
+  sources hitting each shutter. Undo / redo at will. **Hover a shutter
+  and tap Space** (`v1.6.0`) to open/close just that one cell regardless
+  of the slitlet size; pan the canvas with **W A S D / arrow keys**
+  (`v1.6.0`) without reaching for the mouse.
 - **Multiple MPT configurations** (`v1.4.0`; up to **five** in
   `v1.5.0`) — plan up to five APT-style MPT configs (each its own
   pointing + shutters). The optimizer **auto-produces them all in one
@@ -42,7 +45,9 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   own colour, one of five). A
   **MPT catalog viewer** lists every selected source with its
   wavelength coverage + detector-gap, and shutters can hold more than
-  one source.
+  one source. Loading a shutter-mask CSV (`v1.6.0`) auto-matches its
+  open shutters to the catalog, so the viewer populates straight from a
+  mask — no optimizer run needed.
 - **APT / eMPT-ready export** — write a bundle (target-prefixed
   `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
   generated `README.md` of the import steps) that loads straight into
@@ -52,10 +57,10 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-238%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-248%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.5.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.6.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -224,11 +229,15 @@ The repo ships with two example fields you can load with one click.
        - `N=3` → centred 3-shutter slitlet (the standard for MOS)
        - `N=5` → centred 5-shutter slitlet
    - **Click an open shutter** → closes it AND its slitlet siblings.
+   - **Hover + Space** → toggle *just the one* hovered shutter
+     open/close, independent of the slitlet size (operable shutters
+     only). Handy for fine-tuning a mask cell by cell.
    - **Double-click** → toggles a cyan highlight (a visual flag, not
      exported).
    - **Shift-click** → moves the pointing center to that location.
    - **Wheel** → zoom both axes equally.
-   - **Drag** → pan.
+   - **Drag**, or **W A S D / arrow keys** → pan (hold **Shift** for
+     bigger steps).
 
    If a catalog is loaded, vMPT auto-tags the slitlet with the
    catalog source ID whose footprint falls inside any opened shutter.
