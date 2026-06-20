@@ -108,34 +108,42 @@ python -c "import numpy as np, vmpt; \
 A complete wheel reports 9 combos; missing entries are the ones
 that fall back.
 
-## A shutter is failed-closed in APT/MPT but operable in vMPT (stale operability)
+## Operability map looks empty, or a shutter is failed in APT/MPT but operable in vMPT
 
-vMPT reads the failed-/stuck-shutter map from the newest
-`jwst_nirspec_msaoper_*.json` in your local **CRDS cache**
-(`~/crds_cache/references/jwst/nirspec/`). That file only updates when
-something populates the cache — running the JWST pipeline, `crds sync`,
-or the helper below. If your cache is behind the current operability,
-vMPT will show shutters as operable that APT/MPT (which uses the live
-operability) marks as failed-closed.
+vMPT resolves the failed-/stuck-shutter map in this order:
 
-The startup log line tells you which file is in use:
+1. **Live CRDS reference** — the current MOS `jwst_nirspec_msaoper_*.json`
+   in your CRDS cache (`$CRDS_PATH`, else `~/crds_cache/references/jwst/nirspec/`).
+   vMPT also refreshes it from `https://jwst-crds.stsci.edu` on startup
+   (best-effort, ~8 s budget). This is the same source APT/MPT uses.
+2. **Bundled snapshot** — `vmpt/data/msaoper_fallback.npz`, shipped with vMPT.
+   Used when no CRDS reference is reachable: a fresh `pip install`, no network,
+   a firewall, an unwritable cache, or a slow first fetch. It always loads, but
+   **may lag** the current operability.
+
+The startup log tells you which is in use (and case 2 also shows a banner in
+the app's status bar):
 
 ```
-[msa] Loaded operability from .../jwst_nirspec_msaoper_0017.json
+[msa] Loaded operability from .../jwst_nirspec_msaoper_0017.json      # live CRDS — current
+[msa] Using the BUNDLED operability snapshot (…); it ships with vMPT…  # snapshot — may lag
 ```
 
-To fetch the **current** MOS operability reference (the one the
-operational CRDS context selects for `EXP_TYPE = NRS_MSASPEC` — the same
-source APT/MPT uses) into your cache:
+If you're on the bundled snapshot (or APT/MPT marks a shutter failed that vMPT
+shows operable), get the **current** reference and restart:
 
-```bash
-python scripts/update_operability.py    # needs network to jwst-crds.stsci.edu
-```
+- Make sure the environment can reach CRDS — a **writable `CRDS_PATH`**
+  (default `~/crds_cache`) and **network access** to `https://jwst-crds.stsci.edu`.
+  vMPT auto-fetches the correct MOS reference on startup, so usually just fixing
+  network/cache and **restarting** is enough. (Behind a proxy/offline cluster?
+  copy a populated `~/crds_cache` from a networked machine, or run `crds sync`.)
+- From a repo checkout you can force it now:
+  `python scripts/update_operability.py` (maintainers: add `--bundle` to also
+  refresh the shipped snapshot).
 
-Then **restart vMPT** — operability is read once at startup, so a running
-server keeps the old map until relaunched. (CRDS reference *numbers* are
-delivery order, not operability date; the script resolves the correct one
-by USEAFTER for today, so you don't have to guess.)
+Operability is read once at startup, so **restart vMPT** to pick up a new
+reference. (CRDS reference *numbers* are delivery order, not operability date;
+vMPT resolves the correct one by USEAFTER for today, so you don't have to guess.)
 
 ## I see a single row "sticking out" of an N-shutter slitlet's orange band
 

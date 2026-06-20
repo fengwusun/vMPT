@@ -190,17 +190,87 @@ def ensure_current_operability(timeout: float | None = 8.0,
     return None
 
 
+# Where the operability map most recently loaded from, for the UI/status bar
+# to surface. One of: ``None`` (not loaded yet), ``"crds:<file>"`` (live CRDS
+# reference — current), ``"bundled:<file>"`` (shipped snapshot — may lag), or
+# ``"none"`` (no reference at all — every shutter treated as operable).
+OPERABILITY_SOURCE: str | None = None
+
+
+def operability_is_current() -> bool:
+    """True only when the map came from a live CRDS reference (not the bundled
+    snapshot or the all-operable degenerate fallback)."""
+    return bool(OPERABILITY_SOURCE and OPERABILITY_SOURCE.startswith("crds:"))
+
+
+def _print_latest_operability_hint() -> None:
+    print("[msa]   → To load the LATEST failed-/stuck-shutter map, make sure "
+          "your environment can reach CRDS: a writable CRDS_PATH (default "
+          "~/crds_cache) and network access to https://jwst-crds.stsci.edu, "
+          "then restart vMPT (it auto-fetches on startup). "
+          "See the vMPT docs → Troubleshooting → operability.")
+
+
+def _load_bundled_operability() -> tuple[np.ndarray, np.ndarray] | None:
+    """Operability from the package-bundled snapshot in
+    ``vmpt/data/msaoper_fallback.npz`` (a compressed ``reason`` array; the
+    ``operable`` mask is simply ``reason == 0``).
+
+    This is the floor that makes the failed-/stuck-shutter map load **out of
+    the box** on a fresh ``pip install`` — no ``CRDS_PATH``/``~/crds_cache``,
+    no ``crds`` package, and no network required. A live CRDS reference (when
+    present) always takes precedence over this snapshot. Returns
+    ``(operable, reason)`` or ``None`` if the bundle is missing.
+    """
+    global OPERABILITY_SOURCE
+    fb = _DATA_DIR / "msaoper_fallback.npz"
+    if not fb.is_file():
+        return None
+    try:
+        with np.load(fb, allow_pickle=True) as z:
+            reason = np.asarray(z["reason"], dtype=np.int8)
+            src = str(z["source"]) if "source" in z.files else "bundled snapshot"
+    except Exception as e:  # noqa: BLE001 — corrupt bundle must not break startup
+        print(f"[msa] Bundled operability snapshot unreadable ({type(e).__name__}).")
+        return None
+    operable = reason == 0
+    OPERABILITY_SOURCE = f"bundled:{src}"
+    print(f"[msa] Using the BUNDLED operability snapshot ({src}); it ships "
+          "with vMPT and may lag the live CRDS reference.")
+    _print_latest_operability_hint()
+    return operable, reason
+
+
 def load_operability(crds_path: str | None = None) -> tuple[np.ndarray, np.ndarray]:
+    global OPERABILITY_SOURCE
     operable = np.ones((4, 171, 365), dtype=bool)
     reason = np.zeros((4, 171, 365), dtype=np.int8)
 
     path = _find_msaoper_json(crds_path)
     if path is None:
-        print("[msa] No CRDS msaoper JSON found; treating all shutters as operable.")
+        fb = _load_bundled_operability()
+        if fb is not None:
+            return fb
+        OPERABILITY_SOURCE = "none"
+        print("[msa] No CRDS msaoper JSON or bundled snapshot; "
+              "treating all shutters as operable.")
+        _print_latest_operability_hint()
         return operable, reason
 
-    with open(path) as f:
-        data = json.load(f)
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except (OSError, ValueError) as e:
+        fb = _load_bundled_operability()
+        if fb is not None:
+            print(f"[msa] Could not read {path} ({type(e).__name__}); "
+                  "falling back to the bundled operability snapshot.")
+            return fb
+        OPERABILITY_SOURCE = "none"
+        print(f"[msa] Could not read {path} ({type(e).__name__}); "
+              "treating all shutters as operable.")
+        _print_latest_operability_hint()
+        return operable, reason
 
     for entry in data.get("msaoper", []):
         q = int(entry["Q"])
@@ -216,5 +286,6 @@ def load_operability(crds_path: str | None = None) -> tuple[np.ndarray, np.ndarr
         elif "closed" in state:
             operable[q - 1, s - 1, d - 1] = False
             reason[q - 1, s - 1, d - 1] = 1
+    OPERABILITY_SOURCE = f"crds:{os.path.basename(path)}"
     print(f"[msa] Loaded operability from {path}")
     return operable, reason

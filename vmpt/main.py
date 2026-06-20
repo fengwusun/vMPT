@@ -12192,15 +12192,39 @@ def _check_for_updates_blocking(session_doc) -> None:
         pass
 
 
-# Only run the version-check when we're being served by Bokeh — not
+def _warn_if_operability_stale() -> None:
+    """One-time startup nudge in the status bar when the failed-/stuck-shutter
+    map is NOT the live CRDS reference (the bundled snapshot, or none at all).
+    The actionable detail is already on the console (vmpt.msa.load_operability);
+    this just makes sure app-only users notice. Self-clears, and never fires
+    once CRDS is set up (the source becomes ``crds:…``)."""
+    import vmpt.msa as _msa
+    if _msa.operability_is_current():
+        return
+    if (_msa.OPERABILITY_SOURCE or "").startswith("bundled:"):
+        _set_status(
+            "⚠ Operability: using the bundled snapshot — it may lag the latest "
+            "failed/stuck shutters. For the current map, set up CRDS access "
+            "(see the console hint / docs → Troubleshooting) and restart.",
+            "warn", clear_after=25)
+    else:  # "none" — no reference at all
+        _set_status(
+            "⚠ No operability reference found — all shutters are shown as "
+            "operable. Set up CRDS access and restart (docs → Troubleshooting).",
+            "warn", clear_after=40)
+
+
+# Only run these startup checks when we're being served by Bokeh — not
 # during pytest imports or REPL imports. Capture the session doc here
 # (on the main session thread); the worker thread can't query curdoc()
 # itself because curdoc() is thread-local.
 _session_doc = curdoc()
-if (_session_doc.session_context is not None
-        and os.environ.get("VMPT_UPDATE_CHECK", "1") != "0"):
-    _threading.Thread(
-        target=_check_for_updates_blocking,
-        args=(_session_doc,),
-        daemon=True,
-    ).start()
+if _session_doc.session_context is not None:
+    # Surface a stale/missing operability reference once the UI is ready.
+    _session_doc.add_next_tick_callback(_warn_if_operability_stale)
+    if os.environ.get("VMPT_UPDATE_CHECK", "1") != "0":
+        _threading.Thread(
+            target=_check_for_updates_blocking,
+            args=(_session_doc,),
+            daemon=True,
+        ).start()

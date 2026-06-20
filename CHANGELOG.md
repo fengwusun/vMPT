@@ -6,6 +6,37 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.1] — 2026-06-20
+
+### Fixed
+
+- **Operability map didn't load on fresh deploys (all shutters appeared
+  operable).** vMPT read the failed-/stuck-shutter map only from a CRDS cache
+  (`$CRDS_PATH` / `~/crds_cache`), refreshed via the optional `crds` package.
+  A plain `pip install jwst-vmpt` has none of that — no `crds`, no
+  `CRDS_PATH`, often no network — so `load_operability()` silently fell
+  through to "every shutter operable", and stuck-opens / failed-closed
+  shutters never showed. vMPT now **ships a compact operability snapshot**
+  (`vmpt/data/msaoper_fallback.npz`, ~16 KB) and loads it whenever no CRDS
+  reference is found (or the cached file is unreadable), so the map works out
+  of the box with no env vars, no `crds`, and no network. A live CRDS
+  reference still takes precedence when present, and the startup auto-update
+  keeps it current. Maintainers refresh the bundled snapshot with
+  `python scripts/update_operability.py --bundle`. When the bundled snapshot
+  (or no reference at all) is in use, vMPT now logs an **actionable hint** and
+  shows a **status-bar banner** explaining how to load the live CRDS reference,
+  so users aren't silently left on a stale/empty map. (Docs: Troubleshooting →
+  "Operability map looks empty…".)
+
+### Changed
+
+- **`crds` is now an explicit dependency.** vMPT imports `crds` directly to
+  refresh the operability reference on startup; it already arrived
+  transitively via `jwst`, but it's now declared so the auto-update path is
+  guaranteed available. (This makes the *latest* reference fetchable when the
+  environment can reach CRDS — it does not, by itself, guarantee loading;
+  that's the bundled snapshot's job above.)
+
 ## [1.7.0] — 2026-06-19
 
 ### Removed

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jwst-vmpt"
-version = "1.7.0"
+version = "1.7.1"
 description = "Visual MSA Planning Tool — interactive Bokeh app for JWST/NIRSpec MSA shutter configuration, with hMPT-derived pointing optimization and shutter-collision protection."
 readme = "README.md"
 # PEP 639 SPDX license expression. The OLD table form
@@ -38,6 +38,14 @@ classifiers = [
 dependencies = [
     "astropy>=5.0",
     "bokeh>=3.7",
+    # vMPT imports `crds` directly (vmpt.msa.ensure_current_operability) to
+    # refresh the MSA operability reference on startup. It already arrives
+    # transitively via `jwst`, but a package should declare its direct
+    # imports. NOTE: this only makes the auto-update *possible* — fetching the
+    # latest msaoper still needs network access to jwst-crds.stsci.edu and a
+    # writable cache; the bundled snapshot (vmpt/data/msaoper_fallback.npz) is
+    # what guarantees the map loads offline / on a fresh install.
+    "crds>=11",
     "jwst>=1.18",
     "jwst_gtvt>=1.0",
     "numpy>=1.24",

@@ -13,7 +13,14 @@ It downloads the reference the *operational* CRDS context selects for MOS
 APT/MPT uses — so vMPT matches it after a restart.
 
 Usage:
-    python scripts/update_operability.py
+    python scripts/update_operability.py            # refresh your CRDS cache
+    python scripts/update_operability.py --bundle   # ALSO refresh the shipped
+                                                     # fallback snapshot (maintainers)
+
+`--bundle` regenerates ``vmpt/data/msaoper_fallback.npz`` — the compact
+operability snapshot vMPT ships and loads when no CRDS reference is available
+(fresh installs with no ``crds``/``CRDS_PATH``/network). Run it before cutting
+a release so the bundled floor stays current.
 
 Needs network access to https://jwst-crds.stsci.edu. Safe to re-run.
 """
@@ -59,7 +66,35 @@ def main() -> int:
     else:
         print("  → downloaded. Restart vMPT to load it "
               "(operability is read at startup).")
+
+    if "--bundle" in sys.argv:
+        _write_bundle(path)
     return 0
+
+
+def _write_bundle(json_path: str) -> None:
+    """Regenerate the shipped fallback snapshot from a msaoper JSON."""
+    import json
+
+    import numpy as np
+
+    reason = np.zeros((4, 171, 365), dtype=np.int8)
+    with open(json_path) as f:
+        data = json.load(f)
+    for e in data.get("msaoper", []):
+        q = int(e["Q"]); d = int(e["x"]); s = int(e["y"])
+        if not (1 <= q <= 4 and 1 <= s <= 171 and 1 <= d <= 365):
+            continue
+        st = str(e.get("state", "")).lower()
+        if "open" in st:
+            reason[q - 1, s - 1, d - 1] = 2
+        elif "closed" in st:
+            reason[q - 1, s - 1, d - 1] = 1
+    out = _ROOT / "vmpt" / "data" / "msaoper_fallback.npz"
+    np.savez_compressed(out, reason=reason, source=os.path.basename(json_path))
+    print(f"  → regenerated bundled fallback {out} "
+          f"(stuck-open={int((reason == 2).sum())}, "
+          f"failed-closed={int((reason == 1).sum())}).")
 
 
 if __name__ == "__main__":

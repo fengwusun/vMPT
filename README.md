@@ -60,7 +60,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 ![status](https://img.shields.io/badge/tests-248%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.7.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.7.1-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**

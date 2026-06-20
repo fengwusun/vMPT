@@ -88,3 +88,39 @@ def test_ensure_current_operability_disabled_is_noop(monkeypatch):
     monkeypatch.setenv("VMPT_OPERABILITY_AUTOUPDATE", "1")
     msa._OPER_CHECK_DONE = True
     assert msa.ensure_current_operability() is None
+
+
+def test_bundled_fallback_is_shipped():
+    """The compact operability snapshot must exist in vmpt/data so it ships
+    via the package-data `data/*.npz` glob."""
+    assert (msa._DATA_DIR / "msaoper_fallback.npz").is_file()
+
+
+def test_bundled_fallback_loads_when_no_crds(monkeypatch):
+    """A fresh deploy with NO CRDS reference (no `crds` package / no
+    CRDS_PATH / no ~/crds_cache / no network) must still get the failed-/
+    stuck-shutter map from the bundled snapshot — not silently fall through
+    to "every shutter operable". Regression for the reported deployment bug.
+    """
+    import numpy as np
+    monkeypatch.setattr(msa, "_find_msaoper_json", lambda crds_path=None: None)
+    operable, reason = msa.load_operability()
+    assert int((reason == 2).sum()) > 0, "snapshot must carry stuck-opens"
+    assert int((reason == 1).sum()) > 0, "snapshot must carry failed-closed"
+    assert np.array_equal(operable, reason == 0)
+    assert not operable.all(), "must NOT be the degenerate all-operable fallback"
+    # The source flag lets the UI warn that this isn't the live CRDS reference.
+    assert msa.OPERABILITY_SOURCE.startswith("bundled:")
+    assert msa.operability_is_current() is False
+
+
+def test_corrupt_crds_file_falls_back_to_bundle(monkeypatch, tmp_path):
+    """If the resolved CRDS msaoper JSON is unreadable, load the bundled
+    snapshot instead of crashing or going all-operable."""
+    import numpy as np
+    bad = tmp_path / "jwst_nirspec_msaoper_9999.json"
+    bad.write_text("{ this is not valid json")
+    monkeypatch.setattr(msa, "_find_msaoper_json", lambda crds_path=None: str(bad))
+    operable, reason = msa.load_operability()
+    assert int((reason == 2).sum()) > 0
+    assert not operable.all()
