@@ -36,6 +36,10 @@ vmpt examples download
 [Troubleshooting](troubleshooting.md) if the buttons stay dead
 after the download finishes.
 
+To use **your own field**, load a FITS image with a WCS directly, or make
+a colour RGB + WCS sidecar from drizzled mosaics —
+see [Preparing your own image](preparing_images.md).
+
 ## 3. Aim the MSA
 
 Switch to the **Pointing** tab. The pointing centre auto-fills to

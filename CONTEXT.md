@@ -130,7 +130,7 @@ rotated **138.5°** within the V2/V3 frame
 
 ## Operability mask
 
-Loaded once at startup from CRDS via `app/msa.py`. Exposes:
+Loaded once at startup from CRDS via `vmpt/msa.py`. Exposes:
 
 - `OPERABLE` — `(4, 171, 365)` bool. True if the shutter is commandable.
 - `REASON`  — `(4, 171, 365)` int8. `0`=operable, `1`=failed-closed,
@@ -139,10 +139,25 @@ Loaded once at startup from CRDS via `app/msa.py`. Exposes:
 Flattened views (`_FLAT_REASON`) are used in `refresh_overlays` for
 fast vectorised masking.
 
-There are **22 stuck-open shutters** in the current CRDS reference
-(`jwst_nirspec_msaoper_0014.json` or similar). Stuck-opens always
-disperse light — they contribute to the spec-overlap calculation
-even if the user hasn't opened them.
+**Reference selection (`_find_msaoper_json`).** vMPT reads the
+`jwst_nirspec_msaoper_*.json` the operational CRDS context would pick for
+**MOS** — the `NRS_MSASPEC` branch of the newest cached rmap, latest
+USEAFTER ≤ today — not just the highest-numbered file (CRDS numbers are
+delivery order, and there's an imaging-only default). Falls back to the
+highest-numbered file if no rmap is cached.
+
+**Startup auto-update (`ensure_current_operability`).** `main.py` calls it
+before `load_operability()` on every launch: a best-effort
+`crds.getreferences` fetch of the current MOS reference into the cache, so
+the map matches APT/MPT. Offline-safe (skips if no network / no `crds`),
+once per process, ~8 s timeout, disable via
+`VMPT_OPERABILITY_AUTOUPDATE=0`. `scripts/update_operability.py` forces the
+same fetch on demand.
+
+Stuck-open shutters (`REASON == 2`) always disperse light — they
+contribute to the spec-overlap calculation even if the user hasn't opened
+them. (Counts vary by reference; as of `msaoper_0017` the failed-shutter
+set includes whole failed rows such as Q2 s60.)
 
 ---
 

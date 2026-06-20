@@ -6,7 +6,7 @@ matches APT MPT's three-colour convention:
 
 | Colour | Name | Meaning |
 |---|---|---|
-| 🟪 **purple** | Mask Conflict | An open shutter (yours OR stuck-open) sitting in a touching-collision dispersion band. Chain-propagates downstream. |
+| 🟪 **purple** | Mask Conflict | Two open slitlets crowd each other with no operable buffer row between them. Only the rows where they crowd — the `±2`-row window between the two slitlets — turn purple; the rest of each band stays orange. |
 | 🟧 **orange** | Masked | An operable shutter whose spectrum would overlap one of YOUR open picks. Opening it would put two spectra on the same pixels. |
 | 🟪 **pink** | Mask Stuck | An operable shutter whose spectrum would overlap a STUCK-OPEN shutter's dispersion. Stuck-opens disperse light unconditionally; opening the pink shutter mixes its spectrum with the stuck-open's. |
 | ⬜ silver outline | Operable | Empty operable shutter. Pick away. |
@@ -38,17 +38,61 @@ NIRSpec spectral trace).
 
 ### Purple (Mask Conflict)
 
-Reserved for cases where two open slitlets are TOUCHING — their
-row ranges are adjacent with no operable row between them. In that
-event:
+Two open slitlets genuinely collide. There are two cases, and both are
+**bounded** — purple is only ever a re-classification of an
+already-contaminated shutter, so it never paints a clean (silver) shutter and
+never exceeds the orange/pink that would exist without the conflict.
 
-* The touching shutters on each slitlet render purple.
-* The full dispersion band of each touching slitlet renders purple
-  ("chain propagation"). Opening a third shutter downstream of a
-  touching pair will also light up purple.
+**Same-quadrant** — two slitlets TOUCHING (row ranges adjacent or overlapping
+with no operable row between them). Purple is bounded to the rows where they
+crowd:
+
+* Let the lower slitlet span rows `[a_lo … a_hi]` and the upper one
+  `[b_lo … b_hi]`. Purple covers `[b_lo − 2 … a_hi + 2]` — the gap
+  between their near edges, extended 2 rows each way — across the
+  full dispersion width (every operable shutter in those rows).
+* Beyond that window, the rest of each slitlet's band reverts to
+  orange (Masked). So two adjacent N=3 slitlets give a 2-orange /
+  4-purple / 2-orange stack, matching APT MPT.
+
+**Cross-quadrant** — two slitlets in *different* quadrants whose spectra fold
+onto the same detector region (Q1↔Q3 on NRS1, Q2↔Q4 on NRS2). These share no
+MSA-row frame, so purple is bounded to the **genuine overlap**: only the
+shutters contaminated by BOTH slitlets (where the two spectra actually land on
+the same pixels) turn purple; shutters hit by only one stay orange. The
+conflicting slitlets' own **open shutters are also purple** — each is one of
+the two colliding spectra, even though the partner's light falls on
+neighbouring shutters rather than the pick itself. (Closing either slitlet
+clears the conflict.)
 
 A single isolated slitlet on a clean (silver-outlined) row never
-produces purple — only ever orange / pink alpha-stacking.
+produces purple — only ever orange / pink alpha-stacking. Note that a slitlet
+is a CONTIGUOUS column of open shutters: two separate clusters in the same
+column (common in a mask CSV, where opens carry no target id) are treated as
+two slitlets, so the empty gap between them is never masked.
+
+**Grating diagonal-step relaxation.** A *no-buffer adjacency* (the two
+slitlets exactly 1 row apart, with no real row overlap) is only a true
+Mask Conflict for PRISM and for **same-column** stacking. On the grating
+side, stepping the second slitlet to a *different column* (Δd ≥ 1) is a
+deliberate *diagonal* step — e.g. tracking an elongated galaxy — and is
+demoted from purple to **orange**.
+
+Why any nonzero column offset suffices (not a large margin): two slitlets
+at adjacent rows stay a **fixed ~1-row apart in cross-dispersion no matter
+how far apart they are in columns** — both spectra share the same trace
+tilt, so a column step only slides them along dispersion (detector *x*),
+never across it (detector *y*). And the spectra are far longer (M ~510
+col, H ~1260 col) than the MSA is wide (365 col), so the *x*-overlap never
+closes within reach either. The column-offset *magnitude* therefore can't
+change the (marginal, 1-row) overlap; the only physically meaningful split
+is **same-column (Δd=0, spectra fully stacked → purple)** vs
+**different-column (Δd ≥ 1, a deliberate step → orange)**. The threshold
+constants `GRATING_ADJ_MIN_COLSEP_H` / `_M` in `vmpt/wavelengths.py` are
+therefore both **1** (raise them if you want to require a wider deliberate
+step). Real row overlap, same-column adjacency, and PRISM always stay
+purple. This makes diagonal slit-stepping practical; the optimizer's
+collision protection honours the same rule so it won't block those steps.
 
 ## How the collision check works
 
@@ -77,6 +121,14 @@ state change. The check has three pieces:
    `|Δy_local| ≤ 5 px` (slit thickness). Catches e.g.
    G140M/F100LP Q4 s=34 ↔ Q2 s=33 where MSA-row alone would miss
    the collision.
+
+   The per-shutter detector-x/y used here is bilinearly interpolated
+   from a coarse 10×10 quadrant sample (rows ≈16–155, cols ≈34–331).
+   Off-grid **edge** rows/cols are **linearly extrapolated**, not
+   clamped — a clamp would pin every edge row to one detector-y and
+   make this check fire across a whole block of edge rows that don't
+   actually share a detector row (it once flooded lower Q2 with
+   spurious Masked shutters whenever Q4 had opens).
 
 ## Worked example: G395M Q1 s=112 d=312 vs Q3 s=111 d=214
 

@@ -30,8 +30,8 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   where stuck-open spectra land on operable rows, **orange** (Masked)
   where user-pick spectra land, **purple** (Mask Conflict) when two
   open slitlets touch (boundary rows adjacent, no operable row
-  between) — the conflict propagates along the colliding slitlets'
-  entire dispersion bands. Alpha stacks with the number of dispersing
+  between) — bounded to the `±2`-row window where the two slitlets
+  crowd (not the whole band). Alpha stacks with the number of dispersing
   sources hitting each shutter. Undo / redo at will. **Hover a shutter
   and tap Space** (`v1.6.0`) to open/close just that one cell regardless
   of the slitlet size; pan the canvas with **W A S D / arrow keys**
@@ -60,7 +60,7 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
 ![status](https://img.shields.io/badge/tests-248%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.6.0-blueviolet)
+![release](https://img.shields.io/badge/release-v1.7.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -402,7 +402,7 @@ What each color means on the figure:
 | **Cyan edge** | Highlighted shutter (double-click marker) |
 | **Pink fill** (α=0.20, stackable) — **Mask Stuck** | Operable shutter where one or more stuck-open shutters' spectra would land. No collision yet; opening this shutter would create one. Alpha stacks with the number of stuck sources hitting the row. |
 | **Orange fill** (α=0.20, stackable) — **Masked** | Operable shutter where at least one user-pick's spectrum lands. Same warning semantic as pink, but the source is a user-pick. Alpha stacks with the number of contaminating sources (user + stuck). |
-| **Purple fill** (α=0.20, stackable) — **Mask Conflict** | Real collision exists. Either (a) a user-pick whose row is touching another open shutter's row (no operable row between them), OR (b) an operable shutter sitting in the dispersion band of a slitlet that is itself in a touching collision (chain propagation along both colliding slitlets' bands). |
+| **Purple fill** (α=0.20, stackable) — **Mask Conflict** | Two open slitlets crowd each other with no operable buffer row between them. Purple is bounded to the rows where they crowd — `[upper-slitlet bottom − 2 … lower-slitlet top + 2]`, across the full dispersion width — so two adjacent N=3 slitlets give a 2-orange / 4-purple / 2-orange stack (matching APT MPT). Beyond that window the band reverts to orange. Purple only ever re-classifies an already-contaminated shutter, so it never exceeds the orange/pink that would exist without the conflict. |
 | **Coloured circles** | Catalog targets — yellow by default, cycling through magenta / pale green / coral / lavender / sky-blue / white / salmon when multiple catalogs are loaded (toggle "Show catalog targets" in Setting → Layers; the colour matches the chip beside each catalog in the **Input** tab's catalog list). Earlier-loaded catalogs draw on top of later ones; deeper layers fade slightly via line_alpha. |
 
 Failed-closed shutters are not drawn at all — they don't exist for
@@ -438,6 +438,11 @@ sidecar before the image.
 
 The JPG can be tens of millions of pixels; vMPT downsamples to ≤6000
 on the longest edge and rescales the WCS accordingly.
+
+Need to make these from drizzled mosaics yourself? See **Preparing your
+own image** in the [docs](https://vmpt.readthedocs.io/en/latest/preparing_images.html)
+— short recipes for the WCS sidecar and the RGB JPG, including the
+same-grid and vertical-flip gotchas.
 
 ### Catalog (optional)
 

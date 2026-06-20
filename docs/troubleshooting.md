@@ -108,6 +108,35 @@ python -c "import numpy as np, vmpt; \
 A complete wheel reports 9 combos; missing entries are the ones
 that fall back.
 
+## A shutter is failed-closed in APT/MPT but operable in vMPT (stale operability)
+
+vMPT reads the failed-/stuck-shutter map from the newest
+`jwst_nirspec_msaoper_*.json` in your local **CRDS cache**
+(`~/crds_cache/references/jwst/nirspec/`). That file only updates when
+something populates the cache — running the JWST pipeline, `crds sync`,
+or the helper below. If your cache is behind the current operability,
+vMPT will show shutters as operable that APT/MPT (which uses the live
+operability) marks as failed-closed.
+
+The startup log line tells you which file is in use:
+
+```
+[msa] Loaded operability from .../jwst_nirspec_msaoper_0017.json
+```
+
+To fetch the **current** MOS operability reference (the one the
+operational CRDS context selects for `EXP_TYPE = NRS_MSASPEC` — the same
+source APT/MPT uses) into your cache:
+
+```bash
+python scripts/update_operability.py    # needs network to jwst-crds.stsci.edu
+```
+
+Then **restart vMPT** — operability is read once at startup, so a running
+server keeps the old map until relaunched. (CRDS reference *numbers* are
+delivery order, not operability date; the script resolves the correct one
+by USEAFTER for today, so you don't have to guess.)
+
 ## I see a single row "sticking out" of an N-shutter slitlet's orange band
 
 That used to happen up to v1.3.0 because of how tilt was rendered

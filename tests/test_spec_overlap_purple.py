@@ -1,9 +1,13 @@
-"""Smoke test for the spec-overlap PURPLE-classification rule.
+"""Tests for the spec-overlap PURPLE (Mask Conflict) classification.
 
-Reproduces the user's reported case to verify the asymmetric rule
-(purple for user-opens hit by any source — direct or buffer — and
-purple for operable candidates hit by ≥ 2 direct sources) actually
-fires in code.
+When two slitlets crowd each other with no operable buffer row, APT MPT
+turns only a BOUNDED band purple: the rows from (upper slitlet's bottom
+− 2) to (lower slitlet's top + 2). Beyond that the band reverts to orange
+(Masked). Purple is always a re-bucketing of an already-contaminated
+shutter — it never leaks onto a clean shutter, never spans the whole
+dispersion band, and (being defined in MSA rows) never escalates a
+same-detector OTHER-quadrant shutter. These tests replay the contamination
++ colour stages of `vmpt.main` to verify that bounded rule.
 """
 from __future__ import annotations
 
@@ -178,21 +182,51 @@ def _run_overlap_for_case(
     _accumulate_tagged("user", user_groups_list, user_direct, user_buffer)
     # No stuck-opens in these synthetic test cases.
 
-    # Identify conflicted sources via hit_sources.
-    conflicted_user: set[int] = set()
-    conflicted_stuck: set[int] = set()
+    # Identify conflicting PAIRS + per-slitlet purple windows. Mirrors
+    # vmpt.main: a conflict promotes shutters to purple ONLY within ±2
+    # rows of where the two slitlets crowd each other — NOT the whole
+    # band. (No stuck-opens in these synthetic cases.)
+    stuck_groups_list: list = []
+    conflict_pairs: set = set()
     for src_idx, group in enumerate(user_groups_list):
+        me = ("user", src_idx)
+        others_all: set = set()
         for (q, s, d) in group:
             flat = (q-1)*171*365 + (s-1)*365 + (d-1)
-            others = hit_sources.get(flat, set()) - {("user", src_idx)}
-            if others:
-                conflicted_user.add(src_idx)
-                for (t, oi) in others:
-                    if t == "user":
-                        conflicted_user.add(oi)
-                    else:
-                        conflicted_stuck.add(oi)
-                break
+            others_all |= hit_sources.get(flat, set()) - {me}
+        for o in others_all:
+            conflict_pairs.add(frozenset((me, o)))
+
+    CONFLICT_PURPLE_BUFFER = 2
+
+    def _slit_rows(tag):
+        t, si = tag
+        grp = user_groups_list[si] if t == "user" else stuck_groups_list[si]
+        ss0 = [s for (_q, s, _d) in grp]
+        return grp[0][0], min(ss0), max(ss0)
+
+    slitlet_window: dict[tuple, set | None] = {}
+    slitlet_quad: dict[tuple, int] = {}
+    for pair in conflict_pairs:
+        tag1, tag2 = tuple(pair)
+        q1, lo1, hi1 = _slit_rows(tag1)
+        q2, lo2, hi2 = _slit_rows(tag2)
+        slitlet_quad[tag1] = q1
+        slitlet_quad[tag2] = q2
+        if q1 != q2:
+            slitlet_window[tag1] = None
+            slitlet_window[tag2] = None
+            continue
+        inner_bot = max(lo1, lo2)
+        inner_top = min(hi1, hi2)
+        w_lo = inner_bot - CONFLICT_PURPLE_BUFFER
+        w_hi = inner_top + CONFLICT_PURPLE_BUFFER
+        rows = set(range(w_lo, w_hi + 1)) if w_hi >= w_lo else set()
+        for tg in (tag1, tag2):
+            if slitlet_window.get(tg, False) is None:
+                continue
+            slitlet_window.setdefault(tg, set())
+            slitlet_window[tg] |= rows
 
     purple: set[tuple[int, int, int]] = set()
     orange: set[tuple[int, int, int]] = set()
@@ -209,27 +243,28 @@ def _run_overlap_for_case(
             i % 365 + 1,
         )
 
+    def _purple_here(i: int) -> bool:
+        q_i = i // (171 * 365) + 1
+        s_i = (i // 365) % 171 + 1
+        for tag in hit_sources.get(i, ()):
+            if tag not in slitlet_window:
+                continue
+            win = slitlet_window[tag]
+            if win is None:
+                return True
+            if slitlet_quad.get(tag) == q_i and s_i in win:
+                return True
+        return False
+
     for i in all_idx:
-        n_ud = user_direct.get(i, 0)
-        n_ub = user_buffer.get(i, 0)
-        n_sd = stuck_direct.get(i, 0)
-        n_sb = stuck_buffer.get(i, 0)
-        n_total_u = n_ud + n_ub
-        n_total_s = n_sd + n_sb
-        n_total = n_total_u + n_total_s
+        n_total_u = user_direct.get(i, 0) + user_buffer.get(i, 0)
+        n_total_s = stuck_direct.get(i, 0) + stuck_buffer.get(i, 0)
         qsd = _to_qsd(i)
-        if i in user_open_flat:
-            if n_total >= 1:
-                purple.add(qsd)
-            continue
-        sources_here = hit_sources.get(i, set())
-        from_conflicted = any(
-            (t == "user" and si in conflicted_user)
-            or (t == "stuck" and si in conflicted_stuck)
-            for (t, si) in sources_here
-        )
-        if from_conflicted:
+        if _purple_here(i):
             purple.add(qsd)
+        elif i in user_open_flat:
+            if n_total_u + n_total_s >= 1:
+                orange.add(qsd)
         elif n_total_u >= 1:
             orange.add(qsd)
         elif n_total_s >= 1:
@@ -273,3 +308,40 @@ def test_single_slitlet_has_no_purple():
     out = _run_overlap_for_case(open_shutters)
     for q, s, d in open_shutters:
         assert (q, s, d) not in out["purple"]
+
+
+def test_two_slitlets_purple_band_is_bounded_to_pm2():
+    """Two adjacent N=3 slitlets (lower 100-102/d322, upper 97-99/d323)
+    conflict with no buffer row. The PURPLE band must be bounded to the
+    ±2-row window where they crowd — [upper.bottom−2 … lower.top+2] =
+    [98 … 101] — NOT the whole contamination band. Beyond it the band is
+    orange (Masked). This is the MPT-faithful 2-orange / 4-purple /
+    2-orange stack the user verified against APT."""
+    open_shutters = {
+        (1, 100, 322): "A", (1, 101, 322): "A", (1, 102, 322): "A",
+        (1, 97, 323): "B",  (1, 98, 323): "B",  (1, 99, 323): "B",
+    }
+    out = _run_overlap_for_case(open_shutters)
+    picks = set(open_shutters)
+
+    def op_rows(color, q=None):
+        return {s for (qq, s, d) in out[color]
+                if (qq, s, d) not in picks and (q is None or qq == q)}
+
+    WINDOW = {98, 99, 100, 101}     # = [max(100,97)-2 .. min(102,99)+2]
+    # Purple is globally bounded to the window — never the whole band.
+    assert op_rows("purple") == WINDOW, (
+        f"purple should be exactly rows {sorted(WINDOW)}, "
+        f"got {sorted(op_rows('purple'))}")
+    # In the conflict quadrant the window is fully purple, and the band
+    # tails beyond it revert to orange (Masked) — disjoint from the window.
+    assert op_rows("purple", q=1) == WINDOW
+    assert op_rows("orange", q=1).isdisjoint(WINDOW)
+    assert {96, 97, 102, 103} <= op_rows("orange", q=1), (
+        "the band tails (B's 96-97, A's 102-103) should stay orange")
+    # Same-detector OTHER quadrant (q3) is masked but NEVER escalated to
+    # purple — the ±2 window lives in the conflict's own MSA-row frame.
+    assert op_rows("purple", q=3) == set()
+    # The two touching picks themselves are purple.
+    assert (1, 100, 322) in out["purple"]
+    assert (1, 99, 323) in out["purple"]

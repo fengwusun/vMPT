@@ -23,7 +23,7 @@ from astropy.coordinates import SkyCoord
 from astropy.wcs import WCS
 from astropy.wcs.utils import skycoord_to_pixel
 
-from bokeh.events import DoubleTap, MouseLeave, MouseMove, RangesUpdate, Tap
+from bokeh.events import MouseLeave, MouseMove, RangesUpdate, Tap
 from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.events import DocumentReady
@@ -81,7 +81,7 @@ from vmpt.empt_io import (
     write_shutter_mask_csv,
 )
 from vmpt.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
-from vmpt.msa import load_msa_grid, load_operability
+from vmpt.msa import ensure_current_operability, load_msa_grid, load_operability
 from vmpt.mpt_io import (
     MPTPlan,
     download_apt_program,
@@ -108,14 +108,41 @@ from vmpt.wavelengths import (
     FILTER_BLUE_CUTOFF,
     GRATING_RANGES,
     cutoffs,
+    grating_adjacency_min_colsep,
     v2_overlap_distance,
 )
+
+
+def _resubscribe_late_event_handlers(*models) -> None:
+    """Re-enrol models in their document's event dispatcher.
+
+    Bokeh only subscribes a model to ``Document.callbacks._subscribed_models``
+    when the model is *attached* to the document (``_attach_document`` runs
+    ``_update_event_callbacks``). A handler wired with ``on_event`` /
+    ``on_click`` *after* the model's layout root was added to ``curdoc()`` is
+    recorded on the model's ``_event_callbacks`` but never enrolled with the
+    document, so the Bokeh server silently drops its events (e.g. a button
+    that "does nothing" when clicked). Call this right after any such late
+    wiring. Idempotent — ``subscribe`` is a ``set.add`` — and a no-op when
+    the model isn't attached yet (its eventual attach will subscribe it).
+    """
+    for model in models:
+        try:
+            if getattr(model, "document", None) is not None:
+                model._update_event_callbacks()
+        except Exception:  # noqa: BLE001 — never let a wiring helper crash startup
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Singletons
 # ---------------------------------------------------------------------------
 
 V2_MSA, V3_MSA = load_msa_grid()           # (4, 171, 365)
+# Each time vMPT starts, make sure the local CRDS cache has the current MOS
+# operability reference (best-effort; offline-safe, ~once per process). Then
+# load it — so the failed-/stuck-shutter map matches APT/MPT.
+ensure_current_operability()
 OPERABLE, REASON = load_operability()      # (4, 171, 365) bool / int8
 
 DISPERSERS = list(GRATING_RANGES.keys())   # PRISM, G140M, ...
@@ -208,12 +235,6 @@ def _set_open_shutters(new: dict) -> None:
     legacy `state['open_shutters']` alias pointed at the same object."""
     _active_config()["open_shutters"] = new
     state["open_shutters"] = new
-
-
-def _set_highlighted(new: set) -> None:
-    """Replace the active config's highlighted set, keeping the alias."""
-    _active_config()["highlighted"] = new
-    state["highlighted"] = new
 
 
 def _set_history(new: list) -> None:
@@ -1592,7 +1613,6 @@ _TIPS = [
     ("🔲", "Space toggles one shutter", "Hover any operable shutter and tap <b>Space</b> to open or close <b>just that shutter</b> — independent of the N-shutter slitlet size. Handy for fine-tuning a mask cell by cell.", True),
     ("✋", "Move the pointing", "<b>Shift + click</b> anywhere on the image to recentre the pointing on that spot. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks the current pointing."),
     ("🔁", "Toggle a slitlet", "Click an already-open shutter to close it. Its slitlet siblings come down with it."),
-    ("🎨", "Cyan flag", "Double-click a shutter to toggle a <span style='color:#0aa;font-weight:600'>cyan highlight</span> — a visual flag for your own review. It's not exported."),
     ("🔭", "Pick a roll", "In the <b>Pointing</b> tab, enter a visibility date and click <b>Compute allowed V3 PA</b>. jwst_gtvt reports the valid window for the date."),
     ("🌈", "Wavelength check", "Hover any open shutter to see its λ<sub>blue</sub> / λ<sub>red</sub> and the NRS1 / NRS2 detector-gap range for the current disperser."),
     ("⚠️", "Orange = collision", "Orange-tinted shutters share a dispersed-y row with an open or stuck-open shutter — opening them would put two spectra on the same detector pixels."),
@@ -1688,77 +1708,119 @@ help_div = Div(
     },
     text="""
 <style>
-  /* Local typography for the Quick guide — keeps the nested lists from
-     pushing content off the right edge of the 340-px help panel. */
-  .vmpt-help h3 { margin: 0 0 6px 0; font-size: 14px; }
+  /* Quick guide is a stack of collapsible <details> folds. Scoped to
+     .vmpt-help; `max-width:100%` + break rules keep every element inside
+     the 340-px panel so nothing spills past the box edge. */
+  .vmpt-help { overflow-wrap: anywhere; word-break: break-word; }
+  .vmpt-help * { max-width: 100%; box-sizing: border-box; }
+  .vmpt-help h3 { margin: 0 0 8px 0; font-size: 14px; }
   .vmpt-help b  { color: #1a3b66; }
-  .vmpt-help ul { margin: 2px 0 6px 0; padding-left: 16px; }
-  .vmpt-help ul ul { margin: 1px 0 1px 0; padding-left: 12px; }
-  .vmpt-help li { margin: 1px 0; }
+  .vmpt-help details { margin: 0 0 4px 0; border: 1px solid #e3e6ea;
+                       border-radius: 5px; background: #fff; }
+  .vmpt-help summary { cursor: pointer; padding: 5px 8px; font-weight: 700;
+                       color: #1a3b66; border-radius: 5px;
+                       -webkit-user-select: none; user-select: none; }
+  .vmpt-help summary:hover { background: #eef2f7; }
+  .vmpt-help details[open] > summary { border-bottom: 1px solid #e3e6ea;
+                       border-radius: 5px 5px 0 0; }
+  .vmpt-help .fold-body { padding: 2px 10px 6px 10px; }
+  .vmpt-help ul { margin: 2px 0 4px 0; padding-left: 15px; }
+  .vmpt-help ul ul { margin: 1px 0; padding-left: 12px; }
+  .vmpt-help li { margin: 2px 0; }
   .vmpt-help code { font-size: 11px; padding: 0 2px;
                     background: #ececec; border-radius: 2px;
                     word-break: break-all; }
 </style>
 <div class="vmpt-help">
 <h3>Quick guide</h3>
-<b>1. Load an image</b>
-<ul>
-  <li>One-click <b>Load Abell 370 example</b> or <b>Load RXCJ0600 example</b> from the <b>Image</b> tab — fastest.</li>
-  <li>Or paste a local <b>FITS</b> path (with WCS), or a <b>JPG + sidecar FITS</b> pair.</li>
-</ul>
-<b>2. Optional: target catalog</b>
-<ul>
-  <li>CSV / ASCII / FITS with at least <code>ID, RA, DEC</code>.</li>
-  <li>Targets render as yellow circles. A shutter containing a catalog source auto-tags the slitlet on click.</li>
-</ul>
-<b>3. Aim the MSA</b>
-<ul>
-  <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3 PA + 138.575° (mod 360).</li>
-  <li><b>Shift + click</b> to move pointing. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks it.</li>
-  <li>Type a date in <b>Visibility</b> → <b>Compute allowed V3 PA</b> to query jwst_gtvt.</li>
-</ul>
-<b>4. Hand-pick shutters</b>
-<ul>
-  <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Setting</b>.</li>
-  <li><b>Click</b> → opens N-shutter slitlet at the nearest operable shutter. Click an open shutter to close the slitlet.</li>
-  <li><b>Hover + Space</b> → toggle <b>just the one</b> hovered shutter open/close (ignores the slitlet size; operable shutters only).</li>
-  <li><b>Double-click</b> → toggles <span style='color:#0aa;font-weight:600;background:#222;padding:0 4px'>cyan highlight</span> (visual flag, not exported).</li>
-  <li>Layers (Setting tab → <b>Layers</b>):
-    <ul>
-      <li><span style='background:silver;padding:0 4px'>silver</span> = operable</li>
-      <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
-      <li><span style='color:#b30000;font-weight:700'>dark red</span> = stuck-open</li>
-      <li>Spec-overlap (MPT colours; alpha stacks with #sources):
-        <ul>
-          <li><span style='color:#d96272;font-weight:700'>pink</span> = <b>Mask Stuck</b> — operable shutter where only stuck-open spectra land (no collision).</li>
-          <li><span style='color:#e26a00;font-weight:700'>orange</span> = <b>Masked</b> — operable shutter where at least one user-open's spectrum lands (no collision).</li>
-          <li><span style='color:#a050b8;font-weight:700'>purple</span> = <b>Mask Conflict</b> — either a user-pick that's touching another open shutter, OR an operable shutter sitting in the dispersion band of a slitlet that's in a touching collision. Opens a chain: every shutter downstream of a colliding slitlet is purple.</li>
-        </ul>
-      </li>
-      <li><span style='color:gold;font-weight:700'>gold</span> = fixed slits</li>
-      <li><span style='color:#ddd200;font-weight:700'>yellow ○</span> = catalog target · <span style='color:#2e9b3f;font-weight:700'>green ○</span> = matched to an open shutter</li>
-    </ul>
-  </li>
-</ul>
-<b>5. Save / share / export</b>
-<ul>
-  <li><b>MPT</b> tab → <b>Save session</b> writes a bundle.</li>
-  <li><b>Load session</b> — point at <code>MPT_plan.json</code> or <code>vMPT_workspace.json</code>; the sibling auto-loads.</li>
-  <li><b>Export eMPT bundle</b> writes a timestamped folder:
-    <ul>
-      <li><code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code> → APT MPT</li>
-      <li><code>vMPT_workspace.json</code> → vMPT round-trip</li>
-      <li><code>eMPT_*</code> three files → eMPT pipeline</li>
-    </ul>
-  </li>
-</ul>
-<b>Interactions</b>
-<ul>
-  <li><b>Wheel</b>: zoom · <b>Drag</b> or <b>W A S D</b> / <b>arrows</b>: pan (<b>Shift</b> = bigger steps) · <b>Box zoom</b>: toolbar → drag</li>
-  <li><b>Hover + Space</b>: toggle the single hovered shutter · <b>Reset</b>: toolbar · <b>Undo</b>: Setting → <b>Undo last</b></li>
-</ul>
+
+<details open>
+  <summary>1 · Load an image</summary>
+  <div class="fold-body"><ul>
+    <li>One-click <b>Load Abell 370 example</b> or <b>Load RXCJ0600 example</b> from the <b>Input</b> tab — fastest.</li>
+    <li>Or a local <b>FITS</b> path (with WCS), or a <b>JPG + sidecar FITS</b> pair.</li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>2 · (Optional) load target catalog</summary>
+  <div class="fold-body"><ul>
+    <li>CSV / ASCII / FITS with at least <code>ID, RA, DEC</code>.</li>
+    <li>Targets render as yellow circles. A shutter containing a catalog source auto-tags the slitlet on click.</li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>3 · Aim the MSA</summary>
+  <div class="fold-body"><ul>
+    <li><b>V3 PA</b> drives the math; <b>NIRSpec APA</b> = V3 PA + 138.575° (mod 360).</li>
+    <li><b>Shift + click</b> to move pointing. The <span style='color:#2e9b3f;font-weight:600'>lime cross</span> marks it.</li>
+    <li>Type a date in <b>Visibility</b> → <b>Compute allowed V3 PA</b> to query jwst_gtvt.</li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>4 · Optimize MSA</summary>
+  <div class="fold-body"><ul>
+    <li><b>Pointing</b> tab → <b>Open optimizer…</b>. Pick a method: <b>Democracy</b> (count), <b>Meritocracy</b> (Σ weight), <b>Hierarchy</b> (priority tiers).</li>
+    <li>Set the search radius + optional <b>collision protection</b>, then <b>Run</b>. Top solutions appear in a table; <b>Apply #N</b> sets the pointing and auto-opens slitlets.</li>
+    <li>Multiple exposures? Bump <b>Number of configs</b> (≤ 5); <b>Max configs per source = 1</b> keeps later configs off earlier targets.</li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>5 · Hand-pick shutters</summary>
+  <div class="fold-body"><ul>
+    <li>Pick the <b>N-shutter slitlet</b> size (1/2/3/5) in <b>Settings</b>.</li>
+    <li><b>Click</b> → opens an N-shutter slitlet at the nearest operable shutter. Click an open shutter to close the slitlet.</li>
+    <li><b>Hover + Space</b> → toggle <b>just the one</b> hovered shutter open/close (ignores the slitlet size; operable shutters only).</li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>Layers &amp; colours</summary>
+  <div class="fold-body">
+  <ul>
+    <li><span style='background:silver;padding:0 4px'>silver</span> = operable</li>
+    <li><span style='color:#d63d3d;font-weight:700'>red fill</span> = your picks</li>
+    <li><span style='color:#b30000;font-weight:700'>dark red</span> = stuck-open</li>
+    <li><span style='color:gold;font-weight:700'>gold</span> = fixed slits</li>
+    <li><span style='color:#ddd200;font-weight:700'>yellow ○</span> = catalog target · <span style='color:#2e9b3f;font-weight:700'>green ○</span> = matched</li>
+  </ul>
+  <b>Spec-overlap</b> (MPT colours; alpha stacks with #sources):
+  <ul>
+    <li><span style='color:#d96272;font-weight:700'>pink</span> = <b>Mask Stuck</b> — operable shutter where only stuck-open spectra land (no collision).</li>
+    <li><span style='color:#e26a00;font-weight:700'>orange</span> = <b>Masked</b> — operable shutter where at least one user-open's spectrum lands (no collision).</li>
+    <li><span style='color:#a050b8;font-weight:700'>purple</span> = <b>Mask Conflict</b> — two open slitlets crowd with no operable buffer row between them. Only the rows where they crowd go purple (the ±2-row window between the two slitlets), not the whole spectrum; the band beyond reverts to orange.</li>
+  </ul>
+  </div>
+</details>
+
+<details>
+  <summary>Save / share / export</summary>
+  <div class="fold-body"><ul>
+    <li><b>MPT</b> tab → <b>Save session</b> writes a bundle.</li>
+    <li><b>Load session</b> — point at <code>MPT_plan.json</code> or <code>vMPT_workspace.json</code>; the sibling auto-loads.</li>
+    <li><b>Export eMPT bundle</b> writes a timestamped folder:
+      <ul>
+        <li><code>MPT_plan.json</code> + <code>&lt;catalog&gt;.cat</code> → APT MPT</li>
+        <li><code>vMPT_workspace.json</code> → vMPT round-trip</li>
+        <li><code>eMPT_*</code> three files → eMPT pipeline</li>
+      </ul>
+    </li>
+  </ul></div>
+</details>
+
+<details>
+  <summary>Pan / zoom / shortcuts</summary>
+  <div class="fold-body"><ul>
+    <li><b>Wheel</b>: zoom · <b>Drag</b> or <b>W A S D</b> / <b>arrows</b>: pan (<b>Shift</b> = bigger steps) · <b>Box zoom</b>: toolbar → drag</li>
+    <li><b>Hover + Space</b>: toggle the single hovered shutter · <b>Reset</b>: toolbar · <b>Undo</b>: Settings → <b>Undo last</b></li>
+  </ul></div>
+</details>
+
 </div>
-<p style='margin:4px 0'>Full reference in <code>README.md</code> · file roles in <code>CONTEXT.md</code>.</p>
+<p style='margin:6px 2px 0 2px'>📖 Full documentation at <a href='https://vmpt.readthedocs.io/' target='_blank' rel='noopener' style='color:#1a3b66; font-weight:600;'>vmpt.readthedocs.io</a></p>
 """,
 )
 
@@ -1840,9 +1902,16 @@ snap_box = CheckboxGroup(labels=["Snap target to nearest operable"], active=[0])
 # attribute to mutate.
 overlay_layer_select = Select(
     title="Adjust layer",
+    # These must match the keys in `_OVERLAY_LAYER_CONFIG` exactly, or the
+    # alpha/stroke sliders find no config and silently do nothing. (The
+    # v1.3.1 split of "Overlapping shutters" into the three MPT-style
+    # spec-overlap layers had left a single dead "Overlapping shutters"
+    # entry here, so those sliders were inert.)
     options=[
         "Operable shutters",
-        "Overlapping shutters",
+        "Mask Stuck (pink)",
+        "Masked (overlapping warning)",
+        "Mask Conflict (purple)",
         "Picked shutters",
         "Stuck open",
         "Catalog sources",
@@ -1875,7 +1944,7 @@ overlay_stroke_slider = Slider(
 # aspect canvas, the image stays at its native pixel shape and the
 # extra canvas area shows empty space (the user can pan into it).
 # We deliberately do NOT couple X/Y to the image's W:H — letting
-# them roam free is the point of having two sliders. Default 800x800.
+# them roam free is the point of having two sliders. Default 800x600.
 # Compact `W: [n] x H: [n]` pair — Spinner instead of Slider. The
 # Spinner has up/down arrows, accepts free typing, and only commits
 # on blur / Enter / arrow click so it's naturally throttled (no
@@ -1889,7 +1958,7 @@ canvas_x_spinner = Spinner(
 )
 canvas_y_spinner = Spinner(
     low=_CANVAS_SIZE_MIN, high=_CANVAS_SIZE_MAX, step=_CANVAS_SIZE_STEP,
-    value=800, width=88, title="Height (Y)",
+    value=600, width=88, title="Height (Y)",
 )
 
 undo_btn = Button(label="Undo last", button_type="default")
@@ -2480,7 +2549,6 @@ src_open_shutters = ColumnDataSource(
               lam_blue=[], lam_red=[], lam_gap_lo=[], lam_gap_hi=[],
               gap_label=[])
 )
-src_highlighted = ColumnDataSource(data=dict(xs=[], ys=[], q=[], s=[], d=[]))
 # Spec-overlap shutters, split into three categories that follow
 # APT MPT's color encoding (v1.3.1+ change — was a single src_spec_
 # overlap orange layer in v1.0–v1.3.0):
@@ -2583,7 +2651,7 @@ fig.x_range.renderers = [img_glyph]
 fig.y_range.renderers = [img_glyph]
 
 # Bottom-to-top render order: image, operable shutters, stuck-open shutters,
-# open shutters (user picks), highlighted shutters, MSA outline, fixed slits,
+# open shutters (user picks), MSA outline, fixed slits,
 # targets, pointing handle.
 bg_shutters_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_bg_shutters,
@@ -2611,8 +2679,9 @@ open_shutters_glyph = fig.multi_polygons(
 # Each glyph has `fill_alpha="fill_alpha"` so the source's per-
 # polygon alpha column drives transparency — alpha stacks with the
 # number of overlapping dispersion sources (base × n, capped at 1).
-# Edge defaults off; the appearance picker's stroke slider can
-# reveal it.
+# Edge defaults to a thin 0.5 px outline (line_alpha 0.6) so the
+# masked shutters read clearly even at low fill alpha; the
+# appearance picker's stroke slider tunes it (0 hides the edge).
 #
 # Rendered AFTER `open_shutters_glyph` so contamination on a
 # user-opened shutter (open-vs-open and open-vs-stuck conflicts)
@@ -2621,21 +2690,21 @@ open_shutters_glyph = fig.multi_polygons(
 # the spec-overlap's alpha.
 spec_overlap_stuck_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap_stuck,
-    line_color="#d96272", line_alpha=0.0, line_width=0,
+    line_color="#d96272", line_alpha=0.6, line_width=0.5,
     # Pink (APT MPT "Mask Stuck" colour): a shutter whose
     # spectrum overlaps with a stuck-open's dispersion.
     fill_color="#ff9aa0", fill_alpha="fill_alpha",
 )
 spec_overlap_user_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap_user,
-    line_color="#d97a00", line_alpha=0.0, line_width=0,
+    line_color="#d97a00", line_alpha=0.6, line_width=0.5,
     # Orange (APT MPT "Masked" colour): a shutter whose spectrum
     # overlaps with a user-opened shutter's dispersion.
     fill_color="orange", fill_alpha="fill_alpha",
 )
 spec_overlap_both_glyph = fig.multi_polygons(
     xs="xs", ys="ys", source=src_spec_overlap_both,
-    line_color="#6f3a8a", line_alpha=0.0, line_width=0,
+    line_color="#6f3a8a", line_alpha=0.6, line_width=0.5,
     # Purple (APT MPT "Mask Conflict" colour): a shutter whose
     # spectrum overlaps with BOTH stuck-open AND user-open
     # dispersion sources.
@@ -2645,10 +2714,6 @@ spec_overlap_both_glyph = fig.multi_polygons(
 # pointed at the orange (now: user-overlap) glyph. The overlay-
 # appearance config below still references it under the old key.
 spec_overlap_glyph = spec_overlap_user_glyph
-highlighted_glyph = fig.multi_polygons(
-    xs="xs", ys="ys", source=src_highlighted,
-    line_color="cyan", line_width=2.0, fill_alpha=0.0,
-)
 # Idle configs' outlines render UNDER the active outline (drawn first):
 # faint dashed blue with a whisper of fill so they read as "the other
 # config's footprint" without competing with the active solid-blue grid.
@@ -3125,17 +3190,6 @@ def _polygons_for_shutter_keys(
     return xs, ys, qs.tolist(), ss.tolist(), ds.tolist()
 
 
-def _highlighted_polygons(pa_v3: float, fid_pix: tuple[float, float],
-                          jinv: np.ndarray) -> dict:
-    """Polygons for shutters in state['highlighted'], vectorized."""
-    if not state["highlighted"]:
-        return dict(xs=[], ys=[], q=[], s=[], d=[])
-    xs, ys, qs, ss, ds = _polygons_for_shutter_keys(
-        state["highlighted"], pa_v3, fid_pix, jinv,
-    )
-    return dict(xs=xs, ys=ys, q=qs, s=ss, d=ds)
-
-
 def _open_shutters_cds_data(pa_v3: float, fid_pix: tuple[float, float],
                             jinv: np.ndarray) -> dict:
     """Open-shutter polygons + per-shutter target ID and wavelength cutoffs."""
@@ -3207,6 +3261,29 @@ def refresh_overlays_light() -> None:
     # Fixed slits always visible
     src_fixed_slits.data = _fixed_slit_polygons(pa_v3, fid_pix, jinv)
     src_pointing_handle.data = dict(x=[fid_pix[0]], y=[fid_pix[1]])
+
+
+def _grating_adjacency_relaxed(lo1, hi1, d1, lo2, hi2, d2, min_colsep) -> bool:
+    """Whether a SAME-quadrant conflict between two slitlets should be demoted
+    from purple (Mask Conflict) to orange (Masked).
+
+    True only for a pure no-buffer ADJACENCY — the two slitlets' row ranges
+    are disjoint with EXACTLY 0 rows between them (`b_lo = a_hi + 1`) — under a
+    grating (``min_colsep`` is the disperser's column threshold, not None) with
+    the two slitlets at least ``min_colsep`` columns apart. Long grating
+    spectra run parallel, so such a column-offset diagonal step isn't a real
+    collision. Real row overlap (rows intersect) and PRISM (``min_colsep`` is
+    None) always return False → they stay purple.
+    """
+    if min_colsep is None:
+        return False
+    if hi1 < lo2:
+        gap = lo2 - hi1 - 1          # slitlet 1 is the lower one
+    elif hi2 < lo1:
+        gap = lo1 - hi2 - 1          # slitlet 2 is the lower one
+    else:
+        return False                 # rows overlap → real conflict, stay purple
+    return gap == 0 and abs(d1 - d2) >= min_colsep
 
 
 def refresh_overlays() -> None:
@@ -3304,17 +3381,35 @@ def refresh_overlays() -> None:
     # 1, tripling the alpha and producing a darker stripe than MPT
     # shows.
     #
-    # Group key is `(q, d, target_id_or_anon)`: all shutters at the
-    # same column with the same target id (or all anonymous opens at
-    # the same column when there's no target id) form one slitlet.
-    # An anonymous slitlet auto-created by clicking on a non-target
-    # operable shutter still groups its N shutters together because
-    # they all share `target_id=None` and the same `(q, d)`.
-    user_groups: dict[tuple, list[tuple[int, int, int]]] = {}
+    # Group key is `(q, d, target_id_or_anon)`: shutters at the same column
+    # with the same target id form one slitlet. BUT a slitlet is a
+    # CONTIGUOUS column of shutters, so each bucket is then split into
+    # maximal runs of consecutive rows. Opens loaded from a mask CSV carry
+    # no target id, so two physically separate slitlets in the same column
+    # (e.g. Q4 d=303 with s=22-24 AND s=108-110) would otherwise merge into
+    # one bogus group spanning s=22-110 — whose (min,max) row span then
+    # (a) masks the whole empty gap between the clusters and (b) never
+    # shrinks when you close a single shutter, so the Mask Conflict never
+    # clears. Splitting on row gaps fixes both. A 1-row gap (a single
+    # failed-closed shutter inside a real slitlet) keeps the run together.
+    _raw_groups: dict[tuple, list[tuple[int, int, int]]] = {}
     for (q, s, d), sh in state["open_shutters"].items():
         tid = getattr(sh, "target_id", None)
         key = (q, d, tid if tid is not None else "_anon_")
-        user_groups.setdefault(key, []).append((q, s, d))
+        _raw_groups.setdefault(key, []).append((q, s, d))
+    user_groups: dict[tuple, list[tuple[int, int, int]]] = {}
+    for key, shts in _raw_groups.items():
+        shts.sort(key=lambda t: t[1])            # by MSA row s
+        run = [shts[0]]
+        run_i = 0
+        for prev, cur in zip(shts, shts[1:]):
+            if cur[1] - prev[1] <= 1:            # adjacent row → same slitlet
+                run.append(cur)
+            else:                                # gap → separate slitlet
+                user_groups[(*key, run_i)] = run
+                run_i += 1
+                run = [cur]
+        user_groups[(*key, run_i)] = run
 
     stuck_flat = np.where(_FLAT_REASON == 2)[0]
     stuck_keys = [
@@ -3345,6 +3440,9 @@ def refresh_overlays() -> None:
     stuck_buffer: dict[int, int] = {}
     stuck_counts: dict[int, int] = {}
     user_counts: dict[int, int] = {}
+    # Picks of slitlets in a cross-quadrant conflict — forced purple even when
+    # not doubly-hit (built on a cache miss; empty otherwise).
+    xq_conflict_pick_flats: set[int] = set()
 
     # Base alpha per category — slider-controlled in Settings →
     # Overlay appearance, persisted via the prefs system, stashed
@@ -3697,37 +3795,117 @@ def refresh_overlays() -> None:
         _accumulate("user", user_groups_list, user_direct, user_buffer)
         _accumulate("stuck", stuck_groups, stuck_direct, stuck_buffer)
 
-        # Identify "conflicted" sources: any open whose own shutters
-        # have been hit by a DIFFERENT source. Both touching slitlets
-        # in such a pair get flagged — and their downstream
-        # contamination bands later promote to purple (chain
-        # propagation only when the slitlets themselves collide).
+        # Identify conflicting source PAIRS: any open whose own shutters
+        # are hit by a DIFFERENT source. We record the actual PAIRS (not
+        # just a flat "conflicted" set) so each conflict's purple band can
+        # be bounded to the rows where the two slitlets actually crowd
+        # each other, rather than promoting a conflicted slitlet's WHOLE
+        # contamination band to purple.
         conflicted_user: set[int] = set()
         conflicted_stuck: set[int] = set()
-        for src_idx, group in enumerate(user_groups_list):
-            for (q, s, d) in group:
-                flat = (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
-                others = hit_sources.get(flat, set()) - {("user", src_idx)}
-                if others:
-                    conflicted_user.add(src_idx)
-                    for (otype, oi) in others:
-                        if otype == "user":
-                            conflicted_user.add(oi)
-                        else:
-                            conflicted_stuck.add(oi)
-                    break
-        for src_idx, group in enumerate(stuck_groups):
-            for (q, s, d) in group:
-                flat = (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
-                others = hit_sources.get(flat, set()) - {("stuck", src_idx)}
-                if others:
-                    conflicted_stuck.add(src_idx)
-                    for (otype, oi) in others:
-                        if otype == "user":
-                            conflicted_user.add(oi)
-                        else:
-                            conflicted_stuck.add(oi)
-                    break
+        conflict_pairs: set = set()
+
+        def _scan_conflicts(groups, my_type):
+            for src_idx, group in enumerate(groups):
+                me = (my_type, src_idx)
+                others_all: set = set()
+                for (q, s, d) in group:
+                    flat = (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
+                    others_all |= hit_sources.get(flat, set()) - {me}
+                for o in others_all:
+                    (conflicted_user if my_type == "user"
+                     else conflicted_stuck).add(src_idx)
+                    (conflicted_user if o[0] == "user"
+                     else conflicted_stuck).add(o[1])
+                    conflict_pairs.add(frozenset((me, o)))
+
+        _scan_conflicts(user_groups_list, "user")
+        _scan_conflicts(stuck_groups, "stuck")
+
+        # Per-conflicted-slitlet PURPLE WINDOW. A conflict promotes shutters
+        # to purple (Mask Conflict) ONLY within ±2 rows of where the two
+        # slitlets crowd each other — [upper-slitlet bottom − 2 …
+        # lower-slitlet top + 2] in MSA rows — NOT along the whole band.
+        # (Confirmed against APT MPT: two adjacent N=3 slitlets give a
+        # 2-orange / 4-purple / 2-orange stack.) Beyond the window the band
+        # stays orange/pink. Because we only ever re-bucket shutters that
+        # are ALREADY contaminated (below), purple ⊆ orange∪pink — a clean
+        # silver shutter is never promoted, and a lone stuck-open's ±1 pink
+        # band can't be inflated past where contamination actually exists.
+        #
+        # The window lives in MSA rows, so it only applies to a SAME-quadrant
+        # pair (shared row frame). A cross-quadrant conflict (spectra fold
+        # together from different quadrants — no "buffer row" concept between
+        # them) keeps the full-band promotion (window = None = unbounded).
+        CONFLICT_PURPLE_BUFFER = 2
+        # Grating diagonal-step relaxation: under a grating, demote a
+        # no-buffer ADJACENCY conflict (rows exactly 1 apart, no real overlap)
+        # to orange once the two slitlets are ≥ this many columns apart. That
+        # threshold is 1 (any nonzero column offset → a deliberate diagonal
+        # step → orange; only exact same-column stacking Δd=0 stays purple) —
+        # see wavelengths.grating_adjacency_min_colsep for why magnitude is
+        # irrelevant. None for PRISM / non-gratings → adjacency always purple.
+        _adj_min_colsep = grating_adjacency_min_colsep(state.get("disperser"))
+
+        def _slit_rows(tag):
+            t, si = tag
+            grp = user_groups_list[si] if t == "user" else stuck_groups[si]
+            ss0 = [s for (_q, s, _d) in grp]
+            return grp[0][0], min(ss0), max(ss0), grp[0][2]
+
+        slitlet_window: dict[tuple, set] = {}    # same-quad ±2 row windows
+        slitlet_quad: dict[tuple, int] = {}
+        # Cross-quadrant conflicting pairs share no MSA-row frame (the row
+        # index isn't comparable across quadrants), so a row window is
+        # meaningless. Instead remember each tag's cross-quad partners; a
+        # candidate is then cross-quad PURPLE only where it is contaminated
+        # by BOTH a tag and one of its partners — the genuine doubly-masked
+        # overlap of the two spectra — never the tag's whole band. (The old
+        # behaviour promoted each cross-quad-conflicted slitlet's ENTIRE
+        # contamination band, in BOTH quadrants, to purple — tens of
+        # thousands of shutters for a full mask, and impossible to clear by
+        # closing same-quadrant shutters. This keeps purple ⊆ orange/pink.)
+        cross_partners: dict[tuple, set] = {}
+        for pair in conflict_pairs:
+            tag1, tag2 = tuple(pair)
+            q1, lo1, hi1, d1 = _slit_rows(tag1)
+            q2, lo2, hi2, d2 = _slit_rows(tag2)
+            slitlet_quad[tag1] = q1
+            slitlet_quad[tag2] = q2
+            if q1 != q2:
+                cross_partners.setdefault(tag1, set()).add(tag2)
+                cross_partners.setdefault(tag2, set()).add(tag1)
+                continue
+            # GRATING diagonal-step relaxation (same-quadrant only): a pure
+            # ADJACENCY conflict (rows disjoint, 0 buffer rows) under a grating
+            # with a large enough COLUMN offset isn't a real collision — skip
+            # its purple window so those shutters stay orange (Masked). Real
+            # row overlap and PRISM are unaffected.
+            if _grating_adjacency_relaxed(
+                    lo1, hi1, d1, lo2, hi2, d2, _adj_min_colsep):
+                continue
+            inner_bot = max(lo1, lo2)            # bottom of the upper slitlet
+            inner_top = min(hi1, hi2)            # top of the lower slitlet
+            w_lo = inner_bot - CONFLICT_PURPLE_BUFFER
+            w_hi = inner_top + CONFLICT_PURPLE_BUFFER
+            rows = set(range(w_lo, w_hi + 1)) if w_hi >= w_lo else set()
+            for tg in (tag1, tag2):
+                slitlet_window.setdefault(tg, set())
+                slitlet_window[tg] |= rows
+        # A user PICK that belongs to a slitlet in a CROSS-quadrant conflict is
+        # itself a Mask Conflict: its own spectrum is one of the two colliding
+        # spectra, even though the partner's light lands on neighbouring
+        # shutters rather than this exact one (so it isn't "doubly-hit"). Mark
+        # every open shutter of such a slitlet purple so the pick reads as a
+        # conflict, not just Masked/clean. (Same-quadrant picks are already
+        # coloured via the ±2 window, which intentionally leaves the slitlet's
+        # far edges orange — so this is cross-quadrant only.)
+        xq_conflict_pick_flats: set[int] = set()
+        for _si, _g in enumerate(user_groups_list):
+            if ("user", _si) in cross_partners:
+                for (_q, _s, _d) in _g:
+                    xq_conflict_pick_flats.add(
+                        (_q - 1) * 171 * 365 + (_s - 1) * 365 + (_d - 1))
         # Total counts (direct + buffer) drive the silver-edge filter
         # and the stats bar's "Conflict shutters" cell.
         for i in set(user_direct) | set(user_buffer):
@@ -3749,70 +3927,76 @@ def refresh_overlays() -> None:
         ]
         return cds
 
-    # Colour rule, branching by candidate type:
+    # Colour rule (alpha always stacks by the number of contaminating
+    # sources, so a shutter hit by N sources is N× as opaque):
     #
-    # PURPLE (Mask Conflict) marks an active collision and applies
-    # ONLY to user-open shutters that the user has already picked.
-    # An operable candidate is NEVER purple — opening a brand-new
-    # slitlet on a clean (silver-edged) row can only ever convert
-    # operable shutters to pink/orange warnings, with alpha stacked
-    # by the number of contaminating sources.
+    # PURPLE (Mask Conflict) — a shutter that is contaminated AND sits in
+    # a conflict's bounded ±2-row window (`_purple_here`, below). This
+    # covers both the user's own picks and operable shutters caught
+    # between two crowding slitlets, but ONLY within that window — beyond
+    # it the same band reverts to the warning colours. Purple is therefore
+    # always a re-bucketing of an already-contaminated shutter, never an
+    # escalation of a clean one.
     #
-    # For USER-OPEN candidates:
-    #   any hit (direct or buffer) from another open  → PURPLE
-    #   no hits                                       → stays red
-    # The "any hit" rule captures touching slitlets: a buffer hit
-    # on a user-open by construction means the other source is at
-    # most 1 row away with no intervening operable row.
-    #
-    # For OPERABLE candidates:
-    #   any user-source hit (direct or buffer)   → ORANGE
-    #   any stuck-source hit, no user            → PINK
-    #   no hits                                  → silver (untouched)
-    # Alpha stacks by the count of contaminating sources, so a
-    # shutter hit by N sources is N× as opaque as one hit by 1.
-    # When both user and stuck sources hit the same operable
-    # shutter we render orange (user-actionable) with the combined
-    # count contributing to the alpha — matching APT MPT, where
-    # opening a new slitlet only ever intensifies the existing
-    # "Masked" warning, never escalates an operable shutter to
-    # "Mask Conflict".
+    # ORANGE (Masked) — contaminated by ≥1 user-open spectrum, outside any
+    # conflict window.
+    # PINK (Mask Stuck) — contaminated only by stuck-open spectra, outside
+    # any conflict window.
+    # silver — no contamination (handled by the operable layer, not here).
     user_open_flat = {
         (q - 1) * 171 * 365 + (s - 1) * 365 + (d - 1)
         for (q, s, d) in state["open_shutters"].keys()
     }
+
+    def _purple_here(i: int) -> bool:
+        """True iff candidate ``i`` is a genuine Mask Conflict — by either of
+        two routes:
+
+        * SAME-quadrant: ``i`` is contaminated by a conflicted slitlet and
+          its row falls in that conflict's bounded ±2-row window.
+        * CROSS-quadrant: ``i`` is contaminated by BOTH a slitlet and one of
+          that slitlet's cross-quadrant conflict partners — two spectra from
+          different quadrants genuinely land on it. Bounded to that real
+          overlap, never either slitlet's whole band.
+
+        ``hit_sources``, ``slitlet_window``, ``slitlet_quad`` and
+        ``cross_partners`` only exist on a cache MISS, which is also the only
+        time ``all_idx`` is non-empty — so this is never reached on a hit."""
+        if i in xq_conflict_pick_flats:
+            return True                           # own pick in a cross-quad conflict
+        q_i = i // (171 * 365) + 1
+        s_i = (i // 365) % 171 + 1
+        srcs = hit_sources.get(i, ())            # sources contaminating i
+        for tag in srcs:
+            win = slitlet_window.get(tag)
+            if win and slitlet_quad.get(tag) == q_i and s_i in win:
+                return True                       # same-quad ±2 window
+            partners = cross_partners.get(tag)
+            if partners and not partners.isdisjoint(srcs):
+                return True                       # cross-quad genuine overlap
+        return False
+
     stuck_only_alpha: dict[int, float] = {}
     user_only_alpha: dict[int, float] = {}
     both_alpha: dict[int, float] = {}
     all_idx = (
         set(user_direct) | set(user_buffer)
         | set(stuck_direct) | set(stuck_buffer)
+        | xq_conflict_pick_flats
     )
     for i in all_idx:
-        n_ud = user_direct.get(i, 0)
-        n_ub = user_buffer.get(i, 0)
-        n_sd = stuck_direct.get(i, 0)
-        n_sb = stuck_buffer.get(i, 0)
-        n_total_u = n_ud + n_ub
-        n_total_s = n_sd + n_sb
+        n_total_u = user_direct.get(i, 0) + user_buffer.get(i, 0)
+        n_total_s = stuck_direct.get(i, 0) + stuck_buffer.get(i, 0)
         n_total = n_total_u + n_total_s
-        if i in user_open_flat:
+        if _purple_here(i):
+            # max(n_total, 1): a cross-quad-conflicted pick may not itself be
+            # hit (n_total = 0) but must still render at the base purple alpha.
+            both_alpha[i] = min(1.0, base_alpha_both * max(n_total, 1))
+        elif i in user_open_flat:
+            # A picked shutter that's masked but not in a conflict window
+            # reads as orange (Masked), like any user-contaminated shutter.
             if n_total >= 1:
-                both_alpha[i] = min(1.0, base_alpha_both * n_total)
-            continue
-        # Operable candidate. Purple ONLY if it's downstream of a
-        # source slitlet that is itself in collision (touching another
-        # open). Otherwise the warning colours (orange/pink) just
-        # stack alpha with the contamination count — opening a clean
-        # new slitlet never escalates an operable shutter to purple.
-        sources_here = hit_sources.get(i, set())
-        from_conflicted = any(
-            (t == "user" and si in conflicted_user)
-            or (t == "stuck" and si in conflicted_stuck)
-            for (t, si) in sources_here
-        )
-        if from_conflicted:
-            both_alpha[i] = min(1.0, base_alpha_both * n_total)
+                user_only_alpha[i] = min(1.0, base_alpha_user * n_total)
         elif n_total_u >= 1:
             user_only_alpha[i] = min(1.0, base_alpha_user * n_total)
         elif n_total_s >= 1:
@@ -3876,8 +4060,6 @@ def refresh_overlays() -> None:
 
     # Open shutters (always shown)
     src_open_shutters.data = _open_shutters_cds_data(pa_v3, fid_pix, jinv)
-    # Highlighted shutters
-    src_highlighted.data = _highlighted_polygons(pa_v3, fid_pix, jinv)
     # Fixed slits always visible
     src_fixed_slits.data = _fixed_slit_polygons(pa_v3, fid_pix, jinv)
     # Pointing handle at the image-pixel of (RA, Dec)
@@ -4047,7 +4229,6 @@ def refresh_overlays() -> None:
     # Update stats panel and status with the current configuration.
     n_op = len(state["open_shutters"])
     n_tgt_open = len({sh.target_id for sh in state["open_shutters"].values() if sh.target_id})
-    n_hl = len(state["highlighted"])
     n_overlap = overlap_idx.size
     apa = (pa_v3 + V3_IDL_Y_ANGLE) % 360.0
     # Sexagesimal RA/Dec for the stats panel
@@ -4185,12 +4366,12 @@ def refresh_image_glyph() -> None:
     # if present, for session-reload backwards compatibility.
     if W > 0 and H > 0:
         # User-adjustable canvas dimensions (state-backed so values
-        # survive image reloads). Default 800x800; legacy
+        # survive image reloads). Default 800x600; legacy
         # "frame_max" key (pre-X/Y-split) still drives both axes if
         # present, for session-reload backwards compatibility.
         legacy = state.get("frame_max")
         frame_x = int(state.get("frame_x", legacy or 800))
-        frame_y = int(state.get("frame_y", legacy or 800))
+        frame_y = int(state.get("frame_y", legacy or 600))
         fig.frame_width = max(100, frame_x)
         fig.frame_height = max(100, frame_y)
         # **Per-pixel square** invariant: every data-unit-in-x must
@@ -4669,6 +4850,18 @@ def _render_catalog_list() -> None:
 
 
 def _load_catalog_from_path(path: str, on_complete=None) -> None:
+    # Guard against a non-file path (empty, or a directory like '.') before
+    # handing it to the parser — otherwise astropy raises IsADirectoryError
+    # and dumps a scary traceback for what is really just "nothing to load".
+    # Belt-and-braces: the UI handlers also pre-check, but a stray value
+    # (e.g. a path input that ended up '.') could still reach here.
+    if not path or not Path(path).is_file():
+        if path:
+            _set_status(f"Not a catalog file — skipped: {path}", "warn")
+        _hide_loading()
+        if on_complete is not None:
+            curdoc().add_next_tick_callback(on_complete)
+        return
     try:
         cat = load_catalog(path)
         name = Path(path).name
@@ -4775,8 +4968,8 @@ def on_catalog_path(attr, old, new):
     p = catalog_path_input.value.strip()
     if not p:
         return
-    if not Path(p).exists():
-        _set_status(f"Catalog path not found: {p}", "err")
+    if not Path(p).is_file():
+        _set_status(f"Catalog path is not a file: {p}", "err")
         return
     _show_loading(f"Loading catalog: {Path(p).name}…")
     _close_load_catalog_modal()
@@ -4789,8 +4982,8 @@ def on_catalog_add():
     if not p:
         _set_status("Set a catalog path first.", "warn")
         return
-    if not Path(p).exists():
-        _set_status(f"Catalog path not found: {p}", "err")
+    if not Path(p).is_file():
+        _set_status(f"Catalog path is not a file: {p}", "err")
         return
     _show_loading(f"Loading catalog: {Path(p).name}…")
     _close_load_catalog_modal()
@@ -6074,8 +6267,8 @@ def _apply_loaded_session(sess) -> None:
         " Catalog issues: " + "; ".join(catalog_notes) if catalog_notes else ""
     )
     _set_status(
-        f"Session loaded: {len(state['open_shutters'])} open shutters, "
-        f"{len(state['highlighted'])} highlighted.{image_note}{catalog_note}",
+        f"Session loaded: {len(state['open_shutters'])} open shutters."
+        f"{image_note}{catalog_note}",
         "warn" if (image_note or catalog_note) else "ok", clear_after=14,
     )
     # An in-flight image load hides the spinner itself; otherwise hide now.
@@ -6498,6 +6691,7 @@ _OVERLAY_LAYER_CONFIG = {
         "alpha_attr": "line_alpha", "stroke_attr": "line_width",
         "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 3.0, 0.05),
         "stroke_label": "Stroke (px)",
+        "default_alpha": 0.20, "default_stroke": 1.0,
     },
     # APT MPT-style overlap layers (v1.3.1+). Each carries a
     # field-referenced fill_alpha (`fill_alpha="fill_alpha"` on the
@@ -6510,6 +6704,7 @@ _OVERLAY_LAYER_CONFIG = {
         "alpha_attr": None,
         "alpha_state_key": "overlap_base_alpha_stuck",
         "alpha_setter": lambda v: _set_overlap_base_alpha("stuck", v),
+        "default_alpha": 0.20, "default_stroke": 0.5,
         "stroke_attr": "line_width",
         "alpha_range": (0.0, 0.8, 0.02),
         "stroke_range": (0.0, 3.0, 0.05),
@@ -6519,11 +6714,12 @@ _OVERLAY_LAYER_CONFIG = {
             0.6 if v > 0 else 0.0,
         ),
     },
-    "Masked (orange)":       {
+    "Masked (overlapping warning)": {
         "glyph": spec_overlap_user_glyph,
         "alpha_attr": None,
         "alpha_state_key": "overlap_base_alpha_user",
         "alpha_setter": lambda v: _set_overlap_base_alpha("user", v),
+        "default_alpha": 0.20, "default_stroke": 0.5,
         "stroke_attr": "line_width",
         "alpha_range": (0.0, 0.8, 0.02),
         "stroke_range": (0.0, 3.0, 0.05),
@@ -6538,6 +6734,7 @@ _OVERLAY_LAYER_CONFIG = {
         "alpha_attr": None,
         "alpha_state_key": "overlap_base_alpha_both",
         "alpha_setter": lambda v: _set_overlap_base_alpha("both", v),
+        "default_alpha": 0.20, "default_stroke": 0.5,
         "stroke_attr": "line_width",
         "alpha_range": (0.0, 0.8, 0.02),
         "stroke_range": (0.0, 3.0, 0.05),
@@ -6552,18 +6749,24 @@ _OVERLAY_LAYER_CONFIG = {
         "alpha_attr": "fill_alpha", "stroke_attr": "line_width",
         "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 4.0, 0.1),
         "stroke_label": "Stroke (px)",
+        "default_alpha": 0.35, "default_stroke": 1.5,
     },
     "Stuck open":            {
         "glyph": stuck_open_glyph,
         "alpha_attr": "line_alpha", "stroke_attr": "line_width",
         "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 5.0, 0.1),
         "stroke_label": "Stroke (px)",
+        "default_alpha": 1.0, "default_stroke": 2.5,
     },
     "Catalog sources":       {
         "glyph": target_glyph,
         "alpha_attr": "line_alpha", "stroke_attr": "size",
         "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (4.0, 30.0, 1.0),
         "stroke_label": "Marker size (px)",
+        # line_alpha is field-driven (per-catalog z-depth decay); reset
+        # restores the field reference rather than a scalar. size is a
+        # plain scalar (the marker diameter in px).
+        "default_alpha": "line_alpha", "default_stroke": 10,
     },
 }
 
@@ -6726,7 +6929,7 @@ canvas_y_spinner.on_change("value", _on_canvas_y)
 
 
 # ---------------------------------------------------------------------------
-# Drag-pointing handle and double-tap highlight
+# Drag-pointing handle
 # ---------------------------------------------------------------------------
 
 
@@ -6744,35 +6947,6 @@ def _move_pointing_to(x_data: float, y_data: float) -> None:
         )
     except Exception as e:  # noqa: BLE001
         _set_status(f"Move-pointing failed: {e}", "err")
-
-
-
-
-def on_double_tap(event):
-    """Double-click anywhere → toggle highlight on the nearest shutter."""
-    img = state["image"]
-    fiducial = _pointing_skycoord()
-    if img is None or fiducial is None:
-        return
-    try:
-        sky = img.wcs.pixel_to_world(float(event.x), float(event.y))
-    except Exception:  # noqa: BLE001
-        return
-    v2, v3 = _sky_to_v2v3(sky, fiducial, state["pa_v3"])
-    nearest = _nearest_shutter(v2, v3, require_operable=False)
-    if nearest is None:
-        return
-    key = nearest
-    if key in state["highlighted"]:
-        state["highlighted"].remove(key)
-        _set_status(f"Un-highlighted shutter {key}.", "ok")
-    else:
-        state["highlighted"].add(key)
-        _set_status(f"Highlighted shutter {key} (cyan).", "ok")
-    refresh_overlays()
-
-
-fig.on_event(DoubleTap, on_double_tap)
 
 
 # ---------------------------------------------------------------------------
@@ -11320,7 +11494,7 @@ def _collect_prefs() -> dict:
             pass
     return {
         "frame_x": int(canvas_x_spinner.value or 800),
-        "frame_y": int(canvas_y_spinner.value or 800),
+        "frame_y": int(canvas_y_spinner.value or 600),
         "slitlet_size": int(slitlet_select.value or 3),
         "snap_to_operable": 0 in (snap_box.active or []),
         "layers_visible": list(layers_box.active or []),
@@ -11377,11 +11551,25 @@ def _apply_prefs(prefs: dict) -> None:
         # key onto all three new state buckets so existing prefs
         # files don't lose their setting on first launch.
         prefs_alphas = dict(prefs.get("overlay_alphas") or {})
-        if "Overlapping shutters" in prefs_alphas:
-            legacy_a = prefs_alphas.pop("Overlapping shutters")
-            for legacy_name in ("Mask Stuck (pink)", "Masked (orange)",
-                                "Mask Conflict (purple)"):
-                prefs_alphas.setdefault(legacy_name, legacy_a)
+        prefs_strokes = dict(prefs.get("overlay_strokes") or {})
+
+        def _migrate_overlay_keys(d: dict) -> dict:
+            # v1.3.0→v1.3.1: the single "Overlapping shutters" layer became
+            # three field-referenced spec-overlap layers — fan its value
+            # out so old prefs don't lose the setting.
+            if "Overlapping shutters" in d:
+                legacy = d.pop("Overlapping shutters")
+                for nm in ("Mask Stuck (pink)", "Masked (overlapping warning)",
+                           "Mask Conflict (purple)"):
+                    d.setdefault(nm, legacy)
+            # v1.6.x: "Masked (orange)" → "Masked (overlapping warning)".
+            if "Masked (orange)" in d:
+                d.setdefault("Masked (overlapping warning)",
+                             d.pop("Masked (orange)"))
+            return d
+
+        _migrate_overlay_keys(prefs_alphas)
+        _migrate_overlay_keys(prefs_strokes)
         for name, alpha in prefs_alphas.items():
             cfg = _OVERLAY_LAYER_CONFIG.get(name)
             if cfg is None:
@@ -11394,7 +11582,7 @@ def _apply_prefs(prefs: dict) -> None:
                     state[cfg["alpha_state_key"]] = float(alpha)
             except (AttributeError, ValueError, TypeError):
                 pass
-        for name, stroke in (prefs.get("overlay_strokes") or {}).items():
+        for name, stroke in prefs_strokes.items():
             cfg = _OVERLAY_LAYER_CONFIG.get(name)
             if cfg is None:
                 continue
@@ -11499,8 +11687,11 @@ mpt_num_configs_spinner.on_change("value", _save_current_prefs)
 # The help-panel toggle button already has `on_help_toggle` bound;
 # adding `_save_current_prefs` as a SECOND on_click means both fire
 # on every click — the first toggles the panel state, the second
-# saves the new state.
+# saves the new state. This wiring is also post-attach, so re-subscribe
+# (a no-op today since `on_help_toggle` was bound pre-attach, but it
+# keeps the handler alive if that early binding ever moves).
 help_toggle_btn.on_click(_save_current_prefs_now)
+_resubscribe_late_event_handlers(help_toggle_btn)
 
 
 def _on_reset_prefs():
@@ -11510,24 +11701,31 @@ def _on_reset_prefs():
     _prefs_save_suppress["flag"] = True
     try:
         canvas_x_spinner.value = 800
-        canvas_y_spinner.value = 800
+        canvas_y_spinner.value = 600
         state["frame_x"] = 800
-        state["frame_y"] = 800
+        state["frame_y"] = 600
         slitlet_select.value = "3"
         snap_box.active = [0]
         layers_box.active = [0, 1, 2]
-        # Overlay defaults — reset every layer's alpha/stroke to the
-        # values they had at module import.
+        # Overlay defaults — restore each layer's OWN default alpha /
+        # stroke (`default_alpha` / `default_stroke` in the config), not
+        # a uniform value. A blanket 0.20/1.0 would mangle most layers
+        # (e.g. shrink the catalog marker size to 1 px, dim stuck-open's
+        # outline). Masked / Mask-Stuck / Mask-Conflict default to alpha
+        # 0.20, stroke 0.5; the silver operable edge to 0.20 / 1.0.
         for name, cfg in _OVERLAY_LAYER_CONFIG.items():
             try:
+                da = cfg.get("default_alpha")
+                ds = cfg.get("default_stroke")
                 if cfg.get("alpha_attr") is not None:
-                    setattr(cfg["glyph"].glyph, cfg["alpha_attr"], 0.20)
+                    setattr(cfg["glyph"].glyph, cfg["alpha_attr"], da)
                 elif cfg.get("alpha_state_key"):
-                    state[cfg["alpha_state_key"]] = 0.20
-                setattr(cfg["glyph"].glyph, cfg["stroke_attr"], 1.0)
-                extra = cfg.get("stroke_extra")
-                if extra is not None:
-                    extra(1.0)
+                    state[cfg["alpha_state_key"]] = float(da)
+                if ds is not None:
+                    setattr(cfg["glyph"].glyph, cfg["stroke_attr"], ds)
+                    extra = cfg.get("stroke_extra")
+                    if extra is not None:
+                        extra(ds)
             except (AttributeError, ValueError, TypeError):
                 pass
         try:
@@ -11566,6 +11764,16 @@ def _on_reset_prefs():
 # buttons so the Settings tab layout can include it. Wire the
 # handler now that `_on_reset_prefs` exists.
 reset_prefs_btn.on_click(_on_reset_prefs)
+# Bokeh gotcha: `on_event`/`on_click` only enrols a model in the
+# document's event dispatcher (`Document.callbacks._subscribed_models`)
+# at *attach* time, via `_update_event_callbacks()` in
+# `_attach_document`. This button is forward-declared and only wired
+# here — long after its Settings-tab layout root was added to
+# `curdoc()` above — so the subscription never happened and the server
+# silently dropped its ButtonClick events (the "Reset display to
+# defaults does nothing" bug). Re-run the subscription explicitly now
+# that the handler is attached. Idempotent (it `set.add`s the model).
+_resubscribe_late_event_handlers(reset_prefs_btn)
 
 
 # ── CLI auto-load ─────────────────────────────────────────────────────
@@ -11844,6 +12052,98 @@ def _on_update_available(
     update_box.visible = True
 
 
+# ── PyPI version-check (for `pip install jwst-vmpt` users) ─────────────────
+# A git checkout is nagged against GitHub `main` (above); an installed
+# package is nagged against the latest release on PyPI instead.
+_PYPI_JSON_URL = "https://pypi.org/pypi/jwst-vmpt/json"
+
+
+def _installed_vmpt_version() -> str | None:
+    """Installed jwst-vmpt version, or None if it can't be determined
+    (e.g. running from a source tree that was never pip-installed)."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+        return version("jwst-vmpt")
+    except Exception:  # noqa: BLE001 — PackageNotFoundError or anything else
+        return None
+
+
+def _pypi_is_newer(installed: str, latest: str) -> bool:
+    """True iff `latest` (from PyPI) is a newer release than `installed`.
+    Uses PEP 440 ordering (so 1.10.0 > 1.9.0); falls back to a string
+    compare if `packaging` is unavailable or a version is unparseable."""
+    if not installed or not latest:
+        return False
+    try:
+        from packaging.version import parse as _parse_version
+        return _parse_version(latest) > _parse_version(installed)
+    except Exception:  # noqa: BLE001
+        return latest != installed
+
+
+def _on_pypi_update_available(installed: str, latest: str) -> None:
+    """Runs on the Bokeh document thread. Reveals the PyPI update notice
+    (reuses the floating update banner)."""
+    inst = (installed or "").replace("<", "&lt;").replace(">", "&gt;")
+    new = (latest or "").replace("<", "&lt;").replace(">", "&gt;")
+    update_div.text = (
+        '<div style="display:flex; align-items:flex-start; gap:10px;">'
+        '  <div style="font-size:22px; line-height:1; flex-shrink:0;">📦</div>'
+        '  <div style="min-width:0;">'
+        '    <div style="font-weight:700; color:#7a5d00; font-size:13px; '
+        '                margin-bottom:4px; letter-spacing:0.2px;">'
+        '      vMPT update available'
+        '    </div>'
+        '    <div style="font-size:11.5px; color:#6f5b1f; margin-bottom:8px;">'
+        f'      You have <code>{inst}</code>; the latest on PyPI is '
+        f'      <code>{new}</code>.'
+        '    </div>'
+        '    <div style="font-size:11.5px; color:#6f5b1f; margin-bottom:5px;">'
+        '      Update with:'
+        '    </div>'
+        '    <div style="font-family:monospace; font-size:11.5px; '
+        '                background:#fff7db; border:1px solid #e0c873; '
+        '                border-radius:4px; padding:4px 7px; color:#5a4500;">'
+        '      pip install -U jwst-vmpt'
+        '    </div>'
+        '    <div style="font-size:10.5px; color:#8a7530; margin-top:6px;">'
+        '      Then restart vMPT.'
+        '    </div>'
+        '  </div>'
+        '</div>'
+    )
+    update_box.visible = True
+
+
+def _check_pypi_updates_blocking(session_doc) -> None:
+    """Background thread: compare the installed version against the latest
+    PyPI release and nag (once) if PyPI is newer. Offline / parse / not-
+    installed failures are silent — it's a courtesy, not a dependency."""
+    installed = _installed_vmpt_version()
+    if not installed:
+        return
+    try:
+        req = _urllib_request.Request(
+            _PYPI_JSON_URL,
+            headers={"Accept": "application/json",
+                     "User-Agent": "vMPT-version-check"},
+        )
+        with _urllib_request.urlopen(req, timeout=6) as resp:
+            data = _json.loads(resp.read().decode("utf-8"))
+    except (_urllib_error.URLError, _urllib_error.HTTPError, TimeoutError,
+            OSError, _json.JSONDecodeError, UnicodeDecodeError):
+        return  # offline / rate-limited / unparseable — silently skip
+    latest = ((data.get("info") or {}).get("version") or "").strip()
+    if not _pypi_is_newer(installed, latest):
+        return
+    try:
+        session_doc.add_next_tick_callback(
+            lambda: _on_pypi_update_available(installed, latest)
+        )
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _check_for_updates_blocking(session_doc) -> None:
     """Run in a background thread. `session_doc` is the user-session doc
     captured BEFORE the thread started — curdoc() is thread-local, so
@@ -11851,7 +12151,9 @@ def _check_for_updates_blocking(session_doc) -> None:
     document and the next-tick callback never fires on the user's UI."""
     local = _local_git_head()
     if not local:
-        return  # not a git checkout — nothing to compare against
+        # Not a git checkout (pip install) → compare against PyPI instead.
+        _check_pypi_updates_blocking(session_doc)
+        return
     try:
         req = _urllib_request.Request(
             _github_compare_url(local),
@@ -11895,7 +12197,8 @@ def _check_for_updates_blocking(session_doc) -> None:
 # (on the main session thread); the worker thread can't query curdoc()
 # itself because curdoc() is thread-local.
 _session_doc = curdoc()
-if _session_doc.session_context is not None:
+if (_session_doc.session_context is not None
+        and os.environ.get("VMPT_UPDATE_CHECK", "1") != "0"):
     _threading.Thread(
         target=_check_for_updates_blocking,
         args=(_session_doc,),

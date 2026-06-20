@@ -6,6 +6,210 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.7.0] — 2026-06-19
+
+### Removed
+
+- **Double-click cyan highlight.** Double-clicking a shutter used to toggle a
+  cyan "flag" outline (a personal visual marker, never exported). It was easy
+  to trigger by accident and added clutter, so the feature is gone: the
+  `DoubleTap` handler, the cyan glyph, and the help/status references are all
+  removed. (Saved sessions still load; any old `highlighted` flags are simply
+  ignored.)
+
+### Fixed
+
+- **A picked shutter in a cross-quadrant conflict rendered as Masked/clean
+  instead of Mask Conflict.** When a pick's slitlet collides cross-quadrant
+  with another open slitlet, the partner's spectrum lands on neighbouring
+  shutters (the purple overlap band), not the pick's own shutter — so the pick
+  wasn't "doubly-hit" and was left orange or uncoloured, even though it's one
+  of the two colliding spectra. Open shutters of a cross-quadrant-conflicted
+  slitlet are now painted purple themselves. (Same-quadrant picks are
+  unchanged — they're still coloured by the ±2 window, which intentionally
+  leaves a slitlet's far edges orange.)
+- **Separate slitlets in the same column were merged into one bogus group.**
+  Open shutters were grouped for the overlap check by `(quadrant, column,
+  target id)`. Opens loaded from a mask CSV carry no target id, so two
+  physically distinct slitlets in the same column (e.g. Q4 d=303 with
+  s=22-24 AND s=108-110) collapsed into a single "slitlet" spanning s=22-110.
+  Its `(min,max)` row span then (a) painted the whole **empty gap** between
+  the clusters as Masked, and (b) never shrank when you closed a single
+  shutter — so the Masked/Mask-Conflict status wouldn't clear no matter how
+  many nearby shutters you closed. Each column bucket is now split into
+  maximal runs of **consecutive** rows, so each contiguous slitlet is its own
+  dispersion source (a lone failed-closed shutter inside a slitlet stays part
+  of the run).
+- **Cross-quadrant conflicts promoted each slitlet's ENTIRE band to purple.**
+  A cross-quadrant Mask Conflict set the slitlet's purple window to "unbounded"
+  (`None`), so *every* shutter that slitlet contaminated — in **both**
+  quadrants, across all columns — was painted Mask Conflict (tens of thousands
+  of shutters for a full mask, e.g. ~120k purple on a real GO-6796 mask). It
+  also couldn't be cleared by closing same-quadrant shutters, because the
+  conflict partner is in the other quadrant. Cross-quadrant purple is now
+  **bounded to the genuine overlap** — only shutters contaminated by BOTH a
+  slitlet and one of its cross-quadrant conflict partners — so purple ⊆ the
+  orange/pink that would exist anyway, and closing either partner clears it.
+  (Same-quadrant ±2-row windows and the grating diagonal-step relaxation are
+  unchanged.)
+- **Spurious cross-quadrant "Masked" shutters along the top/bottom edge rows
+  of every quadrant.** The per-shutter detector-x/y lookup is bilinearly
+  interpolated from a 10×10 sample grid that only covers MSA rows ≈16–155
+  and columns ≈34–331. `_bilinear_finite_aware` **clamped** any off-grid
+  target to the nearest sample, so all of rows 1–15 (and 156–171, cols
+  1–33, 332–365) collapsed onto a single detector-y. The cross-quadrant
+  overlap check then saw an entire block of edge rows as sharing one
+  detector row — e.g. opening Q4 shutters flooded *all* of Q2 rows 1–16
+  with orange (Masked), even where no spectrum reaches. The interpolator
+  now **linearly extrapolates** beyond the outermost samples, restoring the
+  real ~5 px/row gradient so edge rows get distinct, physical detector-y.
+  After the fix those edge rows are masked only where a partner-quadrant
+  spectrum genuinely lands (the legitimate Q1↔Q3 / Q2↔Q4 same-row rule).
+  Diagnosed from a real GO-6796 mask under G140H/F070LP (lower Q2 went from
+  187 spurious masked shutters to 20 legitimate ones on the s=13 row next to
+  the Q4 opens at s=14).
+
+### Changed
+
+- **"Mask Conflict" (purple) is now bounded to the rows where two slitlets
+  actually crowd, matching APT MPT.** Previously a conflict promoted each
+  colliding slitlet's *entire* dispersion band to purple. Now, for two
+  slitlets with no operable buffer row between them, only the window
+  `[upper-slitlet bottom − 2 … lower-slitlet top + 2]` (in MSA rows) is
+  purple — e.g. two adjacent N=3 slitlets give a 2-orange / 4-purple /
+  2-orange stack. Beyond the window the band reverts to orange (Masked).
+  Purple is now strictly a re-classification of already-contaminated
+  shutters, so it never exceeds the orange/pink that would exist without
+  the conflict (a lone stuck-open's ±1 pink band isn't inflated), respects
+  spectral tilt (it only ever recolours shutters the spectrum actually
+  hits), and — being defined in a single quadrant's row frame — never
+  escalates a same-detector shutter in another quadrant. Verified end to
+  end against the real overlay pipeline plus the algorithm replica.
+- **Grating diagonal-step relaxation of Mask Conflict.** On the grating
+  side (G\*M / G\*H) a *no-buffer adjacency* conflict — two same-quadrant
+  slitlets exactly 1 row apart with no real row overlap — is demoted from
+  purple (Mask Conflict) to orange (Masked) whenever the two slitlets sit in
+  **different columns** (Δd ≥ 1): that's a deliberate diagonal step (e.g.
+  tracking an elongated galaxy). The column-offset *magnitude* is irrelevant —
+  two slitlets at adjacent rows stay a fixed ~1 row apart in cross-dispersion
+  no matter how far apart they are in columns (both spectra share the trace
+  tilt, so a column step only slides them along dispersion, never across it),
+  and the spectra are far longer than the MSA is wide so the *x*-overlap never
+  closes either. The only physically meaningful split is **same-column (Δd=0
+  → purple)** vs **different-column (Δd ≥ 1 → orange)**, so
+  `GRATING_ADJ_MIN_COLSEP_H/_M` in `vmpt/wavelengths.py` are both **1** (raise
+  them to require a wider deliberate step). PRISM is never relaxed (matches
+  APT/MPT), and real row *overlap* always stays purple under any disperser.
+  The same relaxation is applied to the **optimizer's collision protection**,
+  so it no longer blocks/penalises diagonal grating steps. *(Supersedes the
+  earlier 20-/8-column threshold — diagnosed from the Q2 s53-55 d315 +
+  s56-58 d313 G140H report, a 2-column step the old threshold wrongly kept
+  purple.)*
+- **Quick guide (right help panel) is now a set of collapsible folds.**
+  Each section — *Load an image*, *(Optional) load target catalog*, *Aim
+  the MSA*, *Optimize MSA* (new), *Hand-pick shutters*, *Layers & colours*,
+  *Save / share / export*, *Pan / zoom / shortcuts* — is a native
+  `<details>` disclosure (first one open, the rest collapsed), so the
+  panel stays compact. The long colour legend was split into its own fold
+  and un-nested, and width rules (`max-width:100%` + break-word) were
+  tightened, so text no longer overflows the box edge. The footer now
+  links to the full docs at <https://vmpt.readthedocs.io/> (was a
+  README.md / CONTEXT.md mention).
+- **Default canvas size is now 800 × 600** (was 800 × 800) — the height
+  drops to 600 px for a wider-than-tall default frame. Applies to a fresh
+  start, the canvas spinners, and *Reset display to defaults*.
+- **Masked / Mask-Stuck / Mask-Conflict layers default to alpha 0.20,
+  stroke 0.5 px** (the spec-overlap edge now shows a thin 0.5 px outline
+  by default instead of being hidden). The silver *operable* edge keeps
+  its 0.20 / 1.0 default.
+
+### Fixed
+
+- **"Reset display to defaults" restores each layer's OWN appearance.**
+  The reset previously forced a blanket alpha 0.20 / stroke 1.0 onto every
+  overlay layer, which mangled most of them — the catalog marker size
+  collapsed to 1 px, the stuck-open outline dimmed to 0.20, the picked-
+  shutter fill changed. Each layer now carries its own `default_alpha` /
+  `default_stroke` and reset restores those (operable 0.20 / 1.0; masked
+  layers 0.20 / 0.5; picked 0.35 / 1.5; stuck-open 1.0 / 2.5; catalog
+  field-driven alpha + 10 px markers). Regression tests assert the
+  per-layer defaults and the masked 0.20 / 0.5 values.
+- **"Reset display to defaults" now actually resets.** The Settings-tab
+  button silently did nothing when clicked. Its `on_click` handler is wired
+  near the end of `vmpt/main.py`, *after* the Settings-tab layout root was
+  added to the document — and Bokeh only enrols a model in the document's
+  event dispatcher (`Document.callbacks._subscribed_models`) at *attach*
+  time, so a handler wired post-attach is recorded on the model but never
+  receives the browser's `ButtonClick`. The button is now re-subscribed
+  explicitly after wiring (new `_resubscribe_late_event_handlers` helper),
+  and the same guard is applied to the help-toggle button's late-wired
+  prefs-save handler. Regression tests assert both buttons are enrolled in
+  the dispatcher and that the helper repairs a post-attach handler.
+- **Overlay-appearance sliders work for the spectral-overlap layers.** The
+  *Settings → Overlay appearance → Adjust layer* Select still listed a
+  single legacy **"Overlapping shutters"** entry, which wasn't a real
+  layer key — so its alpha / stroke sliders did nothing, and the three
+  actual MPT layers (pink / orange / purple) weren't selectable at all.
+  The Select now lists every adjustable layer, so alpha and stroke work
+  for all of them (a regression test asserts each option drives its
+  glyph/state). The orange layer is renamed **"Masked (overlapping
+  warning)"** to match the Quick-guide / MPT wording, and the purple
+  **"Mask Conflict"** layer is now adjustable too. Old preferences keyed
+  under the previous names migrate automatically.
+
+### Added
+
+- **Startup update check against PyPI.** On launch (in a background thread,
+  offline-safe), a `pip install`-ed vMPT compares its installed version to
+  the latest release on PyPI; if PyPI is newer, a dismissible banner shows
+  the new version and the `pip install -U jwst-vmpt` command. Git checkouts
+  keep the existing GitHub-`main` commit check instead. Disable either with
+  `VMPT_UPDATE_CHECK=0`.
+- **`scripts/update_operability.py`** — fetches the *current* NIRSpec MSA
+  operability reference (the CRDS `msaoper` the operational context
+  selects for `EXP_TYPE = NRS_MSASPEC`, by USEAFTER) into the local CRDS
+  cache, so vMPT's failed-/stuck-shutter map matches APT/MPT after a
+  restart. See *Troubleshooting → stale operability*.
+
+### Changed
+
+- **vMPT checks the shutter operability on every startup.** Each launch it
+  makes a best-effort fetch of the current MOS `msaoper` reference from
+  CRDS into the local cache (`ensure_current_operability`), so the
+  failed-/stuck-shutter map stays in step with APT/MPT without manual
+  `crds sync`. It's offline-safe (skips quietly if there's no network or
+  `crds` isn't installed, using the cached reference), runs once per
+  process with an ~8 s timeout, and can be disabled with the environment
+  variable `VMPT_OPERABILITY_AUTOUPDATE=0`. The startup log prints which
+  reference is in use.
+
+- **Operability reference selection now matches CRDS/APT.** vMPT picks the
+  `msaoper` file from the **MOS branch (`NRS_MSASPEC`) of the cached rmap,
+  latest USEAFTER ≤ today** — instead of just the highest-numbered file in
+  the cache. CRDS reference *numbers* are delivery order, not operability
+  date, and the rmap carries an imaging-only default, so the old heuristic
+  could (in principle) pick the wrong reference. Falls back to the
+  highest-numbered file when no rmap is cached. (Concretely: vMPT now uses
+  `msaoper_0017` — the row Q2 s60 reads failed-closed, as in APT/MPT.)
+
+### Fixed
+
+- **Loading a non-file catalog path no longer dumps a traceback.** If the
+  catalog path ever ended up as a directory (e.g. `.`) or an empty/missing
+  path, the astropy reader raised `IsADirectoryError` and printed a scary
+  (though caught) traceback at startup. The loader and the *Load catalog* /
+  *Add* handlers now check `Path(p).is_file()` and skip non-files with a
+  quiet status message instead.
+
+### Documentation
+
+- **New guide: "Preparing your own image".** Minimal, copy-pasteable
+  recipes for the two inputs vMPT needs when you bring your own field — a
+  WCS **sidecar FITS** and a colour **RGB JPG** built from drizzled
+  single-band mosaics — distilled from a working pipeline, with the
+  same-pixel-grid requirement and the vertical-flip orientation gotcha
+  called out.
+
 ## [1.6.0] — 2026-06-18
 
 Faster, more hands-on mask building — pan with the keyboard, toggle a

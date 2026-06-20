@@ -6,6 +6,7 @@
 
 installation
 quickstart
+preparing_images
 optimizer
 multiconfig
 catalogs
@@ -42,9 +43,9 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   warns where a stuck-open's spectrum would land on an operable
   shutter; **orange** (Masked) warns where a user-pick's spectrum
   lands; **purple** (Mask Conflict) fires when two open slitlets
-  touch (boundary rows adjacent, no operable row between) — the
-  conflict propagates along both slitlets' entire dispersion
-  bands, matching APT MPT.
+  touch (boundary rows adjacent, no operable row between) — bounded
+  to the `±2`-row window where they crowd (not the whole band),
+  matching APT MPT.
 - **APT- / eMPT-ready export** — write a bundle (target-prefixed
   `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
   generated `README.md` of the import steps) that loads straight into

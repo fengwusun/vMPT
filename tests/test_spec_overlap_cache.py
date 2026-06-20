@@ -130,3 +130,36 @@ def test_cache_invalidates_on_disperser_and_alpha(app_with_collision):
     m.refresh_overlays()
     sig2 = m.state["_spec_overlap_cache"][0]
     assert sig2 != sig1, "changing a base-alpha must invalidate the cache"
+
+
+def test_purple_band_bounded_end_to_end(app_with_collision):
+    """End-to-end through the REAL refresh_overlays (not a replica): the
+    canonical colliding Q1 pair (A 100-102/d322 over B 97-99/d323) must
+    paint purple ONLY in the ±2-row conflict window [98..101]. The band
+    tails revert to orange, and purple never leaks past the window in any
+    quadrant. Guards the bounded-purple (MPT-faithful) rule end to end."""
+    m = app_with_collision
+    m.refresh_overlays()
+    both, user = m.src_spec_overlap_both.data, m.src_spec_overlap_user.data
+    picks = set(m.state["open_shutters"])
+
+    def rows(data, q=None):
+        return {int(s) for qq, s, d in zip(data["q"], data["s"], data["d"])
+                if (int(qq), int(s), int(d)) not in picks
+                and (q is None or int(qq) == q)}
+
+    WINDOW = {98, 99, 100, 101}     # [max(100,97)-2 .. min(102,99)+2]
+    # Purple is bounded to the window in EVERY quadrant (no full-band leak,
+    # no same-detector other-quadrant escalation).
+    assert rows(both) <= WINDOW, (
+        f"purple leaked past the window: {sorted(rows(both))}")
+    assert rows(both, q=1) == WINDOW, "the whole window should be purple in Q1"
+    # The Q1 band tails are orange (Masked), disjoint from the window.
+    assert rows(user, q=1).isdisjoint(WINDOW)
+    assert {96, 97, 102, 103} <= rows(user, q=1)
+    # The two touching picks themselves render purple.
+    both_keys = set(zip(
+        (int(q) for q in both["q"]),
+        (int(s) for s in both["s"]),
+        (int(d) for d in both["d"])))
+    assert (1, 100, 322) in both_keys and (1, 99, 323) in both_keys

@@ -51,6 +51,7 @@ from .msa import load_msa_grid, load_operability
 from .wavelengths import (
     cutoffs as _wavelength_cutoffs,
     disperser_range,
+    grating_adjacency_min_colsep,
     interval_covered,
     v2_overlap_distance,
 )
@@ -702,7 +703,15 @@ class PointingEvaluator:
         self._v2_overlap = 0.0
         self._stuck_open_half = np.empty(0, dtype=np.int8)
         self._stuck_open_s = np.empty(0, dtype=np.int32)
+        self._stuck_open_d = np.empty(0, dtype=np.int32)
+        self._stuck_open_q = np.empty(0, dtype=np.int8)
         self._stuck_open_v2 = np.empty(0, dtype=float)
+        # Grating diagonal-step relaxation: a no-buffer ADJACENCY collision
+        # (rows exactly 1 apart) under a grating with the two slitlets this
+        # many+ COLUMNS apart isn't a real collision (long parallel spectra).
+        # None for PRISM/non-grating → adjacency always collides. Mirrors the
+        # purple Mask-Conflict relaxation in vmpt/main.py.
+        self._adj_colsep: Optional[int] = None
         # Slitlet-aware spatial tolerances. Computed once from
         # `self.slit_length`. A protected target at row s_p occupies
         # 2*half+1 shutters; the user wants ALSO the rows s_p±half±1
@@ -763,6 +772,9 @@ class PointingEvaluator:
         # filter). Falls back to a conservative default inside
         # `v2_overlap_distance` for unknown configs.
         self._v2_overlap = float(v2_overlap_distance(disperser, filt))
+        # Grating column-separation threshold for the adjacency relaxation
+        # (None for PRISM/non-gratings → adjacency always collides).
+        self._adj_colsep = grating_adjacency_min_colsep(disperser)
 
         # Stuck-open shutters (REASON == 2). Cache their (det_half, s,
         # V2). When `reason` isn't provided we leave the arrays empty;
@@ -779,6 +791,8 @@ class PointingEvaluator:
                 v2_vals = self._v2_lut[q_idx, s_idx, d_idx].astype(float)
                 self._stuck_open_half = half
                 self._stuck_open_s = s_idx.astype(np.int32)
+                self._stuck_open_d = d_idx.astype(np.int32)
+                self._stuck_open_q = (q_idx + 1).astype(np.int8)  # 1-based quad
                 self._stuck_open_v2 = v2_vals
 
     # -- spectral-constraint setup ----------------------------------
@@ -1042,6 +1056,27 @@ class PointingEvaluator:
 
     # -- collision rules ---------------------------------------------
 
+    def _row_collide(self, drow_abs, dcol_abs, same_quad):
+        """Per-shutter row-collision test with the grating adjacency
+        relaxation. ``drow_abs`` / ``dcol_abs`` are broadcastable arrays of
+        |Δrow| and |Δcolumn| between the two shutters' parent slitlets, and
+        ``same_quad`` flags pairs in the SAME MSA quadrant.
+
+        Two shutters collide on the same detector row when |Δrow| ≤
+        ``SHVAL_S_TOLERANCE``. Under a grating (``self._adj_colsep`` set), a
+        pure ADJACENCY hit (|Δrow| ≥ 1, i.e. the slitlets don't share a row)
+        between SAME-quadrant slitlets ≥ ``self._adj_colsep`` columns apart is
+        NOT a collision — long grating spectra run parallel. Real same-row
+        overlap (|Δrow| = 0) always collides; cross-quadrant pairs (column
+        index isn't comparable across quadrants) and PRISM (``_adj_colsep``
+        None) keep the plain ±tolerance test.
+        """
+        within = drow_abs <= SHVAL_S_TOLERANCE
+        if self._adj_colsep is None:
+            return within
+        relaxed = same_quad & (drow_abs >= 1) & (dcol_abs >= self._adj_colsep)
+        return within & ~relaxed
+
     def _apply_collision_drops(
         self,
         detected: np.ndarray,
@@ -1122,6 +1157,10 @@ class PointingEvaluator:
         n_sources = len(kept)
         slit_rows = np.full((n_sources, n_slit), -10_000, dtype=np.int32)
         slit_v2 = np.full((n_sources, n_slit), np.nan, dtype=float)
+        # Per-source MSA column (for the grating adjacency relaxation, which
+        # demotes a far-apart-in-columns adjacency from a collision). −10_000
+        # sentinel for off-grid sources (they can't collide anyway).
+        src_col = np.full(n_sources, -10_000, dtype=np.int32)
 
         in_grid_full = (quad > 0) & detected
         active_idx = np.where(in_grid_full)[0]
@@ -1132,6 +1171,7 @@ class PointingEvaluator:
             # Reject sources whose centre column is off-grid; their
             # slitlet rows still need bounds-checked below.
             di_ok = (di >= 0) & (di < 365)
+            src_col[active_idx[di_ok]] = di[di_ok]
             for k, ds in enumerate(range(-half, half + 1)):
                 s_off = si + ds
                 row_ok = di_ok & (s_off >= 0) & (s_off < 171)
@@ -1159,12 +1199,17 @@ class PointingEvaluator:
                 ph = det_half[prot_idx][:, None, None]
                 rows_p = slit_rows[prot_idx][:, :, None]
                 v2_p = slit_v2[prot_idx][:, :, None]
+                d_p = src_col[prot_idx][:, None, None]
+                q_p = quad[prot_idx][:, None, None]
                 so_h = self._stuck_open_half[None, None, :]
                 so_s = self._stuck_open_s[None, None, :]
+                so_d = self._stuck_open_d[None, None, :]
+                so_q = self._stuck_open_q[None, None, :]
                 so_v2 = self._stuck_open_v2[None, None, :]
                 collide = (
                     (ph == so_h)
-                    & (np.abs(rows_p - so_s) <= SHVAL_S_TOLERANCE)
+                    & self._row_collide(np.abs(rows_p - so_s),
+                                        np.abs(d_p - so_d), q_p == so_q)
                     & (np.abs(v2_p - so_v2) < self._v2_overlap)
                 )
                 # Drop if ANY (slit shutter, stuck shutter) pair collides.
@@ -1194,10 +1239,14 @@ class PointingEvaluator:
                 l_rows = slit_rows[lt][:, :, None]  # (n_lt, n_slit_l, 1)
                 l_v2 = slit_v2[lt][:, :, None]    # (n_lt, n_slit_l, 1)
                 l_half = det_half[lt][:, None, None]  # (n_lt, 1, 1)
+                l_col = src_col[lt][:, None, None]    # (n_lt, 1, 1)
+                l_q = quad[lt][:, None, None]         # (n_lt, 1, 1)
                 collide = (
                     (l_half == w_half)
-                    & (np.abs(l_rows - w_rows[None, None, :])
-                       <= SHVAL_S_TOLERANCE)
+                    & self._row_collide(
+                        np.abs(l_rows - w_rows[None, None, :]),
+                        np.abs(l_col - src_col[wi]),
+                        l_q == quad[wi])
                     & (np.abs(l_v2 - w_v2[None, None, :])
                        < self._v2_overlap)
                 )
@@ -1218,12 +1267,17 @@ class PointingEvaluator:
                 u_rows = slit_rows[unprot_idx][:, :, None, None]
                 u_v2 = slit_v2[unprot_idx][:, :, None, None]
                 u_half = det_half[unprot_idx][:, None, None, None]
+                u_col = src_col[unprot_idx][:, None, None, None]
+                u_q = quad[unprot_idx][:, None, None, None]
                 p_rows = slit_rows[kept_prot_idx][None, None, :, :]
                 p_v2 = slit_v2[kept_prot_idx][None, None, :, :]
                 p_half = det_half[kept_prot_idx][None, None, :, None]
+                p_col = src_col[kept_prot_idx][None, None, :, None]
+                p_q = quad[kept_prot_idx][None, None, :, None]
                 collide = (
                     (u_half == p_half)
-                    & (np.abs(u_rows - p_rows) <= SHVAL_S_TOLERANCE)
+                    & self._row_collide(np.abs(u_rows - p_rows),
+                                        np.abs(u_col - p_col), u_q == p_q)
                     & (np.abs(u_v2 - p_v2) < self._v2_overlap)
                 )
                 # Drop unprot if any (its shutter, prot's shutter)

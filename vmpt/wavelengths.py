@@ -120,6 +120,45 @@ SPECTRUM_V2_HALFEXTENT = SPECTRUM_V2_EXTENT
 _FALLBACK_V2_HALFEXTENT = _FALLBACK_V2_EXTENT
 
 
+# ── Grating diagonal-step relaxation ──────────────────────────────────────
+# A "no-buffer" conflict between two slitlets whose rows are EXACTLY adjacent
+# (1 row apart, no real row overlap) is painted purple (Mask Conflict) like
+# APT MPT. But on the GRATING side a *column-offset* diagonal step (e.g.
+# following an elongated galaxy) isn't a same-column collision and we demote
+# purple → orange (Masked).
+#
+# Why the threshold is 1 column (any offset), not a large margin:
+# two slitlets at adjacent ROWS stay separated by a FIXED ~1-row gap in the
+# cross-dispersion direction no matter how far apart they are in COLUMNS —
+# both spectra share the same trace tilt, so a column step only slides them
+# along dispersion (detector x), never in cross-dispersion (detector y). And
+# the spectra are far longer (M ~510 col, H ~1260 col) than the MSA is wide
+# (365 col), so the x-overlap never closes within reach either. So the column-
+# offset MAGNITUDE doesn't change the (marginal, 1-row) overlap at all — the
+# only physically meaningful split is same-column (Δd=0, spectra fully stacked
+# → real conflict, purple) vs different-column (Δd≥1, a deliberate diagonal
+# step → orange). H and M therefore use the same value. PRISM is never relaxed
+# (matches APT/MPT). Raise these if you want to require a wider deliberate step.
+GRATING_ADJ_MIN_COLSEP_H = 1
+GRATING_ADJ_MIN_COLSEP_M = 1
+
+
+def grating_adjacency_min_colsep(disperser: str) -> int | None:
+    """Minimum column separation that demotes a no-buffer ADJACENCY conflict
+    (rows exactly 1 apart, no real row overlap) from purple (Mask Conflict)
+    to orange (Masked) for this disperser. ``1`` for any M/H grating — any
+    nonzero column offset is a deliberate diagonal step (see module note);
+    only exact same-column stacking (Δd=0) stays purple. Returns ``None`` when
+    adjacency must always stay purple — PRISM and anything not an M/H grating.
+    """
+    d = (disperser or "").upper()
+    if d.startswith("G") and d.endswith("H"):
+        return GRATING_ADJ_MIN_COLSEP_H
+    if d.startswith("G") and d.endswith("M"):
+        return GRATING_ADJ_MIN_COLSEP_M
+    return None
+
+
 def v2_overlap_distance(disperser: str, filt: str) -> float:
     """Full V2 extent (arcsec) of the spectrum on the detector. Two
     same-row shutters whose spectra land on the SAME detector and
@@ -499,18 +538,33 @@ def _bilinear_finite_aware(
     the surviving weights — so an interior NaN in the 10×10 sample
     grid (e.g. a shutter where AssignWcsStep returned no on-detector
     samples) doesn't poison the whole neighbourhood."""
-    s_clamped = np.clip(s_targets, grid_rows[0], grid_rows[-1])
-    d_clamped = np.clip(d_targets, grid_cols[0], grid_cols[-1])
+    # Pick the bracketing sample cell from the CLAMPED position (keeps the
+    # cell index valid), but take the interpolation fraction from the
+    # UNclamped target. Inside the sample span this is ordinary bilinear
+    # interpolation; beyond the outermost samples it LINEARLY EXTRAPOLATES
+    # the smooth detector-x/y trend (fr/fc run outside [0, 1]).
+    #
+    # The 10×10 grid samples rows [16…155] and cols [34…331] only
+    # (`np.linspace(1, 171, 12)[1:-1]`-style, endpoints dropped), so MSA
+    # rows 1–15 / 156–171 and cols 1–33 / 332–365 are off-grid. Clamping
+    # them (the old behaviour) pinned every off-grid edge row to ONE
+    # detector-y, so the cross-quadrant overlap check saw a whole block of
+    # edge rows as sharing a detector row — e.g. all of Q2 rows 1–16 read
+    # as colliding with Q4 opens, flooding lower Q2 with spurious "Masked"
+    # shutters. Extrapolation restores the ~5 px/row gradient so off-grid
+    # rows get distinct, physical detector-y values.
+    s_sel = np.clip(s_targets, grid_rows[0], grid_rows[-1])
+    d_sel = np.clip(d_targets, grid_cols[0], grid_cols[-1])
     ri = np.clip(
-        np.searchsorted(grid_rows, s_clamped, side="right") - 1,
+        np.searchsorted(grid_rows, s_sel, side="right") - 1,
         0, len(grid_rows) - 2,
     )
     ci = np.clip(
-        np.searchsorted(grid_cols, d_clamped, side="right") - 1,
+        np.searchsorted(grid_cols, d_sel, side="right") - 1,
         0, len(grid_cols) - 2,
     )
-    fr = (s_clamped - grid_rows[ri]) / (grid_rows[ri + 1] - grid_rows[ri])
-    fc = (d_clamped - grid_cols[ci]) / (grid_cols[ci + 1] - grid_cols[ci])
+    fr = (s_targets - grid_rows[ri]) / (grid_rows[ri + 1] - grid_rows[ri])
+    fc = (d_targets - grid_cols[ci]) / (grid_cols[ci + 1] - grid_cols[ci])
     fr = fr[..., None] if fr.ndim < s_targets.ndim else fr
     fc = fc[..., None] if fc.ndim < d_targets.ndim else fc
     fr = np.broadcast_to(fr, s_targets.shape)

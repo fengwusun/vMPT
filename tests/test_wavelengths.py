@@ -340,3 +340,31 @@ def test_v2_overlap_distance_g395m_full_extent():
         f"({full}\"); the suppression of Q2 flagging comes from the "
         "primary-detector check, not the distance check"
     )
+
+
+@pytest.mark.parametrize("disp,filt", [("G140H", "F070LP"), ("G235H", "F170LP")])
+def test_shutter_xy_grids_no_edge_plateau(disp, filt):
+    """The 10x10 detector-xy sample grid covers MSA rows ~16..155 only.
+    Off-grid edge rows must be LINEARLY EXTRAPOLATED, not clamped to the
+    nearest sample's detector-y. The old clamp pinned every edge row to one
+    y, so the cross-quadrant overlap check saw a whole block of edge rows as
+    sharing a detector row — flooding e.g. lower Q2 with spurious 'Masked'
+    shutters when Q4 had opens. Regression for that bug."""
+    import numpy as np
+    from vmpt.wavelengths import shutter_xy_grids
+    xy = shutter_xy_grids(disp, filt)
+    assert xy is not None
+    q2 = xy["y_nrs1"][1]            # (171, 365)
+
+    def row_med(s):
+        r = q2[s - 1]
+        r = r[np.isfinite(r)]
+        return float(np.median(r)) if r.size else np.nan
+
+    # Bottom edge (rows 1..16, off-grid) must show the real ~5 px/row
+    # gradient, not be flat.
+    assert abs(row_med(1) - row_med(16)) > 30.0
+    lows = [round(row_med(s), 1) for s in range(1, 17)]
+    assert len(set(lows)) >= 14, f"bottom edge looks clamped: {lows}"
+    # Top edge (rows 156..171, off-grid) likewise.
+    assert abs(row_med(156) - row_med(171)) > 30.0
