@@ -210,3 +210,36 @@ pip install jwst-vmpt==1.3.0    # downgrade to known-good
 …then open a GitHub issue with the saved `vMPT_workspace.json`
 and the (disperser, filter, V3 PA) values. The session file is
 self-contained and reproduces the exact state.
+
+## A huge FITS looks coarse when zoomed out
+
+That's by design, and it sharpens when you zoom in. Since v1.8.0 vMPT
+**memory-maps** FITS files and shows a downsampled base view (~4000 px on the
+long axis) so GB-scale mosaics open in well under a second instead of hanging the
+tab. **As you zoom in, vMPT automatically re-reads just the visible region at
+higher resolution — up to the file's exact native pixels at full zoom.** The
+refresh is debounced, so it sharpens a moment after you stop panning/zooming
+(you may see a brief coarse-then-sharp step on deep zoom — that's the on-demand
+crop loading). No setting to tune; the WCS is rescaled at every level so catalog
+targets and overlays stay aligned.
+
+## "Load DS9 regions" / "Load contours" shows nothing
+
+A few things to check:
+
+- **An image must be loaded first.** Region/contour shapes are projected through
+  the image WCS, so they're queued (with a status note) until an image is
+  present, then drawn when it loads.
+- **The layer is toggled off.** Tick *Show DS9 regions* / *Show contours* under
+  **Settings → Layers**.
+- **Contour coordinate frame.** A DS9 `.ctr` file records its frame (e.g.
+  `icrs` or `image`) and vMPT reads it automatically. A bare `.con` with no
+  frame line defaults to **sky**; if such a file is actually in image pixels its
+  contours will land far off — re-export it from DS9 as `.ctr` (which carries
+  the frame) so the coordinate system is detected correctly.
+- **`regions` package missing.** DS9 `.reg` parsing needs the
+  [`regions`](https://astropy-regions.readthedocs.io/) package (a vMPT
+  dependency since v1.8.0). On an old environment, `pip install regions`.
+- **Off-field overlay.** If the shapes load but you can't see them, they may be
+  outside the current view — the region coordinates may not match your image's
+  field. Double-check the file is for this field.

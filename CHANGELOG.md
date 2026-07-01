@@ -6,6 +6,149 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-07-01
+
+### Fixed
+
+- **Dense DS9 contours made pan/zoom sluggish.** A big contour (e.g. glafic
+  critical curves, ~65k vertices across hundreds of segments) was drawn at full
+  vertex density on every frame. Overlays now use a **zoom-aware level of
+  detail**, mirroring the FITS LOD: vertices are **decimated when zoomed out**
+  (sub-screen-pixel detail is invisible) and **off-view segments are culled when
+  zoomed in**, so the on-screen vertex count stays bounded and interaction stays
+  smooth. Full-resolution geometry is kept and re-derived on a debounced
+  range-change; at deep zoom the visible segments render at full detail. The
+  overlay LOD runs on its own short (~80 ms) debounce — separate from the
+  heavier FITS crop read (~200 ms) — so the contour refines quickly after a
+  pan/zoom and neither step blocks the other.
+- **`run.sh` rejected `--addon`.** The launcher's own argument allowlist never
+  passed `--addon` through to the app, so `./run.sh --fits … --addon …` errored
+  with "unknown argument" even though the app supports it. `run.sh` now accepts
+  `--addon` (repeatable, resolved to an absolute path) and passes it on. Also
+  dropped a spurious empty `--catalog ""` / `--addon ""` that the arg-builder
+  appended when none was given (a `${arr[@]:-}` artifact needed for macOS bash).
+- **Console noise: W-1002 (EMPTY_LAYOUT) at startup.** Several columns are
+  intentionally empty until they fill in on demand (catalog list, optimizer
+  results, Load Add-on file list); Bokeh flagged each as an empty layout. That
+  specific validation hint is now silenced — it was by-design deferred content,
+  not a bug.
+- **Overlays sat ~1 px off-source on large (downsampled) FITS.** The scaled WCS
+  used the area/resize CRPIX convention (correct for the JPG bilinear path) even
+  for FITS, which are **strided-decimated** (`data[::f, ::f]`) and need
+  `crpix=(c-1)/f + 1`. The mismatch shifted every overlay by `0.5·(f-1)/f`
+  downsampled px — ≈1.5 full-res px at f=4 — so DS9 contours/regions didn't land
+  exactly on their sources. FITS now uses the stride convention (verified: 0.000
+  px residual on a 15k-px mosaic); the JPG path is unchanged.
+
+### Added
+
+- **Image display controls (Settings → 🎨 Image display… dialog).** The
+  background image can now be re-stretched live without reloading, from a
+  dialog that keeps the Settings tab compact. **Changing any control preserves
+  the current pan & zoom** — only the pixels are re-rendered.
+  - **FITS / grayscale** — pick a tone curve (**Linear / Square root / Asinh /
+    Log**), a scaling mode (**Percentile** 99.5 / 99 / 95 / 90 / **Min–Max**,
+    **Manual** `vmin`–`vmax`, or **ZScale**), and a **colormap** (Gray, Viridis, Magma,
+    Inferno, Plasma, Cividis, Cubehelix, Hot, Afmhot, Turbo) chosen from a
+    **rich dropdown where each row is a 0→1 gradient bar of that map**, plus an
+    **Invert** toggle. Defaults to **gray** on every launch (the colormap is a
+    per-session view tweak, deliberately not persisted). Built on
+    `astropy.visualization` + matplotlib colormaps.
+  - **Render NaN as white** — an optional checkbox that paints blank pixels
+    (NaN, and any ±inf) pure white instead of the colormap's darkest colour —
+    useful for mosaics with NaN borders or gaps. Off by default; **persisted**
+    once ticked. (FITS now preserves NaN through load so it can be rendered
+    either way.)
+  - **RGB (JPG/PNG)** — fitsmap-style **brightness** and **contrast** sliders.
+    The image's original look (an asinh tone-curve that lifts faint structure)
+    is preserved; brightness/contrast adjust on top, so the defaults reproduce
+    exactly how the image looked when loaded.
+  - **Pixel histogram** — the dialog shows the image's pixel-value distribution
+    over the **full data range** (50 fixed bins **+ one bin of padding each
+    side** so edge handles are easy to grab, **log-scale count**, linear value)
+    with the current **[vmin, vmax]** shaded and the **stretch tone-curve**
+    overlaid, plus a data min / median / max readout. **Drag the handles** to set
+    vmin / vmax on the plot — **△ (vmin) at the bottom, ▽ (vmax) at the top**, at
+    opposite ends (switches scaling to manual); the vmin / vmax boxes still take
+    exact numbers. Axis labels are upright. Updates live; shows RGB luminance for
+    JPG/PNG.
+  - The dialog also holds the **canvas size**. All settings persist in
+    `~/.vmpt/preferences.json`. Slider re-stretches are throttled.
+- **Automatic zoom-in resolution for GB-scale FITS.** `load_fits` memory-maps
+  the file and shows a downsampled base view that opens in a fraction of a
+  second; **as you zoom in, vMPT re-reads just the visible region at higher
+  resolution — up to the file's exact native pixels at full zoom** — read on
+  demand from the memory-mapped file (no precomputed pyramid, no disk cache).
+  The refresh is debounced and the WCS is rescaled at every level so overlays
+  stay aligned. A 15k × 11k, 700 MB mosaic opens in ~0.7 s and reaches native
+  detail wherever you look. (Replaces the v1.8.0-dev "Max display size" spinner.)
+- **Settings tab compacted** — layer visibility + per-layer alpha/stroke moved
+  into a **🗂 Layers…** dialog, and canvas size into the Image display dialog.
+  The **Slitlet** controls are now the first section on the tab.
+- **Help panel** — the rotating tip box gained **‹ / ›** arrows (+ a counter)
+  to skim tips by hand (auto-rotation pauses briefly after a manual click), new
+  tips cover the v1.8.0 features, and the **Quick guide** gained *Image display
+  &amp; colours* and *DS9 overlays* folds.
+- **Per-item colour + fill opacity (fitsmap-style).** Because you can load
+  several catalogs and DS9 files at once, **colour and fill are set per item,
+  right where each is loaded** — not in a shared layer panel:
+  - **Each catalog** in the catalog list (Input tab) has its own **colour
+    picker** that recolours just that catalog's markers.
+  - **Each DS9 `.reg` / `.ctr` file** in the **Load Add-on** dialog has its own
+    **colour picker** and **Fill α** slider (**no face colour by default** —
+    fill alpha 0, draggable up to `1` to shade closed shapes in that file's
+    colour). Region/contour glyphs colour per segment, so different files render
+    in different colours simultaneously.
+  Colour + fill alpha round-trip in the saved session. **Settings → 🗂 Layers**
+  now carries only per-layer show/hide + outline alpha + stroke.
+  - **DS9 add-ons get a sidebar list.** Loaded `.reg` / `.ctr` files now appear
+    under **Loaded add-ons** in the Input tab (right below *Loaded catalogs*),
+    each a compact row: a square colour swatch, an on/off checkbox with the
+    filename, and **✕** to remove. **Clicking the swatch opens a small popover**
+    with a colour picker + a fill-opacity slider (a native `<input type=color>`
+    can't host a slider or carry alpha, so colour + fill live together in one
+    click-to-open popup). So you toggle /
+    recolour / delete an overlay without reopening the Load Add-on dialog (which
+    is now just add-files + clear-all). The section appears once ≥1 overlay is
+    loaded.
+  - The per-catalog / per-overlay **colour swatch is now a clean square** — the
+    native `<input type=color>` chrome (padding + a default `min-height` that
+    stretched it taller than wide) is overridden so the swatch is a true
+    N×N box. The add-on row shows just the filename (its extension already says
+    region vs contour), middle-truncated with an ellipsis so a long name never
+    overflows the tab width.
+- **DS9 region (`.reg`) and contour (`.ctr` / `.con`) display layers (Input →
+  🧩 Load Add-on… dialog).** **One "Add files…" picker takes any mix of region
+  and contour files at once** — the type (region vs contour) is detected per
+  file and a contour's coordinate frame (sky vs image) is read from the file
+  itself, so there's nothing to pre-select. Regions cover circle / ellipse /
+  box / polygon / line / point in any DS9 frame (parsed with the
+  astropy-affiliated `regions` package); contours cover both the modern DS9
+  `.ctr` layout (`level=N` markers, each contour wrapped in `( … )`) and a plain
+  `.con` (blank-line-separated `x y`). They are projected through the image WCS,
+  so they stay aligned through pan / zoom / re-pointing. **Each loaded file has
+  its own on/off checkbox, colour picker, and Fill α slider** in the dialog
+  (untick to hide just that file; recolour / shade it independently). The whole
+  region / contour layers can still be shown/hidden and given a per-layer
+  outline alpha / stroke under **Settings → 🗂 Layers**. Loaded overlays (with
+  per-file on/off, colour, and fill) round-trip in the saved session, and can be
+  pre-loaded from the command line with **`--addon`** (repeatable):
+  `./run.sh --fits img.fits --addon sources.reg --addon snr.ctr`.
+  Verified against a 175-megapixel (700 MB) drizzled mosaic with 180+ regions
+  and contours.
+
+### Changed
+
+- **APT source catalog (`.cat`) — labels with spaces are now safe.** APT splits
+  the `.cat` on *any* whitespace, so a label like `Galaxy A 123` used to shift
+  every later column and break the import. vMPT now collapses interior
+  whitespace in the `Label` column to underscores (`Galaxy_A_123`), falling back
+  to `real` for an all-whitespace label.
+
+### Dependencies
+
+- Added **`regions>=0.8`** (DS9 `.reg` parsing for the new overlay layers).
+
 ## [1.7.1] — 2026-06-20
 
 ### Fixed

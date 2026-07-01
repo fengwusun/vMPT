@@ -40,6 +40,14 @@ To use **your own field**, load a FITS image with a WCS directly, or make
 a colour RGB + WCS sidecar from drizzled mosaics —
 see [Preparing your own image](preparing_images.md).
 
+Once an image is loaded, open **Settings → 🎨 Image display…** to set the
+stretch, scaling (percentile / Min–Max / manual / zscale), and **colormap**,
+and to read the **pixel histogram** (data range + the [vmin, vmax] and stretch
+you're viewing). A GB-scale FITS opens at a preview resolution and **sharpens to
+native pixels as you zoom in**. To overlay DS9 apertures or contours, use
+**Input → 🧩 Load Add-on…** — details in
+[Preparing your own image](preparing_images.md).
+
 ## 3. Aim the MSA
 
 Switch to the **Pointing** tab. The pointing centre auto-fills to

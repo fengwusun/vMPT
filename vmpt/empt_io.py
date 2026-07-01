@@ -141,6 +141,19 @@ def _finite_or_none(v) -> float | None:
     return f if np.isfinite(f) else None
 
 
+def _apt_safe(value, fallback: str = "real") -> str:
+    """Make a string safe for APT's whitespace-delimited ``.cat``.
+
+    APT splits the catalog into columns on ANY whitespace, so an interior
+    space (or tab/newline) in a free-text field like ``label`` would shift
+    every later column and break the import. Collapse every run of whitespace
+    to a single ``_`` and trim the ends; fall back to ``fallback`` when empty.
+    (``"My Target 1"`` -> ``"My_Target_1"``.)
+    """
+    s = "_".join(str(value).split())
+    return s or fallback
+
+
 def write_mpt_catalog(path: str, targets: list[dict]) -> None:
     """Write a target list in APT MPT-importable format (tab-separated).
 
@@ -189,8 +202,7 @@ def write_mpt_catalog(path: str, targets: list[dict]) -> None:
         weight = int(round(float(t.get("Weight", t.get("Pr", 1)))))
         ra = float(t["ra_deg"])
         dec = float(t["dec_deg"])
-        label = str(t.get("label", "real")) or "real"
-        label = label.replace("\t", " ").replace("\n", " ").strip() or "real"
+        label = _apt_safe(t.get("label", "real"))
         row = [str(no_cat), f"{ra:.10f}", f"{dec:.10f}",
                str(weight), str(primary)]
         if has_mag:

@@ -207,6 +207,21 @@ def test_catalog_paths_roundtrip(tmp_path):
     ]
 
 
+def test_catalog_paths_roundtrip_preserves_per_catalog_colour(tmp_path):
+    """v1.8.0: each catalog's marker colour (set in the catalog list) survives
+    save→load; an entry without a colour stays colourless (palette on reload)."""
+    s = _sample_session()
+    s.catalog_paths = [
+        {"path": "/tmp/cat_a.csv", "enabled": True, "color": "#00ff88"},
+        {"path": "/tmp/cat_b.csv", "enabled": True},   # no colour → palette
+    ]
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    loaded = import_session_json(str(p))
+    assert loaded.catalog_paths[0].get("color") == "#00ff88"
+    assert "color" not in loaded.catalog_paths[1]
+
+
 def test_catalog_paths_legacy_single_path_synthesises_one_entry(tmp_path):
     """An old bundle that only stored `catalog_path` (vMPT 1.0) must
     yield a one-entry catalog_paths list on load — so the multi-catalog
@@ -221,6 +236,71 @@ def test_catalog_paths_legacy_single_path_synthesises_one_entry(tmp_path):
     assert len(loaded.catalog_paths) == 1
     assert loaded.catalog_paths[0]["path"] == s.catalog_path
     assert loaded.catalog_paths[0]["enabled"] is True
+
+
+def test_overlay_paths_roundtrip(tmp_path):
+    """v1.8.0: DS9 region paths + contour (path, coordsys) specs survive
+    save→load through the workspace sidecar."""
+    s = _sample_session()
+    s.region_paths = ["/tmp/sources.reg", "/tmp/masks.reg"]
+    s.contour_specs = [["/tmp/snr.con", "sky"], ["/tmp/grid.con", "image"]]
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    loaded = import_session_json(str(p))
+    assert loaded.region_paths == ["/tmp/sources.reg", "/tmp/masks.reg"]
+    assert loaded.contour_specs == [["/tmp/snr.con", "sky"],
+                                    ["/tmp/grid.con", "image"]]
+
+
+def test_overlays_roundtrip_with_enabled(tmp_path):
+    """v1.8.0: the authoritative `overlays` list (path/kind/coordsys/enabled)
+    round-trips, preserving each file's on/off state."""
+    s = _sample_session()
+    s.overlays = [
+        {"path": "/tmp/a.reg", "kind": "region", "coordsys": "sky",
+         "enabled": True, "color": "#00ff88", "fill_alpha": 0.4},
+        {"path": "/tmp/b.ctr", "kind": "contour", "coordsys": "image",
+         "enabled": False, "fill_alpha": 0.0},
+    ]
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    loaded = import_session_json(str(p))
+    # v1.8.0: per-file colour + fill alpha also round-trip. `fill_alpha` is
+    # always emitted; `color` only when set (entry b keeps no colour key).
+    assert loaded.overlays == [
+        {"path": "/tmp/a.reg", "kind": "region", "coordsys": "sky",
+         "enabled": True, "color": "#00ff88", "fill_alpha": 0.4},
+        {"path": "/tmp/b.ctr", "kind": "contour", "coordsys": "image",
+         "enabled": False, "fill_alpha": 0.0},
+    ]
+
+
+def test_overlay_paths_absent_keeps_session_clean(tmp_path):
+    """A session with no overlays must not emit region_paths/contour_specs
+    into the sidecar (legacy bundles stay byte-identical) and loads as []."""
+    s = _sample_session()
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    sidecar = json.loads((tmp_path / "vmpt_workspace.json").read_text())
+    assert "region_paths" not in sidecar
+    assert "contour_specs" not in sidecar
+    loaded = import_session_json(str(p))
+    assert loaded.region_paths == []
+    assert loaded.contour_specs == []
+
+
+def test_overlay_contour_specs_tolerate_bare_string(tmp_path):
+    """A contour spec stored as a bare path string (not a [path, coordsys]
+    pair) is normalised to default to sky coords on load."""
+    s = _sample_session()
+    p = tmp_path / "session.json"
+    export_session_json(s, str(p))
+    sidecar_path = tmp_path / "vmpt_workspace.json"
+    sdata = json.loads(sidecar_path.read_text())
+    sdata["contour_specs"] = ["/tmp/legacy.con"]  # bare string, no coordsys
+    sidecar_path.write_text(json.dumps(sdata))
+    loaded = import_session_json(str(p))
+    assert loaded.contour_specs == [["/tmp/legacy.con", "sky"]]
 
 
 def test_new_session_loads_via_parse_mpt_json(tmp_path):

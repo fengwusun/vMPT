@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "jwst-vmpt"
-version = "1.7.1"
+version = "1.8.0"
 description = "Visual MSA Planning Tool — interactive Bokeh app for JWST/NIRSpec MSA shutter configuration, with hMPT-derived pointing optimization and shutter-collision protection."
 readme = "README.md"
 # PEP 639 SPDX license expression. The OLD table form
@@ -48,10 +48,16 @@ dependencies = [
     "crds>=11",
     "jwst>=1.18",
     "jwst_gtvt>=1.0",
+    # Colormaps for grayscale-FITS display (vmpt.image_io._apply_colormap).
+    # Only imported when a non-gray colormap is selected; almost always already
+    # present transitively via astropy/jwst.
+    "matplotlib>=3.5",
     "numpy>=1.24",
     "pandas>=2.0",
     "Pillow>=9.0",
     "pysiaf>=0.20",
+    # DS9 region (.reg) parsing for the region/contour display layers (v1.8.0).
+    "regions>=0.8",
     "scipy>=1.10",
 ]
 

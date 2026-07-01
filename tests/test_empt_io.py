@@ -169,6 +169,31 @@ def test_write_mpt_catalog_header_and_data(tmp_path):
     assert lab2 == "vMPT_synth"
 
 
+def test_write_mpt_catalog_replaces_label_whitespace(tmp_path):
+    """APT splits the .cat on ANY whitespace, so a label with interior
+    spaces/tabs/newlines must be collapsed to underscores — otherwise it
+    shifts every later column and breaks the import."""
+    from vmpt.empt_io import write_mpt_catalog
+    out = tmp_path / "MPT_catalog.cat"
+    write_mpt_catalog(str(out), [
+        {"No_cat": 1, "Pr": 1, "ra_deg": 39.98, "dec_deg": -1.59,
+         "label": "Galaxy A 123"},
+        {"No_cat": 2, "Pr": 1, "ra_deg": 39.99, "dec_deg": -1.58,
+         "label": "  lead\ttab\nnewline  "},
+        {"No_cat": 3, "Pr": 1, "ra_deg": 40.00, "dec_deg": -1.57,
+         "label": "   "},  # whitespace-only → fallback to "real"
+    ])
+    lines = out.read_text().strip().splitlines()
+    # Every data row keeps the fixed 6-column count (no whitespace splits).
+    for data_line in lines[1:]:
+        assert len(data_line.split("\t")) == 6, data_line
+    labels = [ln.split("\t")[-1] for ln in lines[1:]]
+    assert labels == ["Galaxy_A_123", "lead_tab_newline", "real"]
+    # No label contains any whitespace at all.
+    for lab in labels:
+        assert not any(c.isspace() for c in lab)
+
+
 def test_write_mpt_catalog_rejects_non_integer_ids(tmp_path):
     """APT MPT expects the ID column to be integer-typed; the writer
     must REFUSE to write a row whose No_cat can't be coerced. Callers

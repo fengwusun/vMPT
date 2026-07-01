@@ -28,8 +28,10 @@ from bokeh.io import curdoc
 from bokeh.layouts import column, row
 from bokeh.events import DocumentReady
 from bokeh.models import (
+    BoxAnnotation,
     Button,
     CheckboxGroup,
+    ColorPicker,
     ColumnDataSource,
     CustomJS,
     CustomJSTickFormatter,
@@ -42,6 +44,7 @@ from bokeh.models import (
     MultiChoice,
     NumberEditor,
     NumberFormatter,
+    PointDrawTool,
     Range1d,
     RadioGroup,
     Select,
@@ -56,6 +59,15 @@ from bokeh.models import (
     WheelZoomTool,
 )
 from bokeh.plotting import figure
+from bokeh.core.validation import silence
+from bokeh.core.validation.warnings import EMPTY_LAYOUT
+
+# Several columns are intentionally empty at startup and fill in on demand —
+# the catalog list, the optimizer-results lists, and the Load Add-on file list.
+# Bokeh flags each empty Column with a W-1002 (EMPTY_LAYOUT) hint at document
+# validation; silence just that hint so the console stays clean (it's a
+# by-design deferred layout, not a missing-children bug).
+silence(EMPTY_LAYOUT, True)
 
 from vmpt.catalog import (
     Catalog,
@@ -80,7 +92,24 @@ from vmpt.empt_io import (
     write_pointing_summary_txt,
     write_shutter_mask_csv,
 )
-from vmpt.image_io import LoadedImage, load_fits, load_jpg_with_sidecar, stretch_for_display
+from vmpt.image_io import (
+    FITS_COLORMAPS,
+    LoadedImage,
+    compute_histogram,
+    compute_interval,
+    lod_view_factor,
+    load_fits,
+    load_jpg_with_sidecar,
+    read_fits_region,
+    stretch_curve,
+    stretch_for_display,
+)
+from vmpt.overlays_io import (
+    classify_overlay_file,
+    detect_contour_coordsys,
+    load_ds9_contours,
+    load_ds9_regions,
+)
 from vmpt.msa import ensure_current_operability, load_msa_grid, load_operability
 from vmpt.mpt_io import (
     MPTPlan,
@@ -218,6 +247,30 @@ state: dict = {
     "filter": "CLEAR",
     "slitlet_height": 3,
     "snap_to_operable": True,
+    # ─── Image display (v1.8.0) ──────────────────────────────────────────
+    "image_stretch": "asinh",          # FITS tone curve: linear/sqrt/asinh/log
+    "image_scale_mode": "percentile",  # percentile | manual | zscale
+    "image_percentile": 99.5,          # central percent for percentile mode
+    "image_vmin": None,                # manual-mode intensity floor
+    "image_vmax": None,                # manual-mode intensity ceiling
+    "image_cmap": "gray",              # FITS colormap (matplotlib name)
+    "image_invert": False,             # invert the FITS colormap
+    "image_nan_white": False,          # render NaN / blank FITS pixels as white
+    "rgb_brightness": 0.0,             # RGB (JPG) brightness offset [-1..1]
+    "rgb_contrast": 1.0,               # RGB (JPG) contrast multiplier
+    # On-demand LOD internals (large FITS): cached base-tier intensity limits
+    # (reused for zoom crops so brightness stays stable) + the tier currently
+    # drawn in the LOD overlay (None = base tier only).
+    "_fits_vmin": None,
+    "_fits_vmax": None,
+    "_lod_tier": None,
+    # ─── Display overlays (v1.8.0): DS9 regions + contours ───────────────
+    # Display-overlay add-ons (DS9 .reg / .ctr / .con). Ordered list of dicts:
+    #   {"path": str, "kind": "region"|"contour", "coordsys": "sky"|"image",
+    #    "enabled": bool, "color": str, "fill_alpha": float}. Each file can be
+    #    toggled on/off, recoloured, and given a fill individually (Add-on
+    #    dialog). Colour + fill_alpha are per file — no layer-wide override.
+    "overlays": [],
     # Cache: (q,s,d) → [catalog source id, …] for sources falling inside the
     # shutter footprint at the current pointing + PA. Rebuilt whenever
     # pointing / PA / catalog changes.
@@ -1622,29 +1675,33 @@ _TIPS = [
     ("⏪", "Undo picks", "<b>Setting</b> tab → <b>Undo last</b> reverts the most recent slitlet open/close action. History is 50 deep."),
     ("📐", "Slitlet sizes", "N=2 means clicked-shutter + one row of lower-y on the detector. N=3/5 are centred on the click. Switch any time in <b>Setting</b>."),
     ("🛰️", "Two ways to load APT", "<b>MPT</b> tab → either point at a local <code>.aptx</code>, or just type a JWST program ID (e.g. <code>1208</code>) and vMPT pulls it from STScI."),
-    ("🚀", "Pre-load via run.sh", "Start the app with files ready: <code>./run.sh --fits img.fits --catalog tgts.csv</code>. Use <code>--jpg + --wcs</code> for JPG/sidecar. <code>--port 5010</code> picks a different port."),
+    ("🚀", "Pre-load via run.sh", "Start the app with files ready: <code>./run.sh --fits img.fits --catalog tgts.csv --addon regions.reg</code>. Use <code>--jpg + --wcs</code> for JPG/sidecar; <code>--addon</code> (repeatable) loads DS9 .reg/.ctr overlays. <code>--port 5010</code> picks a different port."),
     ("🧮", "Optimize MSA pointing", "<b>Pointing</b> tab → bottom panel. Set ΔRA/ΔDec/ΔPA (zero on any axis = freeze it) and click Run. Get the top 10 (RA, Dec, V3 PA) ranked by sources placed."),
     ("🔀", "Plan up to 5 configs", "Need more than one pointing? Set <b>Number of configs</b> (<b>Pointing</b> → MPT configurations) up to 5. Each gets its own colour, and the optimizer fills them in turn so they cover different sources, not duplicates.", True),
     ("📝", "Edit catalog inline", "<b>Input</b> tab → <b>Edit catalog…</b>. Double-click any cell to edit. Click 🗑️ on a row to delete it. ↶ Undo / ↷ Redo revert mistakes. Save as CSV or commit back to the live catalog."),
     ("🎴", "Layer multiple catalogs", "Click <b>Add</b> in the Input tab to layer several catalogs. Each gets its own colour. ▲ / ▼ reorder the stack; ✕ removes one; checkbox toggles visibility."),
     ("🖼️", "Pixel-perfect canvas", "Image pixels are always rendered 1:1 — resizing the window letterboxes around the canvas instead of stretching the image. Aspect lock is set automatically when you load."),
     ("🆔", "Big IDs auto-shrink", "Catalog IDs ≥ 10⁷ are taken mod 10⁷ on load — APT MPT wants compact integers. The original string token survives in the Label column for traceability."),
+    ("🎨", "Image display dialog", "<b>Settings</b> → <b>🎨 Image display…</b>: set the FITS <b>stretch</b> (linear / sqrt / asinh / log) and <b>scaling</b> (percentile / Min–Max / manual vmin–vmax / zscale), or brightness & contrast for RGB. Changes keep your current pan & zoom.", True),
+    ("🌈", "Rich colormap picker", "In the Image display dialog, the FITS <b>colormap</b> dropdown shows a live gradient bar for every map (viridis, magma, turbo, …) + an <b>Invert</b> toggle. Default is gray each launch.", True),
+    ("📊", "Pixel histogram", "The Image display dialog plots the <b>pixel-value distribution</b> with the current <b>[vmin, vmax]</b> shaded and the <b>stretch curve</b> overlaid — so you can see the data range and exactly what you're clipping.", True),
+    ("🔎", "Big FITS auto-sharpen", "Load a GB-scale FITS and it opens instantly at a downsampled preview; <b>as you zoom in, vMPT re-reads the visible region at full native resolution</b> from the memory-mapped file — no manual tuning.", True),
+    ("🧩", "DS9 regions & contours", "<b>Input</b> → <b>🧩 Load Add-on…</b> draws DS9 <code>.reg</code> / <code>.ctr</code> files (any mix at once; type + coordinate frame auto-detected). Each loaded file then gets a row under <b>Loaded add-ons</b> in the sidebar — on/off, colour, fill, remove.", True),
+    ("🖌️", "Per-item colour & fill", "Colour is <b>per item</b>: every loaded catalog and every DS9 add-on has a square colour swatch in the <b>Input</b> sidebar. For a DS9 add-on, <b>click the swatch</b> to open a popover with a colour picker + a fill-opacity slider. <b>Settings → 🗂 Layers</b> keeps show/hide + outline alpha / stroke.", True),
 ]
 
+# The yellow "sticker" background/border now lives on the wrapping
+# `tip_card` column (built below) so the ‹ / › nav row sits INSIDE the
+# sticker; `tip_div` is just the (transparent) tip text.
 tip_div = Div(
     sizing_mode="stretch_width",
-    styles=dict(
-        background="linear-gradient(135deg, #fef9e7 0%, #fff5d6 100%)",
-        color="#5a4a00",
-        padding="10px 14px",
-        border="1px solid #f0d990",
-        **{"border-radius": "6px",
-            "transition": "opacity 350ms ease",
-            "font-size": "12.5px",
-            "line-height": "1.45",
-            "min-height": "62px",
-        },
-    ),
+    styles={
+        "color": "#5a4a00",
+        "transition": "opacity 350ms ease",
+        "font-size": "12.5px",
+        "line-height": "1.45",
+        "min-height": "48px",
+    },
     text="",  # populated below
 )
 
@@ -1685,8 +1742,61 @@ def _render_tip(idx: int) -> str:
 
 
 # Index lives in module-state so the periodic callback can advance it.
-_tip_state = {"idx": 0}
-tip_div.text = _render_tip(_tip_state["idx"])
+# `skip` pauses auto-rotation for a few cycles after the user manually
+# navigates with the ‹ / › arrows (so it doesn't yank the tip they're reading).
+_tip_state = {"idx": 0, "skip": 0}
+
+_TIPNAV_CSS = InlineStyleSheet(css=(
+    ".bk-btn, .bk-btn:hover {"
+    "  padding: 0; font-size: 15px; font-weight: 800; line-height: 1;"
+    "  color: #8a6300; background: #fff5d6; border: 1px solid #f0d990;"
+    "}"
+    ".bk-btn:hover { background: #ffeeb0; }"
+))
+tip_prev_btn = Button(label="‹", width=30, height=24, stylesheets=[_TIPNAV_CSS])
+tip_next_btn = Button(label="›", width=30, height=24, stylesheets=[_TIPNAV_CSS])
+tip_counter_div = Div(
+    text="", styles={"font-size": "11px", "color": "#8a6300",
+                     "font-weight": "700", "align-self": "center",
+                     "min-width": "44px", "text-align": "center"},
+)
+
+
+def _show_tip(idx: int) -> None:
+    _tip_state["idx"] = idx % len(_TIPS)
+    tip_div.text = _render_tip(_tip_state["idx"])
+    tip_counter_div.text = f"{_tip_state['idx'] + 1} / {len(_TIPS)}"
+
+
+def _tip_prev() -> None:
+    _tip_state["skip"] = 4          # ~1 min pause after a manual click
+    _show_tip(_tip_state["idx"] - 1)
+
+
+def _tip_next() -> None:
+    _tip_state["skip"] = 4
+    _show_tip(_tip_state["idx"] + 1)
+
+
+tip_prev_btn.on_click(_tip_prev)
+tip_next_btn.on_click(_tip_next)
+tip_nav_row = row(
+    tip_prev_btn, tip_counter_div, tip_next_btn,
+    spacing=6, styles={"justify-content": "flex-end", "margin": "2px 0 0 0"},
+)
+# The yellow tip "sticker" — wraps the tip text AND the ‹ / › nav row so the
+# arrows sit inside the sticker rather than in a separate strip below it.
+tip_card = column(
+    tip_div, tip_nav_row,
+    sizing_mode="stretch_width",
+    styles={
+        "background": "linear-gradient(135deg, #fef9e7 0%, #fff5d6 100%)",
+        "border": "1px solid #f0d990",
+        "border-radius": "6px",
+        "padding": "8px 12px 6px 12px",
+    },
+)
+_show_tip(0)
 
 help_div = Div(
     # Note: the OUTER help_panel column constrains width — match it here
@@ -1739,6 +1849,8 @@ help_div = Div(
   <div class="fold-body"><ul>
     <li>One-click <b>Load Abell 370 example</b> or <b>Load RXCJ0600 example</b> from the <b>Input</b> tab — fastest.</li>
     <li>Or a local <b>FITS</b> path (with WCS), or a <b>JPG + sidecar FITS</b> pair.</li>
+    <li>A GB-scale FITS opens instantly at a preview resolution and <b>auto-sharpens to native pixels as you zoom in</b>.</li>
+    <li>Tune the look in <b>Settings → 🎨 Image display…</b> (see below).</li>
   </ul></div>
 </details>
 
@@ -1793,7 +1905,31 @@ help_div = Div(
     <li><span style='color:#e26a00;font-weight:700'>orange</span> = <b>Masked</b> — operable shutter where at least one user-open's spectrum lands (no collision).</li>
     <li><span style='color:#a050b8;font-weight:700'>purple</span> = <b>Mask Conflict</b> — two open slitlets crowd with no operable buffer row between them. Only the rows where they crowd go purple (the ±2-row window between the two slitlets), not the whole spectrum; the band beyond reverts to orange.</li>
   </ul>
+  <b>Recolour (per item):</b> each catalog and each DS9 add-on has a square colour swatch in its sidebar row (Input tab). For a DS9 add-on, <b>click the swatch</b> → a popover with a colour picker + a <b>Fill&nbsp;α</b> slider (0 = outline only). <b>Settings → 🗂 Layers</b> keeps show/hide + per-layer <b>Alpha</b> / <b>Stroke</b>.
   </div>
+</details>
+
+<details>
+  <summary>Image display &amp; colours</summary>
+  <div class="fold-body">
+  <b>Settings → 🎨 Image display…</b> opens a dialog (changes keep your pan &amp; zoom):
+  <ul>
+    <li><b>FITS</b>: <b>stretch</b> (linear / sqrt / asinh / log) · <b>scaling</b> (percentile 99.5–90 / <b>Min–Max</b> / manual vmin–vmax / zscale) · <b>colormap</b> (gradient dropdown + Invert).</li>
+    <li><b>RGB</b> (JPG/PNG): <b>brightness</b> &amp; <b>contrast</b>.</li>
+    <li><b>Pixel histogram</b>: the value distribution with the shown <b>[vmin, vmax]</b> shaded and the stretch curve overlaid — see the range you're clipping.</li>
+    <li><b>Canvas size</b> (on-screen width/height) lives here too.</li>
+  </ul>
+  </div>
+</details>
+
+<details>
+  <summary>DS9 overlays (regions &amp; contours)</summary>
+  <div class="fold-body"><ul>
+    <li><b>Input → 🧩 Load Add-on…</b> → <b>Add files…</b>: pick any mix of DS9 <code>.reg</code> and <code>.ctr</code>/<code>.con</code> files at once. Type (region vs contour) and a contour's coordinate frame are detected automatically.</li>
+    <li>Each loaded file gets a row under <b>Loaded add-ons</b> in the Input sidebar — <b>on/off</b> checkbox, a square <b>colour</b> swatch (click it for a colour + <b>Fill&nbsp;α</b> popover), and <b>✕</b> to remove — no need to reopen the dialog. They're sky-fixed, so they stay aligned through pan / zoom / re-pointing.</li>
+    <li>Show / hide the whole layer + set per-layer outline alpha / stroke under <b>Settings → 🗂 Layers</b>.</li>
+    <li>From the shell: <code>./run.sh --fits img.fits --addon regions.reg</code> (repeatable).</li>
+  </ul></div>
 </details>
 
 <details>
@@ -1828,7 +1964,7 @@ help_div = Div(
 def on_help_toggle():
     showing = not help_div.visible
     help_div.visible = showing
-    tip_div.visible = showing
+    tip_card.visible = showing
     help_toggle_btn.label = "Hide help" if showing else "Show help"
     # Resize the column itself so the help panel actually gives back
     # horizontal real-estate to the figure column when collapsed. The
@@ -1843,11 +1979,11 @@ def on_help_toggle():
 # button. Returning users can collapse the panel with one click;
 # the button label flips to "Hide help" when expanded.
 help_div.visible = True
-tip_div.visible = True
+tip_card.visible = True
 help_toggle_btn.label = "Hide help"
 help_toggle_btn.on_click(on_help_toggle)
 help_panel = column(
-    help_toggle_btn, tip_div, help_div,
+    help_toggle_btn, tip_card, help_div,
     width=HELPPANEL_W,
     # The Quick guide is long. Make the help panel scroll vertically
     # within whatever height it gets in the page layout, so users on
@@ -1872,12 +2008,15 @@ disperser_filter_select = Select(
 )
 
 layers_box = CheckboxGroup(
-    labels=["Show MSA outline", "Show operable shutters", "Show catalog targets"],
-    # All three layers on by default. The operable-shutter layer is now
+    labels=["Show MSA outline", "Show operable shutters", "Show catalog targets",
+            "Show DS9 regions", "Show contours"],
+    # All layers on by default. The operable-shutter layer is now
     # filtered to *unaffected* shutters only (excludes user-opens,
     # stuck-opens, and spec-overlap rows), keeping the polygon count
-    # manageable so it works at typical zoom levels.
-    active=[0, 1, 2],
+    # manageable so it works at typical zoom levels. Indices 3 (DS9
+    # regions) and 4 (contours) are sky-fixed line layers toggled via
+    # `_sync_overlay_layer_visibility` (glyph.visible), not refresh_overlays.
+    active=[0, 1, 2, 3, 4],
 )
 MAX_OPERABLE_RENDER = 10000  # cap for operable-shutter silver-edge layer.
                               # Below the cap we draw every shutter (no
@@ -1915,6 +2054,8 @@ overlay_layer_select = Select(
         "Picked shutters",
         "Stuck open",
         "Catalog sources",
+        "DS9 regions",
+        "Contours",
     ],
     value="Operable shutters",
 )
@@ -1928,6 +2069,10 @@ overlay_stroke_slider = Slider(
     title="Stroke (px)",
     width=SIDEBAR_W - 40,
 )
+# NB: colour + fill alpha are per-item (v1.8.0) — set in the catalog list
+# (per catalog) and the Load Add-on dialog (per .reg / .ctr file), NOT in this
+# Layers dialog. This dialog carries only per-layer visibility + outline alpha
+# + stroke.
 
 # Canvas size — two independent sliders for the X (width) and Y
 # (height) of the figure's drawing frame in pixels.
@@ -1960,6 +2105,155 @@ canvas_y_spinner = Spinner(
     low=_CANVAS_SIZE_MIN, high=_CANVAS_SIZE_MAX, step=_CANVAS_SIZE_STEP,
     value=600, width=88, title="Height (Y)",
 )
+
+# ─── Image display (v1.8.0) ─────────────────────────────────────────────
+# FITS intensity controls (tone curve + scaling). Select `value`s are the
+# lowercase keys `stretch_for_display` expects.
+image_stretch_select = Select(
+    title="FITS tone curve",
+    options=[("linear", "Linear"), ("sqrt", "Square root"),
+             ("asinh", "Asinh"), ("log", "Log")],
+    value="asinh", width=SIDEBAR_W - 40,
+)
+image_scale_mode_select = Select(
+    title="FITS scaling",
+    options=[("percentile", "Percentile"), ("manual", "Manual vmin–vmax"),
+             ("zscale", "ZScale")],
+    value="percentile", width=SIDEBAR_W - 40,
+)
+image_percentile_select = Select(
+    title="Percentile (central %)",
+    # "100" = Min–Max (full data range, no clipping).
+    options=[("99.5", "99.5%"), ("99", "99%"), ("95", "95%"), ("90", "90%"),
+             ("100", "Min–Max")],
+    value="99.5", width=SIDEBAR_W - 40,
+)
+image_vmin_spinner = Spinner(title="vmin", value=None, width=110)
+image_vmax_spinner = Spinner(title="vmax", value=None, width=110)
+_img_vminmax_row = row(image_vmin_spinner, image_vmax_spinner, spacing=10)
+# RGB (JPG) brightness/contrast (fitsmap-style). Throttled re-stretch.
+rgb_brightness_slider = Slider(
+    start=-0.5, end=0.5, step=0.02, value=0.0, title="Brightness",
+    width=SIDEBAR_W - 40,
+)
+rgb_contrast_slider = Slider(
+    start=0.2, end=3.0, step=0.05, value=1.0, title="Contrast",
+    width=SIDEBAR_W - 40,
+)
+# FITS colormap (grayscale only) + invert. "Gray" is the default. Rendered as
+# a rich dropdown: a "current selection" button (name + gradient) that expands
+# a panel of gradient swatch-buttons, one per colormap (0→1 across the bar).
+_CMAP_LABELS = {c: c.capitalize() for c in FITS_COLORMAPS}
+
+
+def _cmap_gradient_css(name: str, invert: bool = False, n: int = 16) -> str:
+    """A CSS ``linear-gradient(...)`` sampling the matplotlib colormap ``name``
+    (reversed if ``invert``). Falls back to a black→white ramp."""
+    try:
+        from matplotlib import colormaps
+        xs = np.linspace(1.0, 0.0, n) if invert else np.linspace(0.0, 1.0, n)
+        cols = colormaps[str(name)](xs)[:, :3]
+        stops = ", ".join(
+            f"rgb({int(r * 255)},{int(g * 255)},{int(b * 255)}) "
+            f"{int(round(i / (n - 1) * 100))}%"
+            for i, (r, g, b) in enumerate(cols))
+        return f"linear-gradient(to right, {stops})"
+    except Exception:  # noqa: BLE001
+        return ("linear-gradient(to right, #fff, #000)" if invert
+                else "linear-gradient(to right, #000, #fff)")
+
+
+def _cmap_swatch_stylesheet(name, invert=False, *, current=False):
+    """A per-button InlineStyleSheet painting the button as the colormap's
+    0→1 gradient bar with a legible, shadowed label."""
+    grad = _cmap_gradient_css(name, invert)
+    align = "center" if current else "left"
+    weight = "700" if current else "600"
+    return InlineStyleSheet(css=(
+        ".bk-btn, .bk-btn:hover, .bk-btn:focus {"
+        f"  background-image: {grad}; background-color: transparent;"
+        "  color: #ffffff; text-shadow: 0 1px 2px rgba(0,0,0,0.9);"
+        f"  text-align: {align}; font-weight: {weight};"
+        "  border: 1px solid #9fb4d0; padding-left: 10px;"
+        "  letter-spacing: .02em;"
+        "}"
+        ".bk-btn:hover { border-color: #2a7; }"
+    ))
+
+
+cmap_current_btn = Button(label="Gray  ▾", width=SIDEBAR_W - 40, height=30,
+                          stylesheets=[_cmap_swatch_stylesheet("gray",
+                                                               current=True)])
+_cmap_option_btns = []
+for _c in FITS_COLORMAPS:
+    _b = Button(label=_CMAP_LABELS[_c], width=SIDEBAR_W - 40, height=24,
+                stylesheets=[_cmap_swatch_stylesheet(_c)])
+    _cmap_option_btns.append(_b)
+cmap_options_col = column(*_cmap_option_btns, visible=False,
+                          spacing=2, width=SIDEBAR_W - 40)
+image_invert_checkbox = CheckboxGroup(labels=["Invert colormap"], active=[])
+# Blank / NaN pixels (e.g. mosaic edges) → white instead of the colormap's
+# zero colour. Persisted, so it stays on across launches once ticked.
+image_nan_white_checkbox = CheckboxGroup(labels=["Render NaN as white"],
+                                         active=[])
+_img_fits_group = column(image_stretch_select, image_scale_mode_select,
+                         image_percentile_select, _img_vminmax_row,
+                         Div(text="<div style='font-size:11px;color:#5a6b85;"
+                                  "margin:2px 0 1px'>FITS colormap</div>",
+                             width=SIDEBAR_W - 40),
+                         cmap_current_btn, cmap_options_col,
+                         image_invert_checkbox, image_nan_white_checkbox)
+_img_rgb_group = column(rgb_brightness_slider, rgb_contrast_slider)
+
+# ── Pixel-brightness histogram (Image display dialog, v1.8.0) ─────────
+# Pixel-value distribution over the FULL data range with a LOG-scale count
+# (y) and linear value (x). The current [vmin, vmax] is shaded, the stretch
+# tone-curve is overlaid, and two draggable ▽ handles let the user set
+# vmin / vmax right on the plot. Bins are fixed once an image loads.
+src_hist = ColumnDataSource(data=dict(left=[], right=[], top=[], bottom=[]))
+src_stretch_curve = ColumnDataSource(data=dict(x=[], y=[]))
+# Draggable vmin/vmax handles. `mkr` is a per-point marker so vmin can point UP
+# (△, at the bottom of the panel) and vmax DOWN (▽, at the top).
+src_vhandles = ColumnDataSource(data=dict(x=[], y=[], mkr=[]))
+hist_fig = figure(
+    height=165, width=SIDEBAR_W - 40, toolbar_location=None, tools="",
+    min_border_left=8, min_border_right=8, min_border_top=10,
+    min_border_bottom=6, x_axis_label="pixel value", y_axis_label="count",
+    outline_line_color="#c2d0e0", y_axis_type="log",
+    x_range=Range1d(start=0.0, end=1.0), y_range=Range1d(start=0.5, end=10.0),
+)
+hist_fig.title = None
+hist_fig.grid.grid_line_alpha = 0.25
+hist_fig.yaxis.axis_label_text_font_size = "9px"
+hist_fig.xaxis.axis_label_text_font_size = "9px"
+# Axis labels upright, not the Bokeh default italic.
+hist_fig.xaxis.axis_label_text_font_style = "normal"
+hist_fig.yaxis.axis_label_text_font_style = "normal"
+hist_range_box = BoxAnnotation(
+    left=0, right=0, fill_color="#2563eb", fill_alpha=0.10,
+    line_color="#2563eb", line_alpha=0.55, line_width=1,
+)
+hist_fig.add_layout(hist_range_box)
+hist_fig.quad(left="left", right="right", top="top", bottom="bottom",
+              source=src_hist, fill_color="#94a3b8", line_color=None,
+              fill_alpha=0.85)
+# Stretch tone-curve on a 0→1 right-hand range (no visible axis needed).
+hist_fig.extra_y_ranges = {"disp": Range1d(start=0.0, end=1.0)}
+hist_fig.line("x", "y", source=src_stretch_curve, y_range_name="disp",
+              line_color="#ef4444", line_width=2)
+# Draggable vmin / vmax handles: △ (vmin) sits at the BOTTOM pointing up, ▽
+# (vmax) at the TOP pointing down — opposite ends. Per-point marker via the
+# `mkr` column. PointDrawTool with add=False only lets the user DRAG the two
+# existing handles left/right.
+_vhandle_glyph = hist_fig.scatter(
+    "x", "y", source=src_vhandles, size=13, marker="mkr",
+    fill_color="#2563eb", line_color="white", line_width=1.5,
+)
+_vhandle_tool = PointDrawTool(renderers=[_vhandle_glyph], add=False)
+hist_fig.add_tools(_vhandle_tool)
+hist_fig.toolbar.active_drag = _vhandle_tool
+hist_info_div = Div(text="", width=SIDEBAR_W - 40)
+_img_hist_group = column(hist_fig, hist_info_div)
 
 undo_btn = Button(label="Undo last", button_type="default")
 clear_btn = Button(label="Clear open", button_type="warning")
@@ -2268,6 +2562,30 @@ def _section_header(label, tip=""):
     )
 
 
+def _square_color_picker(color, size: int = 18) -> "ColorPicker":
+    """A ColorPicker rendered as a clean ``size``×``size`` square swatch.
+
+    A native ``<input type="color">`` is a padded strip and Bokeh's default
+    input ``min-height`` stretches it taller than wide, so we pin BOTH the
+    widget host and the inner input to ``size`` px (with ``!important`` to beat
+    Bokeh's rule + ``min-height:0``) and strip the webkit/moz swatch chrome."""
+    css = (
+        f":host {{ display:inline-block; width:{size}px !important; "
+        f"height:{size}px !important; min-height:0 !important; }}\n"
+        f'input[type="color"] {{ padding:0; margin:0; '
+        f"border:1px solid #8a94a6; border-radius:4px; "
+        f"width:{size}px; height:{size}px; min-height:0; "
+        f"box-sizing:border-box; cursor:pointer; }}\n"
+        'input[type="color"]::-webkit-color-swatch-wrapper { padding:0; }\n'
+        'input[type="color"]::-webkit-color-swatch { border:none;'
+        ' border-radius:3px; }\n'
+        'input[type="color"]::-moz-color-swatch { border:none;'
+        ' border-radius:3px; }'
+    )
+    return ColorPicker(color=str(color or "#ffffff"), width=size, height=size,
+                       title="", stylesheets=[InlineStyleSheet(css=css)])
+
+
 # Dialog widths for the relocated pickers (Browse-only; path shown beneath).
 for _w in (fits_path_input, jpg_path_input, sidecar_path_input,
            catalog_path_input):
@@ -2377,6 +2695,98 @@ load_catalog_open_btn = Button(label="🎯  Load catalog…", button_type="prima
                                width=SIDEBAR_W - 20, height=40)
 load_image_open_btn.on_click(_open_load_image_modal)
 load_catalog_open_btn.on_click(_open_load_catalog_modal)
+
+# ── Image display dialog (Settings tab) — v1.8.0 ─────────────────────
+# The FITS stretch / scaling + RGB brightness/contrast controls live in
+# this dialog to keep the Settings tab compact. `_sync_image_controls`
+# toggles the FITS-vs-RGB group and the percentile/manual sub-row.
+for _w in (image_stretch_select, image_scale_mode_select,
+           image_percentile_select, cmap_current_btn, cmap_options_col,
+           rgb_brightness_slider, rgb_contrast_slider, hist_fig,
+           hist_info_div, *_cmap_option_btns):
+    _w.width = _MPT_DLG_W
+image_display_close_x = Button(label="×", button_type="default", width=32,
+                               height=28, css_classes=["vmpt-modal-x"])
+image_display_close_btn = Button(label="Close", button_type="default", width=90)
+image_display_modal_backdrop = _mpt_dlg_backdrop()
+image_display_modal_card = column(
+    _mpt_dlg_header("Image display", image_display_close_x),
+    _mpt_dlg_caption("Adjust how the background image is shown. FITS: tone "
+                     "curve + scaling (percentile / manual vmin–vmax / zscale) "
+                     "+ colormap. RGB (JPG/PNG): brightness + contrast. Changes "
+                     "keep your current pan & zoom. Large FITS sharpen to full "
+                     "resolution automatically as you zoom in."),
+    _img_fits_group,
+    _img_rgb_group,
+    _mpt_dlg_section("Pixel histogram"),
+    _mpt_dlg_caption("Distribution of pixel values. The blue band is the "
+                     "[vmin, vmax] shown; the red curve is the stretch."),
+    _img_hist_group,
+    _mpt_dlg_section("Canvas size (on-screen pixels)"),
+    row(canvas_x_spinner, canvas_y_spinner, spacing=10),
+    row(image_display_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+
+def _open_image_display_modal():
+    image_display_modal_backdrop.visible = True
+    image_display_modal_card.visible = True
+
+
+def _close_image_display_modal():
+    image_display_modal_backdrop.visible = False
+    image_display_modal_card.visible = False
+
+
+image_display_close_x.on_click(_close_image_display_modal)
+image_display_close_btn.on_click(_close_image_display_modal)
+image_display_open_btn = Button(label="🎨  Image display…", button_type="default",
+                                width=SIDEBAR_W - 20)
+image_display_open_btn.on_click(_open_image_display_modal)
+
+# ── Layers dialog (Settings tab) — visibility + per-layer appearance ──
+for _w in (overlay_layer_select, overlay_alpha_slider, overlay_stroke_slider):
+    _w.width = _MPT_DLG_W
+layers_close_x = Button(label="×", button_type="default", width=32,
+                        height=28, css_classes=["vmpt-modal-x"])
+layers_close_btn = Button(label="Close", button_type="default", width=90)
+layers_modal_backdrop = _mpt_dlg_backdrop()
+layers_modal_card = column(
+    _mpt_dlg_header("Layers", layers_close_x),
+    _mpt_dlg_caption("Show or hide overlay layers on the canvas, and tune each "
+                     "layer's transparency (alpha) and outline width. "
+                     "Colour and fill opacity for catalogs / DS9 regions / "
+                     "contours are set per item where they are loaded — the "
+                     "catalog list and the Load Add-on dialog."),
+    _mpt_dlg_section("Show / hide"),
+    layers_box,
+    _mpt_dlg_section("Per-layer appearance"),
+    overlay_layer_select,
+    overlay_alpha_slider,
+    overlay_stroke_slider,
+    row(layers_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+
+def _open_layers_modal():
+    layers_modal_backdrop.visible = True
+    layers_modal_card.visible = True
+
+
+def _close_layers_modal():
+    layers_modal_backdrop.visible = False
+    layers_modal_card.visible = False
+
+
+layers_close_x.on_click(_close_layers_modal)
+layers_close_btn.on_click(_close_layers_modal)
+layers_open_btn = Button(label="🗂  Layers…", button_type="default",
+                         width=SIDEBAR_W - 20)
+layers_open_btn.on_click(_open_layers_modal)
 
 
 # Status bar — wide strip above the figure showing pointing / PA /
@@ -2640,6 +3050,16 @@ fig.add_tools(wheel_zoom)
 fig.toolbar.active_scroll = wheel_zoom
 
 img_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh", source=src_image)
+# On-demand level-of-detail (LOD) overlay for large FITS (v1.8.0). The base
+# `img_glyph` always covers the whole (downsampled) image; when the user zooms
+# into a big FITS, `_render_fits_lod` reads a sharper crop of just the visible
+# region from the memory-mapped file and draws it HERE, on top of the base,
+# placed exactly over the same sky. Same intensity interval + colormap as the
+# base, so there's no seam. Deliberately NOT added to x_range/y_range.renderers
+# below, so sharpening the view never disturbs the auto-range / aspect lock.
+src_lod = ColumnDataSource(data=dict(image=[], x=[], y=[], dw=[], dh=[]))
+lod_glyph = fig.image_rgba(image="image", x="x", y="y", dw="dw", dh="dh",
+                           source=src_lod)
 # Pin DataRange1d to track only the image extent. Otherwise overlay
 # renderers whose data lies outside [0, W] × [0, H] (e.g. MSA outline
 # at corner shutters when the image is smaller than the MSA, or
@@ -2740,6 +3160,46 @@ target_glyph = fig.scatter(
     line_width="line_width",
     line_alpha="line_alpha",   # field-driven: decays with catalog z-depth
     fill_alpha=0.0,
+)
+# ─── Display overlays (v1.8.0): DS9 regions + contours ──────────────────
+# Sky-fixed line layers (image-pixel coords); recomputed only on load /
+# image change by `_rebuild_overlay_layers_impl`, toggled via layers_box.
+# DS9 overlay colour is now PER FILE (v1.8.0): each loaded .reg / .ctr file
+# carries its own colour + fill alpha, tweaked in the Load Add-on dialog. So
+# the glyphs read `line_color` / `fill_color` / `fill_alpha` from CDS columns
+# (one entry per segment) rather than a single scalar per layer. Outline alpha
+# / stroke stay per-layer scalars (Settings → Layers). Defaults below.
+DS9_REGION_COLOR = "#ff3b30"      # default outline/fill colour for .reg files
+DS9_CONTOUR_COLOR = "#22d3ee"     # default outline/fill colour for contours
+src_regions = ColumnDataSource(
+    data=dict(xs=[], ys=[], line_color=[], fill_color=[], fill_alpha=[]))
+src_region_points = ColumnDataSource(data=dict(x=[], y=[], line_color=[]))
+src_contours = ColumnDataSource(
+    data=dict(xs=[], ys=[], line_color=[], fill_color=[], fill_alpha=[]))
+# Face-colour fill (patches) drawn UNDER the outlines. `fill_alpha` is a
+# per-file column (0 by default — no face colour, like fitsmap — raised via
+# each file's Fill-alpha slider). `line_alpha=0` so the fill never doubles the
+# outline (the multi_line below draws that).
+regions_fill_glyph = fig.patches(
+    xs="xs", ys="ys", source=src_regions,
+    fill_color="fill_color", fill_alpha="fill_alpha", line_alpha=0.0,
+)
+contours_fill_glyph = fig.patches(
+    xs="xs", ys="ys", source=src_contours,
+    fill_color="fill_color", fill_alpha="fill_alpha", line_alpha=0.0,
+)
+regions_glyph = fig.multi_line(
+    xs="xs", ys="ys", source=src_regions,
+    line_color="line_color", line_width=2.0, line_alpha=0.85,
+)
+region_points_glyph = fig.scatter(
+    x="x", y="y", source=src_region_points,
+    size=11, marker="diamond", line_color="line_color", line_width=2.0,
+    fill_alpha=0.0,
+)
+contours_glyph = fig.multi_line(
+    xs="xs", ys="ys", source=src_contours,
+    line_color="line_color", line_width=1.5, line_alpha=0.85,
 )
 pointing_handle_glyph = fig.scatter(
     x="x", y="y", source=src_pointing_handle,
@@ -2920,13 +3380,40 @@ def _write_temp(b64_value: str, suffix: str) -> str:
     return f.name
 
 
-def _image_array_for_bokeh(img: LoadedImage, stretch: str = "asinh") -> np.ndarray:
-    """Return a uint32 RGBA array oriented for Bokeh's image_rgba.
+def _image_array_for_bokeh(img: LoadedImage) -> np.ndarray:
+    """Return a uint32 RGBA array oriented for Bokeh's image_rgba, applying the
+    user's display settings from ``state``.
 
     Bokeh draws with image[0,0] at lower-left. FITS arrays are already that way.
     PIL JPEG arrays come in top-left origin; flip them vertically.
+
+    RGB (JPG) images use the brightness/contrast controls; FITS use the
+    stretch + scaling-mode (percentile / manual vmin-vmax / zscale) + colormap
+    controls. For a grayscale FITS the base-tier intensity limits are computed
+    once and cached in ``state`` so the on-demand zoom crops reuse them (stable
+    brightness across zoom).
     """
-    rgba = stretch_for_display(img.data, stretch=stretch)
+    if img.data.ndim == 2:  # grayscale / FITS
+        lo, hi = compute_interval(
+            img.data,
+            scale_mode=str(state.get("image_scale_mode", "percentile")),
+            percentile=float(state.get("image_percentile", 99.5)),
+            vmin=state.get("image_vmin"), vmax=state.get("image_vmax"),
+        )
+        state["_fits_vmin"], state["_fits_vmax"] = lo, hi
+        rgba = stretch_for_display(
+            img.data, stretch=str(state.get("image_stretch", "asinh")),
+            scale_mode="manual", vmin=lo, vmax=hi,
+            cmap=str(state.get("image_cmap", "gray")),
+            invert=bool(state.get("image_invert", False)),
+            nan_white=bool(state.get("image_nan_white", False)),
+        )
+    else:  # RGB (JPG/PNG)
+        rgba = stretch_for_display(
+            img.data,
+            brightness=float(state.get("rgb_brightness", 0.0)),
+            contrast=float(state.get("rgb_contrast", 1.0)),
+        )
     if img.mode == "jpg+sidecar":
         rgba = rgba[::-1]
     return rgba
@@ -4108,6 +4595,9 @@ def refresh_overlays() -> None:
             str(sh.target_id) for sh in state["open_shutters"].values()
             if sh.target_id is not None
         }
+        # Each source takes its catalog's own colour (set per catalog in the
+        # catalog list). `catalog_colors` is the per-source array built by
+        # `_rebuild_merged_catalog` from every entry's colour.
         per_source_colors = state.get("catalog_colors")
         if per_source_colors is not None and len(per_source_colors) == len(cat.ra_deg):
             unmatched_colors = np.asarray(per_source_colors)[mask].tolist()
@@ -4353,13 +4843,261 @@ def refresh_overlays() -> None:
     )
 
 
-def refresh_image_glyph() -> None:
-    img = state["image"]
+def _clear_fits_lod() -> None:
+    """Drop the high-res LOD overlay so only the base tier shows."""
+    if src_lod.data.get("image"):
+        src_lod.data = dict(image=[], x=[], y=[], dw=[], dh=[])
+    state["_lod_tier"] = None
+
+
+def _render_fits_lod() -> None:
+    """Sharpen a zoomed-in view of a large FITS.
+
+    Reads a higher-resolution crop of just the visible region from the
+    memory-mapped file and draws it in the ``src_lod`` overlay, on top of the
+    base tier and placed over the same sky. Uses the base tier's cached
+    intensity limits + the current colormap, so the crop blends seamlessly.
+    Cleared (base only) when zoomed out, for non-FITS images, or for a FITS
+    small enough to already be at native resolution."""
+    img = state.get("image")
+    if (img is None or getattr(img, "mode", None) != "fits"
+            or getattr(img, "data", None) is None or img.data.ndim != 2):
+        _clear_fits_lod()
+        return
+    base_f = int(getattr(img, "factor", 1) or 1)
+    full = getattr(img, "full_shape", None)
+    if base_f <= 1 or not full:
+        _clear_fits_lod()            # base tier is already native resolution
+        return
+    H_base, W_base = img.shape
+    H_full, W_full = int(full[0]), int(full[1])
+    try:
+        bx0 = max(0.0, float(fig.x_range.start))
+        bx1 = min(float(W_base), float(fig.x_range.end))
+        by0 = max(0.0, float(fig.y_range.start))
+        by1 = min(float(H_base), float(fig.y_range.end))
+    except (TypeError, ValueError):
+        return
+    if not (bx1 > bx0 and by1 > by0):
+        return
+    # Read a slightly larger region than the viewport so small pans don't
+    # immediately expose the coarser base tier at the edges.
+    mx, my = (bx1 - bx0) * 0.12, (by1 - by0) * 0.12
+    bx0, bx1 = max(0.0, bx0 - mx), min(float(W_base), bx1 + mx)
+    by0, by1 = max(0.0, by0 - my), min(float(H_base), by1 + my)
+    # Visible region in full-res pixels.
+    fx0, fx1 = int(np.floor(bx0 * base_f)), int(np.ceil(bx1 * base_f))
+    fy0, fy1 = int(np.floor(by0 * base_f)), int(np.ceil(by1 * base_f))
+    fx0, fx1 = max(0, min(fx0, W_full)), max(0, min(fx1, W_full))
+    fy0, fy1 = max(0, min(fy0, H_full)), max(0, min(fy1, H_full))
+    if not (fx1 > fx0 and fy1 > fy0):
+        return
+    target = max(256.0, float(state.get("frame_x", 800)))
+    f = lod_view_factor(max(fx1 - fx0, fy1 - fy0), target, base_f)
+    if f >= base_f:
+        _clear_fits_lod()            # base tier is sharp enough at this zoom
+        return
+    lo, hi = state.get("_fits_vmin"), state.get("_fits_vmax")
+    if lo is None or hi is None:
+        lo, hi = compute_interval(
+            img.data, str(state.get("image_scale_mode", "percentile")),
+            float(state.get("image_percentile", 99.5)),
+            state.get("image_vmin"), state.get("image_vmax"))
+        state["_fits_vmin"], state["_fits_vmax"] = lo, hi
+    try:
+        crop, ay0, ax0 = read_fits_region(img.source_path, img.hdu,
+                                          fy0, fy1, fx0, fx1, f)
+    except Exception:  # noqa: BLE001 — never let a bad crop break the canvas
+        return
+    if crop.size == 0:
+        return
+    rgba = stretch_for_display(
+        crop, str(state.get("image_stretch", "asinh")),
+        scale_mode="manual", vmin=lo, vmax=hi,
+        cmap=str(state.get("image_cmap", "gray")),
+        invert=bool(state.get("image_invert", False)),
+        nan_white=bool(state.get("image_nan_white", False)))
+    src_lod.data = dict(image=[rgba], x=[ax0 / base_f], y=[ay0 / base_f],
+                        dw=[crop.shape[1] * f / base_f],
+                        dh=[crop.shape[0] * f / base_f])
+    state["_lod_tier"] = f
+
+
+# Guard so programmatic handle moves in _update_histogram_overlay don't
+# re-fire the drag callback (and so the vmin/vmax spinners the drag sets
+# don't cascade into extra re-stretches).
+_hist_sync = {"flag": False}
+
+
+def _rebuild_histogram() -> None:
+    """Recompute the pixel-value histogram bars for the current image (only
+    when the underlying data changed — cheap to call on every refresh) and
+    refresh the vmin/vmax + stretch overlay. Bars span the full data range on a
+    LOG count axis; empty bins are dropped (log can't show zero)."""
+    img = state.get("image")
+    if img is None or getattr(img, "data", None) is None:
+        src_hist.data = dict(left=[], right=[], top=[], bottom=[])
+        src_stretch_curve.data = dict(x=[], y=[])
+        src_vhandles.data = dict(x=[], y=[], mkr=[])
+        hist_info_div.text = ""
+        state["_hist_data_ref"] = None
+        return
+    # Recompute the bars only when the underlying array actually changed. Key
+    # off object IDENTITY (`is`) via a held reference, NOT id() — CPython reuses
+    # addresses after GC, so an id() key can false-match a new array.
+    if img.data is not state.get("_hist_data_ref"):
+        try:
+            H = compute_histogram(img.data)
+        except Exception:  # noqa: BLE001
+            return
+        edges = np.asarray(H["edges"], dtype=float)
+        counts = np.asarray(H["counts"], dtype=float)
+        keep = counts > 0                       # log axis can't draw 0-count bins
+        left = edges[:-1][keep]
+        right = edges[1:][keep]
+        top = counts[keep]
+        src_hist.data = dict(left=left.tolist(), right=right.tolist(),
+                             top=top.tolist(), bottom=[0.5] * int(keep.sum()))
+        # Pad the x-range by one bin on each side so the vmin/vmax handles at
+        # the data edges aren't glued to the panel border — easier to grab/drag.
+        bw = float(edges[1] - edges[0]) if len(edges) >= 2 else max(
+            1e-12, abs(H["hi"] - H["lo"]))
+        hist_fig.x_range.start = H["lo"] - bw
+        hist_fig.x_range.end = H["hi"] + bw
+        ymax = float(top.max()) if len(top) else 1.0
+        hist_fig.y_range.start = 0.5
+        hist_fig.y_range.end = ymax * 3.0
+        state["_hist_data_ref"] = img.data
+        state["_hist_lo"], state["_hist_hi"] = H["lo"], H["hi"]
+        state["_hist_bw"] = bw
+        state["_hist_ymax"] = ymax
+        state["_hist_stats"] = H.get("stats", {})
+    _update_histogram_overlay()
+
+
+def _update_histogram_overlay() -> None:
+    """Shade the current [vmin, vmax] on the histogram, draw the stretch
+    tone-curve, position the draggable handles, and refresh the info line.
+    FITS uses the real vmin/vmax; RGB hides the range box + handles."""
+    img = state.get("image")
+    if (img is None or getattr(img, "data", None) is None
+            or not src_hist.data.get("left")):
+        return
+    lo = float(state.get("_hist_lo", 0.0))
+    hi = float(state.get("_hist_hi", 1.0))
+    bw = float(state.get("_hist_bw", 0.0))
+    lob, hib = lo - bw, hi + bw          # buffered range (one bin each side)
+    stats = state.get("_hist_stats", {})
+    if img.data.ndim == 2:  # FITS
+        vmin = state.get("_fits_vmin")
+        vmax = state.get("_fits_vmax")
+        if vmin is None or vmax is None:
+            vmin, vmax = compute_interval(
+                img.data, str(state.get("image_scale_mode", "percentile")),
+                float(state.get("image_percentile", 99.5)),
+                state.get("image_vmin"), state.get("image_vmax"))
+        vmin, vmax = float(vmin), float(vmax)
+        vmin_c = max(lob, min(hib, vmin))
+        vmax_c = max(lob, min(hib, vmax))
+        hist_range_box.left = vmin_c
+        hist_range_box.right = vmax_c
+        hist_range_box.visible = True
+        xs, ys = stretch_curve(str(state.get("image_stretch", "asinh")),
+                               vmin, vmax)
+        src_stretch_curve.data = dict(x=xs, y=ys)
+        # Handles at OPPOSITE ends: vmin △ (up) hugs the bottom floor, vmax ▽
+        # (down) hugs the top. Guarded so setting them doesn't re-fire the drag
+        # callback. Index 0 = vmin, index 1 = vmax (matches _on_vhandle_drag).
+        y_top = max(1.0, float(state.get("_hist_ymax", 1.0)))
+        y_bot = float(hist_fig.y_range.start or 0.5)
+        _prev = _hist_sync["flag"]
+        _hist_sync["flag"] = True
+        try:
+            src_vhandles.data = dict(
+                x=[vmin_c, vmax_c], y=[y_bot, y_top],
+                mkr=["triangle", "inverted_triangle"])
+        finally:
+            _hist_sync["flag"] = _prev
+        smode = state.get("image_scale_mode", "percentile")
+        scale_txt = (f"percentile {state.get('image_percentile', 99.5)}%"
+                     if smode == "percentile" else str(smode))
+        hist_info_div.text = (
+            "<div style='font-size:11px;color:#4a5b74;line-height:1.5'>"
+            f"data min {stats.get('min', 0):.4g} · median "
+            f"{stats.get('median', 0):.4g} · max {stats.get('max', 0):.4g}<br>"
+            f"<b>vmin {vmin:.4g} · vmax {vmax:.4g}</b> · "
+            f"{state.get('image_stretch', 'asinh')} · {scale_txt} "
+            "<span style='color:#7a8699'>· drag △ (vmin) / ▽ (vmax)</span></div>")
+    else:  # RGB
+        hist_range_box.visible = False
+        src_stretch_curve.data = dict(x=[], y=[])
+        _prev = _hist_sync["flag"]
+        _hist_sync["flag"] = True
+        try:
+            src_vhandles.data = dict(x=[], y=[], mkr=[])
+        finally:
+            _hist_sync["flag"] = _prev
+        hist_info_div.text = (
+            "<div style='font-size:11px;color:#4a5b74;line-height:1.5'>"
+            f"RGB luminance 0–255 · brightness "
+            f"{float(state.get('rgb_brightness', 0.0)):+.2f} · contrast "
+            f"{float(state.get('rgb_contrast', 1.0)):.2f}</div>")
+
+
+def _on_vhandle_drag(attr, old, new) -> None:
+    """The user dragged a ▽ handle → adopt the new [vmin, vmax] as a manual
+    interval and re-stretch. Guarded against the programmatic handle moves in
+    ``_update_histogram_overlay`` and against cascading widget callbacks."""
+    if _hist_sync["flag"]:
+        return
+    xs = sorted(float(x) for x in (new.get("x") or []))
+    if len(xs) < 2 or not (xs[-1] > xs[0]):
+        return
+    vmin, vmax = xs[0], xs[-1]
+    _hist_sync["flag"] = True
+    try:
+        state["image_scale_mode"] = "manual"
+        state["image_vmin"], state["image_vmax"] = vmin, vmax
+        image_scale_mode_select.value = "manual"   # handlers guarded → no-op
+        image_vmin_spinner.value = vmin
+        image_vmax_spinner.value = vmax
+        _sync_image_controls()
+        _restretch_image_glyph()   # → _update_histogram_overlay repositions box
+    finally:
+        _hist_sync["flag"] = False
+
+
+src_vhandles.on_change("data", _on_vhandle_drag)
+
+
+def _restretch_image_glyph() -> None:
+    """Recompute ONLY the image RGBA from the current display settings and push
+    it, leaving the axis ranges / frame / tick formatters untouched.
+
+    Used by the brightness / contrast / stretch / scale-mode / vmin-vmax /
+    colormap controls so re-stretching keeps the user's current pan & zoom
+    instead of snapping back to the whole-image view (which
+    ``refresh_image_glyph`` does, since it re-fits the ranges to the frame
+    aspect). Also refreshes the zoom LOD crop with the new settings."""
+    img = state.get("image")
     if img is None:
         return
     arr = _image_array_for_bokeh(img)
     H, W = arr.shape
     src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
+    _render_fits_lod()
+    _update_histogram_overlay()
+
+
+def refresh_image_glyph() -> None:
+    img = state["image"]
+    if img is None:
+        return
+    _clear_fits_lod()  # drop any stale zoom crop from a prior image/settings
+    arr = _image_array_for_bokeh(img)
+    H, W = arr.shape
+    src_image.data = dict(image=[arr], x=[0], y=[0], dw=[W], dh=[H])
+    _rebuild_histogram()
     # Lock the canvas frame pixel dimensions to the user-set values
     # so 1 data unit renders the same in x and y. Default 800x800;
     # the legacy "frame_max" key (pre-split) still drives both axes
@@ -4470,6 +5208,10 @@ def _set_image_and_recenter(
     image (then no MSA would land on the image anyway).
     """
     state["image"] = img
+    # Show the image-display controls (FITS vs RGB) matching this image, and
+    # reproject any DS9 region/contour layers onto the new WCS.
+    _sync_image_controls()
+    _rebuild_overlay_layers()
     H, W = img.shape[:2]
     has_pointing = bool(
         (ra_input.value or "").strip() and (dec_input.value or "").strip()
@@ -4764,21 +5506,15 @@ def _render_catalog_list() -> None:
         name = entry["name"]
         n = len(entry["catalog"].ra_deg)
         color = entry.get("color", "#ffd200")
-        # Coloured chip — small Div with a solid background that matches
-        # the marker colour drawn on the canvas. Gives the user a
-        # visual key linking each list row to its on-image markers.
-        chip = Div(
-            text=(
-                f'<div style="width:14px; height:14px; border-radius:50%; '
-                f'background:{color}; border:1px solid #333; '
-                f'display:inline-block; vertical-align:middle;"></div>'
-            ),
-            width=22, height=24,
-        )
+        # Colour picker — recolours THIS catalog's markers (v1.8.0: colour is
+        # per catalog, set right here in the list, not in Settings → Layers).
+        # The square swatch doubles as the visual key linking the row to its
+        # markers.
+        cp = _square_color_picker(color, size=24)
         cb = CheckboxGroup(
             labels=[f"{name} ({n})"],
             active=[0] if entry["enabled"] else [],
-            width=SIDEBAR_W - 170,
+            width=SIDEBAR_W - 176,
         )
         up_btn = Button(
             label="▲", button_type="default",
@@ -4841,11 +5577,24 @@ def _render_catalog_list() -> None:
                     refresh_overlays()
             return _cb
 
+        def _make_color(e):
+            # Closes over the entry dict (not the index) so it stays correct
+            # after reorders. Doesn't rebuild the list (that would discard the
+            # picker mid-interaction) — just re-derives colours + re-renders.
+            def _cb(attr, old, new):
+                if not new:
+                    return
+                e["color"] = str(new)
+                _rebuild_merged_catalog()
+                refresh_overlays()
+            return _cb
+
+        cp.on_change("color", _make_color(entry))
         cb.on_change("active", _make_toggle(idx))
         up_btn.on_click(_make_move(idx, -1))
         down_btn.on_click(_make_move(idx, +1))
         del_btn.on_click(_make_delete(idx, name))
-        rows.append(row(chip, cb, up_btn, down_btn, del_btn))
+        rows.append(row(cp, cb, up_btn, down_btn, del_btn))
     catalog_list_column.children = rows
 
 
@@ -5093,6 +5842,7 @@ def on_apa_text(attr, old, new):
 
 
 def on_layers(attr, old, new):
+    _sync_overlay_layer_visibility()
     refresh_overlays()
 
 
@@ -6013,6 +6763,7 @@ def _build_current_session() -> Session:
         {
             "path": e["catalog"].source_path,
             "enabled": bool(e.get("enabled", True)),
+            "color": e.get("color"),          # per-catalog marker colour (v1.8.0)
         }
         for e in state["catalogs"]
         if getattr(e.get("catalog"), "source_path", None)
@@ -6052,6 +6803,15 @@ def _build_current_session() -> Session:
         catalog_paths=catalog_entries,
         configs=configs_payload,
         active_config=int(state.get("active_config", 0)),
+        # `overlays` is authoritative (carries per-file on/off); the legacy
+        # region_paths / contour_specs are derived (enabled only) so older
+        # vMPT can still read a shared bundle.
+        overlays=[dict(o) for o in state.get("overlays", [])],
+        region_paths=[o["path"] for o in state.get("overlays", [])
+                      if o.get("kind") == "region" and o.get("enabled", True)],
+        contour_specs=[[o["path"], o.get("coordsys", "sky")]
+                       for o in state.get("overlays", [])
+                       if o.get("kind") == "contour" and o.get("enabled", True)],
     )
 
 
@@ -6246,7 +7006,10 @@ def _apply_loaded_session(sess) -> None:
             "name": Path(path).name,
             "catalog": cat,
             "enabled": bool(entry.get("enabled", True)),
-            "color": _assign_catalog_color(len(state["catalogs"])),
+            # Honour a saved per-catalog colour (v1.8.0); else assign from the
+            # palette by load order.
+            "color": (entry.get("color")
+                      or _assign_catalog_color(len(state["catalogs"]))),
         })
     _rebuild_merged_catalog()
     _render_catalog_list()
@@ -6260,16 +7023,63 @@ def _apply_loaded_session(sess) -> None:
         )
         catalog_path_input.value = first["catalog"].source_path
 
+    # Restore DS9 region / contour display overlays (v1.8.0). Write straight
+    # to `state["overlays"]` so the post-image-load `_rebuild_overlay_layers`
+    # reprojects them. Prefer the authoritative `overlays` list (carries the
+    # per-file on/off state); fall back to the legacy region_paths /
+    # contour_specs for pre-1.8.0 bundles. Drop paths missing on disk.
+    overlay_notes: list[str] = []
+    ovs: list = []
+    sess_overlays = list(getattr(sess, "overlays", None) or [])
+    if sess_overlays:
+        for o in sess_overlays:
+            p = o.get("path")
+            kind = o.get("kind", "region")
+            if p and Path(p).is_file():
+                dflt = DS9_REGION_COLOR if kind == "region" else DS9_CONTOUR_COLOR
+                ovs.append({"path": p, "kind": kind,
+                            "coordsys": o.get("coordsys", "sky"),
+                            "enabled": bool(o.get("enabled", True)),
+                            "color": o.get("color") or dflt,
+                            "fill_alpha": float(o.get("fill_alpha", 0.0) or 0.0)})
+            elif p:
+                overlay_notes.append(f"missing {Path(p).name}")
+    else:  # legacy bundle → all enabled
+        for p in (getattr(sess, "region_paths", None) or []):
+            if p and Path(p).is_file():
+                ovs.append({"path": p, "kind": "region", "coordsys": "sky",
+                            "enabled": True, "color": DS9_REGION_COLOR,
+                            "fill_alpha": 0.0})
+            elif p:
+                overlay_notes.append(f"missing region {Path(p).name}")
+        for s in (getattr(sess, "contour_specs", None) or []):
+            p = s[0] if s else None
+            cs = s[1] if s and len(s) > 1 else "sky"
+            if p and Path(p).is_file():
+                ovs.append({"path": p, "kind": "contour", "coordsys": cs,
+                            "enabled": True, "color": DS9_CONTOUR_COLOR,
+                            "fill_alpha": 0.0})
+            elif p:
+                overlay_notes.append(f"missing contour {Path(p).name}")
+    state["overlays"] = ovs
+    _rebuild_overlay_layers()
+    _sync_overlay_layer_visibility()
+    _update_addon_list()  # reflect restored overlays in the Load Add-on dialog
+
     refresh_overlays()
     if state["image"] is None and not image_note:
         image_note = " Load an image to see the overlay."
     catalog_note = (
         " Catalog issues: " + "; ".join(catalog_notes) if catalog_notes else ""
     )
+    overlay_note = (
+        " Overlay issues: " + "; ".join(overlay_notes) if overlay_notes else ""
+    )
     _set_status(
         f"Session loaded: {len(state['open_shutters'])} open shutters."
-        f"{image_note}{catalog_note}",
-        "warn" if (image_note or catalog_note) else "ok", clear_after=14,
+        f"{image_note}{catalog_note}{overlay_note}",
+        "warn" if (image_note or catalog_note or overlay_note) else "ok",
+        clear_after=14,
     )
     # An in-flight image load hides the spinner itself; otherwise hide now.
     if not triggered_image:
@@ -6620,6 +7430,44 @@ def _pick_file_dialog(
     return result or None
 
 
+def _pick_files_dialog(
+    title: str,
+    filetypes: list[tuple[str, str]] | None = None,
+) -> list[str]:
+    """Native MULTI-select open dialog → list of chosen paths (empty if
+    cancelled). Same subprocess-isolated tkinter approach as
+    ``_pick_file_dialog``, using ``askopenfilenames``."""
+    import json as _json
+    import subprocess as _sp
+    import sys as _sys
+    ft_repr = repr(filetypes or [])
+    script = (
+        "import json, tkinter as tk\n"
+        "from tkinter import filedialog\n"
+        "root = tk.Tk()\n"
+        "root.withdraw()\n"
+        "root.attributes('-topmost', True)\n"
+        f"paths = filedialog.askopenfilenames(title={title!r}, "
+        f"filetypes={ft_repr})\n"
+        "print(json.dumps([str(p) for p in paths]))\n"
+        "root.destroy()\n"
+    )
+    try:
+        out = _sp.run(
+            [_sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=300,
+        )
+    except _sp.SubprocessError as e:
+        _set_status(f"File picker failed: {e}", "err")
+        return []
+    last = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else ""
+    try:
+        result = _json.loads(last) if last else []
+    except Exception:  # noqa: BLE001
+        result = []
+    return [str(p) for p in result if p]
+
+
 _FITS_TYPES = [("FITS", "*.fits *.fit"), ("All files", "*")]
 _JPG_TYPES = [("Image", "*.jpg *.jpeg *.png"), ("All files", "*")]
 _CATALOG_TYPES = [("Catalog", "*.csv *.cat *.txt *.fits *.ascii"),
@@ -6683,6 +7531,13 @@ def _set_overlap_base_alpha(category: str, value: float) -> None:
         refresh_overlays()
     except Exception:  # noqa: BLE001
         pass
+
+
+# NB: colour + fill alpha for catalogs / DS9 regions / contours are now
+# PER ITEM (v1.8.0) — set in the catalog list and the Load Add-on dialog,
+# not here. The Layers dialog only carries per-layer visibility + outline
+# alpha + stroke. (The old _set_regions_color / _set_contours_color /
+# _set_catalog_color layer-wide setters were removed with that move.)
 
 
 _OVERLAY_LAYER_CONFIG = {
@@ -6767,6 +7622,31 @@ _OVERLAY_LAYER_CONFIG = {
         # restores the field reference rather than a scalar. size is a
         # plain scalar (the marker diameter in px).
         "default_alpha": "line_alpha", "default_stroke": 10,
+        # Colour is per-catalog now — set in the catalog list, not here.
+    },
+    # DS9 region (.reg) + contour (.con) display layers (v1.8.0). The
+    # regions layer drives two glyphs — the polyline outlines and the
+    # diamond markers for DS9 `point` regions — so its alpha/stroke
+    # sliders fan out to the points glyph via alpha_extra / stroke_extra.
+    "DS9 regions":           {
+        "glyph": regions_glyph,
+        "alpha_attr": "line_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 5.0, 0.1),
+        "stroke_label": "Stroke (px)",
+        "default_alpha": 0.85, "default_stroke": 2.0,
+        "alpha_extra": lambda v: setattr(
+            region_points_glyph.glyph, "line_alpha", v),
+        "stroke_extra": lambda v: setattr(
+            region_points_glyph.glyph, "line_width", v),
+        # Colour + fill alpha are per-file now (Load Add-on dialog).
+    },
+    "Contours":              {
+        "glyph": contours_glyph,
+        "alpha_attr": "line_alpha", "stroke_attr": "line_width",
+        "alpha_range": (0.0, 1.0, 0.05), "stroke_range": (0.0, 5.0, 0.1),
+        "stroke_label": "Stroke (px)",
+        "default_alpha": 0.85, "default_stroke": 1.5,
+        # Colour + fill alpha are per-file now (Load Add-on dialog).
     },
 }
 
@@ -6825,6 +7705,9 @@ def _on_overlay_alpha(attr, old, new):
             setter(float(new))
         return
     setattr(cfg["glyph"].glyph, cfg["alpha_attr"], float(new))
+    extra = cfg.get("alpha_extra")
+    if extra is not None:
+        extra(float(new))
 
 
 def _on_overlay_stroke(attr, old, new):
@@ -6842,6 +7725,394 @@ def _on_overlay_stroke(attr, old, new):
 overlay_layer_select.on_change("value", _on_overlay_layer)
 overlay_alpha_slider.on_change("value", _on_overlay_alpha)
 overlay_stroke_slider.on_change("value", _on_overlay_stroke)
+_on_overlay_layer("value", None, overlay_layer_select.value)  # init visibility
+
+
+# ─── Image display (v1.8.0) handlers ────────────────────────────────────
+def _sync_image_controls() -> None:
+    """Show only the controls relevant to the loaded image type, plus the
+    percentile/manual sub-controls per the FITS scaling mode. Before any image
+    loads, show both groups so the user can preset."""
+    img = state.get("image")
+    mode = getattr(img, "mode", None) if img is not None else None
+    show_fits = (mode == "fits") or (img is None)
+    show_rgb = (mode == "jpg+sidecar") or (img is None)
+    _img_fits_group.visible = show_fits
+    _img_rgb_group.visible = show_rgb
+    smode = state.get("image_scale_mode", "percentile")
+    image_percentile_select.visible = show_fits and smode == "percentile"
+    _img_vminmax_row.visible = show_fits and smode == "manual"
+
+
+def _rebuild_overlay_layers() -> None:
+    """Reproject DS9 region / contour display layers onto the current image's
+    WCS. Fully implemented alongside the region/contour feature below; a safe
+    no-op until `state['regions']` / `state['contours']` exist."""
+    if "_rebuild_overlay_layers_impl" in globals():
+        globals()["_rebuild_overlay_layers_impl"]()
+
+
+def _on_image_stretch(attr, old, new):
+    state["image_stretch"] = str(new)
+    _restretch_image_glyph()
+
+
+def _on_image_scale_mode(attr, old, new):
+    if _hist_sync["flag"]:          # driven by a histogram-handle drag
+        return
+    state["image_scale_mode"] = str(new)
+    _sync_image_controls()
+    _restretch_image_glyph()
+
+
+def _on_image_percentile(attr, old, new):
+    try:
+        state["image_percentile"] = float(new)
+    except (TypeError, ValueError):
+        return
+    _restretch_image_glyph()
+
+
+def _on_image_vmin(attr, old, new):
+    if _hist_sync["flag"]:
+        return
+    state["image_vmin"] = None if new in (None, "") else float(new)
+    if state.get("image_scale_mode") == "manual":
+        _restretch_image_glyph()
+
+
+def _on_image_vmax(attr, old, new):
+    if _hist_sync["flag"]:
+        return
+    state["image_vmax"] = None if new in (None, "") else float(new)
+    if state.get("image_scale_mode") == "manual":
+        _restretch_image_glyph()
+
+
+def _on_rgb_brightness(attr, old, new):
+    state["rgb_brightness"] = float(new)
+    _restretch_image_glyph()
+
+
+def _on_rgb_contrast(attr, old, new):
+    state["rgb_contrast"] = float(new)
+    _restretch_image_glyph()
+
+
+def _apply_cmap_appearance() -> None:
+    """Repaint the current-selection button to reflect state's cmap + invert."""
+    name = str(state.get("image_cmap", "gray"))
+    inv = bool(state.get("image_invert", False))
+    cmap_current_btn.label = f"{_CMAP_LABELS.get(name, name.capitalize())}  ▾"
+    cmap_current_btn.stylesheets = [
+        _cmap_swatch_stylesheet(name, inv, current=True)]
+
+
+def _select_cmap(name: str) -> None:
+    # Colormap is a per-session view tweak (not persisted — always starts gray).
+    state["image_cmap"] = str(name)
+    _apply_cmap_appearance()
+    cmap_options_col.visible = False   # collapse the dropdown after a pick
+    _restretch_image_glyph()
+
+
+def _toggle_cmap_dropdown() -> None:
+    cmap_options_col.visible = not cmap_options_col.visible
+
+
+def _on_image_invert(attr, old, new):
+    state["image_invert"] = bool(0 in (new or []))
+    _apply_cmap_appearance()
+    _restretch_image_glyph()
+
+
+def _on_image_nan_white(attr, old, new):
+    state["image_nan_white"] = bool(0 in (new or []))
+    _restretch_image_glyph()
+
+
+cmap_current_btn.on_click(_toggle_cmap_dropdown)
+for _c, _b in zip(FITS_COLORMAPS, _cmap_option_btns):
+    _b.on_click(lambda c=_c: _select_cmap(c))
+
+
+# ─── On-demand LOD: refresh the zoom crop after the user stops panning ───
+# Two independent debounce timers. The overlay LOD is cheap (a numpy decimate
+# + a small CDS push), so it refines quickly for a snappy feel; the FITS crop
+# is a heavier memmap read, so it settles on a calmer timer to avoid thrashing
+# disk on a fast fling. Splitting them also means one can't block the other.
+_lod_pending = {"fits": None, "ovl": None}
+_FITS_LOD_MS = 200       # memmap crop read — heavier
+_OVL_LOD_MS = 80         # overlay decimate/cull — cheap, refine fast
+# For a DENSE overlay, hide it entirely WHILE panning/zooming and re-render it
+# once motion settles — so the drag redraws only the image, not thousands of
+# contour vertices every frame. Sparse overlays (below this vertex count) stay
+# drawn throughout: they cost nothing per frame and would only flicker.
+_OVL_HIDE_THRESHOLD = 2000
+_ovl_interaction = {"hidden": False}
+
+
+def _hide_overlays_during_interaction() -> None:
+    """Hide the region/contour glyphs on the first frame of a pan/zoom when the
+    overlay is dense; `_run_ovl_lod` restores them (re-LOD'd) once it settles."""
+    if _ovl_interaction["hidden"]:
+        return
+    if int(state.get("_ovl_nverts", 0) or 0) < _OVL_HIDE_THRESHOLD:
+        return
+    for g in (regions_glyph, regions_fill_glyph, region_points_glyph,
+              contours_glyph, contours_fill_glyph):
+        g.visible = False
+    _ovl_interaction["hidden"] = True
+
+
+def _reschedule_lod(key: str, fn, ms: int) -> None:
+    h = _lod_pending.get(key)
+    if h is not None:
+        try:
+            curdoc().remove_timeout_callback(h)
+        except (ValueError, RuntimeError):
+            pass
+    try:
+        _lod_pending[key] = curdoc().add_timeout_callback(fn, ms)
+    except Exception:  # noqa: BLE001
+        _lod_pending[key] = None
+
+
+def _run_fits_lod() -> None:
+    _lod_pending["fits"] = None
+    try:
+        _render_fits_lod()               # sharpen the FITS crop
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+
+
+def _run_ovl_lod() -> None:
+    _lod_pending["ovl"] = None
+    try:
+        _apply_overlay_lod()             # re-LOD the region/contour overlays
+    except Exception:  # noqa: BLE001
+        traceback.print_exc()
+    # Motion settled: bring the overlays back (visibility per the layer toggles).
+    if _ovl_interaction["hidden"]:
+        _ovl_interaction["hidden"] = False
+        _sync_overlay_layer_visibility()
+
+
+def _schedule_lod(attr, old, new) -> None:
+    """Debounced range-change hook. A dense overlay is hidden immediately while
+    the view moves and re-rendered once it settles (so the drag redraws only
+    the image); the FITS crop sharpens on its own calmer timer."""
+    img = state.get("image")
+    if img is not None and getattr(img, "mode", None) == "fits":
+        _reschedule_lod("fits", _run_fits_lod, _FITS_LOD_MS)
+    if state.get("_ovl_full"):
+        _hide_overlays_during_interaction()   # dense overlays: hide while moving
+        _reschedule_lod("ovl", _run_ovl_lod, _OVL_LOD_MS)
+
+
+image_stretch_select.on_change("value", _on_image_stretch)
+image_scale_mode_select.on_change("value", _on_image_scale_mode)
+image_percentile_select.on_change("value", _on_image_percentile)
+image_vmin_spinner.on_change("value", _on_image_vmin)
+image_vmax_spinner.on_change("value", _on_image_vmax)
+image_invert_checkbox.on_change("active", _on_image_invert)
+image_nan_white_checkbox.on_change("active", _on_image_nan_white)
+rgb_brightness_slider.on_change("value_throttled", _on_rgb_brightness)
+rgb_contrast_slider.on_change("value_throttled", _on_rgb_contrast)
+# Zoom/pan → debounced LOD refresh for large FITS.
+fig.x_range.on_change("start", _schedule_lod)
+fig.x_range.on_change("end", _schedule_lod)
+fig.y_range.on_change("start", _schedule_lod)
+fig.y_range.on_change("end", _schedule_lod)
+_sync_image_controls()
+_apply_cmap_appearance()
+
+
+# ─── Display overlays (v1.8.0): DS9 region + contour layers ─────────────
+def _rebuild_overlay_layers_impl() -> None:
+    """Re-parse and project the loaded DS9 region/contour files onto the
+    current image's (possibly downsampled) WCS. Cheap to re-run, so it is
+    called on every overlay load and image change. (The `_rebuild_overlay_layers`
+    stub above delegates here once this is defined.)"""
+    img = state.get("image")
+    if img is None:
+        state["_ovl_full"] = None
+        src_regions.data = dict(xs=[], ys=[], line_color=[], fill_color=[],
+                                fill_alpha=[])
+        src_region_points.data = dict(x=[], y=[], line_color=[])
+        src_contours.data = dict(xs=[], ys=[], line_color=[], fill_color=[],
+                                 fill_alpha=[])
+        return
+    wcs = img.wcs
+    factor = int(getattr(img, "factor", 1) or 1)
+    rxs, rys, r_lc, r_fa = [], [], [], []
+    pxs, pys, p_lc = [], [], []
+    cxs, cys, c_lc, c_fa = [], [], [], []
+    for o in list(state.get("overlays", [])):
+        if not o.get("enabled", True):
+            continue      # per-file toggle: skip disabled overlays
+        p = o.get("path")
+        # Per-file appearance (v1.8.0): colour + fill alpha are stored on the
+        # overlay entry and painted into per-segment CDS columns.
+        is_region = o.get("kind") == "region"
+        color = o.get("color") or (DS9_REGION_COLOR if is_region
+                                    else DS9_CONTOUR_COLOR)
+        fill_alpha = float(o.get("fill_alpha", 0.0) or 0.0)
+        try:
+            if is_region:
+                R = load_ds9_regions(p, wcs, factor=factor)
+                for xs, ys in R["lines"]:
+                    rxs.append(xs)
+                    rys.append(ys)
+                    r_lc.append(color)
+                    r_fa.append(fill_alpha)
+                for x, y in R["points"]:
+                    pxs.append(x)
+                    pys.append(y)
+                    p_lc.append(color)
+            else:
+                C = load_ds9_contours(p, wcs, coordsys=o.get("coordsys", "sky"),
+                                      factor=factor)
+                for xs, ys in C["lines"]:
+                    cxs.append(xs)
+                    cys.append(ys)
+                    c_lc.append(color)
+                    c_fa.append(fill_alpha)
+        except Exception as e:  # noqa: BLE001
+            _set_status(f"Overlay parse failed ({Path(p).name}): {e}", "warn")
+            continue
+    # Stash the FULL-resolution projected geometry; the on-screen level of
+    # detail is applied by `_apply_overlay_lod` (decimate vertices when zoomed
+    # out, drop off-view segments when zoomed in) so a dense contour — the
+    # glafic critical curves are ~65k vertices — doesn't re-stroke in full on
+    # every pan/zoom frame.
+    state["_ovl_full"] = {
+        "r_xs": rxs, "r_ys": rys, "r_lc": r_lc, "r_fa": r_fa,
+        "p_x": pxs, "p_y": pys, "p_lc": p_lc,
+        "c_xs": cxs, "c_ys": cys, "c_lc": c_lc, "c_fa": c_fa,
+    }
+    state["_ovl_med_spacing"] = _median_vertex_spacing(rxs + cxs, rys + cys)
+    state["_ovl_nverts"] = (sum(len(x) for x in rxs)
+                            + sum(len(x) for x in cxs))
+    _apply_overlay_lod()
+
+
+_OVL_PX_PER_VERTEX = 1.5   # target: ~1 kept vertex per this many screen px
+
+
+def _median_vertex_spacing(xs_list, ys_list) -> float:
+    """Median distance (data units) between consecutive polyline vertices —
+    used to pick a zoom-adaptive decimation stride. Computed once per overlay
+    (re)load; cheap even for tens of thousands of vertices (vectorised)."""
+    diffs = []
+    for xs, ys in zip(xs_list, ys_list):
+        if xs is None or len(xs) < 2:
+            continue
+        x = np.asarray(xs, dtype=float)
+        y = np.asarray(ys, dtype=float)
+        diffs.append(np.hypot(np.diff(x), np.diff(y)))
+    if not diffs:
+        return 0.0
+    d = np.concatenate(diffs)
+    d = d[d > 0]
+    return float(np.median(d)) if d.size else 0.0
+
+
+def _apply_overlay_lod() -> None:
+    """Fill the region/contour CDS from the stored full-res geometry at a level
+    of detail matched to the current zoom: DECIMATE polyline vertices when
+    zoomed out (sub-screen-pixel vertices are invisible) and CULL segments
+    outside the view when zoomed in. This bounds the on-screen vertex count at
+    every zoom level, so a dense contour pans/zooms smoothly. Runs on the
+    debounced range-change (after motion stops), not per frame."""
+    full = state.get("_ovl_full")
+    if not full:
+        src_regions.data = dict(xs=[], ys=[], line_color=[], fill_color=[],
+                                fill_alpha=[])
+        src_region_points.data = dict(x=[], y=[], line_color=[])
+        src_contours.data = dict(xs=[], ys=[], line_color=[], fill_color=[],
+                                 fill_alpha=[])
+        return
+    try:
+        x0, x1 = float(fig.x_range.start), float(fig.x_range.end)
+        y0, y1 = float(fig.y_range.start), float(fig.y_range.end)
+        have_view = x1 > x0 and y1 > y0
+    except (TypeError, ValueError):
+        have_view = False
+    med = float(state.get("_ovl_med_spacing", 0.0) or 0.0)
+    if have_view and med > 0:
+        screen_w = float(state.get("frame_x", 800) or 800)
+        data_per_px = (x1 - x0) / max(1.0, screen_w)
+        stride = int(max(1, round(data_per_px * _OVL_PX_PER_VERTEX / med)))
+        mx, my = 0.25 * (x1 - x0), 0.25 * (y1 - y0)
+        bbox = (x0 - mx, x1 + mx, y0 - my, y1 + my)
+    else:
+        stride, bbox = 1, None
+
+    def _lod_lines(xs_list, ys_list, lc, fa):
+        oxs, oys, olc, ofa = [], [], [], []
+        for i in range(len(xs_list)):
+            xs, ys = xs_list[i], ys_list[i]
+            if len(xs) == 0:
+                continue
+            ax = np.asarray(xs, dtype=float)
+            ay = np.asarray(ys, dtype=float)
+            if bbox is not None and (
+                    ax.max() < bbox[0] or ax.min() > bbox[1]
+                    or ay.max() < bbox[2] or ay.min() > bbox[3]):
+                continue                       # segment entirely outside view
+            n = ax.size
+            if stride > 1 and n > 2:           # decimate, always keep the ends
+                idx = list(range(0, n, stride))
+                if idx[-1] != n - 1:
+                    idx.append(n - 1)
+                dx, dy = ax[idx].tolist(), ay[idx].tolist()
+            else:
+                dx, dy = ax.tolist(), ay.tolist()
+            oxs.append(dx)
+            oys.append(dy)
+            olc.append(lc[i])
+            ofa.append(fa[i])
+        return oxs, oys, olc, ofa
+
+    rxs, rys, r_lc, r_fa = _lod_lines(full["r_xs"], full["r_ys"],
+                                      full["r_lc"], full["r_fa"])
+    src_regions.data = dict(xs=rxs, ys=rys, line_color=r_lc,
+                            fill_color=list(r_lc), fill_alpha=r_fa)
+    cxs, cys, c_lc, c_fa = _lod_lines(full["c_xs"], full["c_ys"],
+                                      full["c_lc"], full["c_fa"])
+    src_contours.data = dict(xs=cxs, ys=cys, line_color=c_lc,
+                             fill_color=list(c_lc), fill_alpha=c_fa)
+    # Region point markers are sparse — no vertex decimation; cull to the view.
+    px, py, plc = full["p_x"], full["p_y"], full["p_lc"]
+    if bbox is not None and px:
+        apx = np.asarray(px, dtype=float)
+        apy = np.asarray(py, dtype=float)
+        keep = ((apx >= bbox[0]) & (apx <= bbox[1])
+                & (apy >= bbox[2]) & (apy <= bbox[3]))
+        ki = np.nonzero(keep)[0]
+        src_region_points.data = dict(
+            x=apx[keep].tolist(), y=apy[keep].tolist(),
+            line_color=[plc[i] for i in ki])
+    else:
+        src_region_points.data = dict(x=list(px), y=list(py),
+                                      line_color=list(plc))
+
+
+def _sync_overlay_layer_visibility() -> None:
+    """Toggle the sky-fixed region/contour glyphs from the layers checkboxes
+    (indices 3 = DS9 regions, 4 = contours)."""
+    active = layers_box.active or []
+    show_regions = 3 in active
+    show_contours = 4 in active
+    regions_glyph.visible = show_regions
+    regions_fill_glyph.visible = show_regions
+    region_points_glyph.visible = show_regions
+    contours_glyph.visible = show_contours
+    contours_fill_glyph.visible = show_contours
+
+
+_sync_overlay_layer_visibility()
 
 
 # How long to keep the "Resizing canvas…" overlay up after the
@@ -11216,6 +12487,372 @@ catalog_hover_modal_top_close_btn.on_click(_close_catalog_hover_modal)
 # tab's own column so the Tabs/sidebar widths are unchanged.
 _TAB_PAD = {"padding": "2px 4px 0 8px"}
 
+# ─── Display overlays (v1.8.0): unified DS9 region + contour loader ─────
+# ONE multi-select picker reads both DS9 region (.reg) and contour (.ctr /
+# .con) files. The type is detected per file, and a contour's coordinate
+# frame is read from the file itself — so the dialog is just "Add files…"
+# + a loaded-overlay list + "Clear all".
+_ADDON_TYPES = [
+    ("DS9 region / contour", "*.reg *.regions *.ctr *.con *.txt"),
+    ("All files", "*"),
+]
+
+
+def _overlay_label(o: dict) -> str:
+    # No colour emoji — each row's ColorPicker swatch shows the real colour.
+    name = Path(o.get("path", "")).name
+    if o.get("kind") == "region":
+        return f"region · {name}"
+    return f"contour [{o.get('coordsys', 'sky')}] · {name}"
+
+
+def _overlay_short_name(o: dict, maxlen: int = 24) -> str:
+    """Compact label for the sidebar row: just the filename (its extension
+    already says region vs contour), middle-truncated so a long name fits the
+    tab width without overflowing."""
+    name = Path(o.get("path", "")).name
+    if len(name) <= maxlen:
+        return name
+    return name[: maxlen - 9] + "…" + name[-8:]
+
+
+# Ellipsis-clip a long checkbox label as a belt-and-braces beyond the
+# middle-truncation, so it can never overflow the tab width.
+_OVL_LABEL_CSS = InlineStyleSheet(css=(
+    "label { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; "
+    "max-width:100%; }"
+))
+
+
+_addon_sync = {"flag": False}  # guard against the toggle-group rebuild recursing
+
+
+# Per-row handler factories — each closes over the overlay dict `o` (not an
+# index) so it keeps targeting the right file even if the list changes. None
+# of them rebuild the list (that would discard the widget mid-interaction);
+# they only re-render the canvas.
+def _make_addon_toggle(o: dict):
+    def _cb(attr, old, new):
+        o["enabled"] = bool(0 in (new or []))
+        _rebuild_overlay_layers_impl()
+        _sync_overlay_layer_visibility()
+    return _cb
+
+
+def _make_addon_color(o: dict):
+    def _cb(attr, old, new):
+        if not new:
+            return
+        o["color"] = str(new)
+        _rebuild_overlay_layers_impl()   # repaint just this file's segments
+    return _cb
+
+
+def _make_addon_fill(o: dict):
+    def _cb(attr, old, new):
+        try:
+            o["fill_alpha"] = float(new)
+        except (TypeError, ValueError):
+            return
+        _rebuild_overlay_layers_impl()
+    return _cb
+
+
+# ── "Loaded add-ons" sidebar list (Input tab) ────────────────────────────
+# Compact, always-in-the-sidebar list of loaded DS9 overlays — mirrors the
+# catalog list — so files are toggled / recoloured / removed WITHOUT opening
+# the Load Add-on dialog. One row: [square colour swatch][thin fill-α bar]
+# [on/off checkbox + name][× delete].
+sidebar_overlay_list_column = column(width=SIDEBAR_W - 16, spacing=3)
+sidebar_overlay_section = column(
+    _section_header("Loaded add-ons",
+                    "DS9 region / contour overlays. Tick to show/hide, click "
+                    "the colour swatch to set colour + fill opacity, ✕ to "
+                    "remove."),
+    sidebar_overlay_list_column,
+    visible=False, width=SIDEBAR_W - 6,
+)
+
+
+def _delete_overlay(o: dict):
+    def _cb():
+        ovs = state.get("overlays", [])
+        try:
+            ovs.remove(o)
+        except ValueError:
+            pass
+        _rebuild_overlay_layers_impl()
+        _sync_overlay_layer_visibility()
+        _update_addon_list()             # rebuild sidebar list + dialog hint
+        _set_status(f"Removed overlay: {Path(o.get('path', '')).name}", "ok")
+    return _cb
+
+
+# ── Overlay colour + fill popover ────────────────────────────────────────
+# Each sidebar row's colour box is a small coloured BUTTON; clicking it opens
+# this one shared popover holding a real colour picker + a fill-α slider, both
+# bound to the clicked overlay. (A native <input type=color> can't host a
+# slider or carry alpha, so "colour + alpha in the box" means "click the box →
+# edit both in one popup".)
+_ovl_style_target = {"o": None, "btn": None}
+_ovl_style_sync = {"flag": False}
+_ovl_style_title = Div(text="", width=248)
+_ovl_style_color = ColorPicker(color="#ffffff", width=248, title="Colour")
+_ovl_style_alpha = Slider(start=0.0, end=1.0, step=0.05, value=0.0,
+                          width=248, title="Fill opacity (α) — 0 = outline only")
+ovl_style_close_x = Button(label="×", button_type="default", width=32,
+                           height=28, css_classes=["vmpt-modal-x"])
+ovl_style_close_btn = Button(label="Done", button_type="primary", width=90)
+ovl_style_backdrop = _mpt_dlg_backdrop()
+ovl_style_modal_card = column(
+    _mpt_dlg_header("Overlay colour &amp; fill", ovl_style_close_x),
+    _ovl_style_title,
+    _ovl_style_color,
+    _ovl_style_alpha,
+    row(ovl_style_close_btn),
+    spacing=10, width=284, visible=False,
+    # Shrink-wrap to content — Bokeh otherwise stretches a fixed-position card
+    # to the full viewport height, leaving a tall empty box. `height_policy`
+    # alone loses to Bokeh's `!important`, so `_ovl_style_fit_js` (below) pins
+    # `height:fit-content !important` whenever it opens — same trick as the
+    # overwrite-confirm modal.
+    height_policy="min",
+    css_classes=["vmpt-modal-card", "vmpt-ovl-style-card"],
+    styles=_mpt_dlg_card_styles(),
+)
+_ovl_style_fit_js = CustomJS(code="""
+if (!cb_obj.visible) return;
+const pin = () => {
+    const out = [];
+    (function w(r){
+        r.querySelectorAll('.vmpt-ovl-style-card').forEach(e => out.push(e));
+        r.querySelectorAll('*').forEach(el => { if (el.shadowRoot) w(el.shadowRoot); });
+    })(document);
+    if (out[0]) out[0].style.setProperty('height', 'fit-content', 'important');
+};
+pin();
+setTimeout(pin, 30);
+""")
+ovl_style_modal_card.js_on_change("visible", _ovl_style_fit_js)
+
+
+def _swatch_btn_css(color: str) -> InlineStyleSheet:
+    """Paint a Button as a filled colour square (the sidebar swatch)."""
+    return InlineStyleSheet(css=(
+        ".bk-btn, .bk-btn:hover, .bk-btn:active, .bk-btn:focus {"
+        f" background:{color}; border:1px solid #8a94a6; border-radius:4px;"
+        " min-height:0; min-width:0; padding:0; width:100%; height:100%;"
+        " box-shadow:none; outline:none; }"))
+
+
+def _overlay_swatch_button(o: dict, size: int = 18) -> Button:
+    color = o.get("color") or (DS9_REGION_COLOR if o.get("kind") == "region"
+                               else DS9_CONTOUR_COLOR)
+    btn = Button(label="", width=size, height=size,
+                 stylesheets=[_swatch_btn_css(color)])
+    btn.on_click(lambda o=o, b=btn: _open_ovl_style(o, b))
+    return btn
+
+
+def _open_ovl_style(o: dict, btn: Button) -> None:
+    _ovl_style_target["o"] = o
+    _ovl_style_target["btn"] = btn
+    kind = o.get("kind", "region")
+    dflt = DS9_REGION_COLOR if kind == "region" else DS9_CONTOUR_COLOR
+    _ovl_style_sync["flag"] = True
+    try:
+        _ovl_style_color.color = str(o.get("color") or dflt)
+        _ovl_style_alpha.value = float(o.get("fill_alpha", 0.0) or 0.0)
+    finally:
+        _ovl_style_sync["flag"] = False
+    _ovl_style_title.text = (
+        "<div style='font-size:12px;color:#5a6b85'>"
+        f"{kind} · <b>{Path(o.get('path', '')).name}</b></div>")
+    ovl_style_backdrop.visible = True
+    ovl_style_modal_card.visible = True
+
+
+def _close_ovl_style() -> None:
+    ovl_style_backdrop.visible = False
+    ovl_style_modal_card.visible = False
+    _ovl_style_target["o"] = None
+    _ovl_style_target["btn"] = None
+
+
+def _on_ovl_style_color(attr, old, new) -> None:
+    if _ovl_style_sync["flag"]:
+        return
+    o = _ovl_style_target["o"]
+    if o is None or not new:
+        return
+    _make_addon_color(o)("color", old, new)     # mutate + repaint segments
+    btn = _ovl_style_target["btn"]
+    if btn is not None:                         # repaint the sidebar swatch
+        btn.stylesheets = [_swatch_btn_css(str(new))]
+
+
+def _on_ovl_style_alpha(attr, old, new) -> None:
+    if _ovl_style_sync["flag"]:
+        return
+    o = _ovl_style_target["o"]
+    if o is not None:
+        _make_addon_fill(o)("value", old, new)  # mutate + repaint segments
+
+
+_ovl_style_color.on_change("color", _on_ovl_style_color)
+_ovl_style_alpha.on_change("value_throttled", _on_ovl_style_alpha)
+ovl_style_close_x.on_click(_close_ovl_style)
+ovl_style_close_btn.on_click(_close_ovl_style)
+
+
+def _render_sidebar_overlays() -> None:
+    """(Re)build the compact Loaded-add-ons list from ``state['overlays']``.
+    Each row: a small coloured swatch button (click → colour + fill-α popover),
+    the on/off checkbox + name, then ✕ to remove."""
+    ovs = list(state.get("overlays", []))
+    rows = []
+    for o in ovs:
+        sw = _overlay_swatch_button(o, size=18)
+        cb = CheckboxGroup(labels=[_overlay_short_name(o)],
+                           active=[0] if o.get("enabled", True) else [],
+                           width=SIDEBAR_W - 96, stylesheets=[_OVL_LABEL_CSS])
+        dl = Button(label="×", button_type="warning", width=24, height=24)
+        cb.on_change("active", _make_addon_toggle(o))
+        dl.on_click(_delete_overlay(o))
+        rows.append(row(sw, cb, dl, spacing=6, styles={"align-items": "center"}))
+    sidebar_overlay_list_column.children = rows
+    sidebar_overlay_section.visible = bool(ovs)
+
+
+def _update_addon_list() -> None:
+    """Refresh the Loaded-add-ons sidebar list and the dialog's count hint.
+    Per-file management lives in the sidebar now; the dialog only adds / clears
+    files."""
+    ovs = list(state.get("overlays", []))
+    _render_sidebar_overlays()
+    if not ovs:
+        addon_hint_div.text = (
+            "<div style='color:#7a8699; font-size:12px'>No overlays loaded "
+            "yet — click <b>Add files…</b> to pick DS9 .reg / .ctr / .con "
+            "files (any mix, several at once).</div>")
+    else:
+        addon_hint_div.text = (
+            "<div style='color:#7a8699; font-size:12px'><b>"
+            f"{len(ovs)}</b> overlay file(s) loaded — recolour, toggle, set "
+            "fill, or remove them under <b>Loaded add-ons</b> in the Input "
+            "tab.</div>")
+
+
+def _add_overlay_files(paths) -> None:
+    """Classify each picked file (region vs contour, and a contour's sky/image
+    frame) and append it to ``state['overlays']`` (enabled), auto-showing the
+    layer group it belongs to."""
+    if not paths:
+        return
+    added = 0
+    skipped = []
+    existing = {o.get("path") for o in state["overlays"]}
+    for p in paths:
+        if not Path(p).is_file():
+            skipped.append(Path(p).name)
+            continue
+        if p in existing:
+            continue
+        try:
+            kind = classify_overlay_file(p)
+        except Exception:  # noqa: BLE001
+            kind = "contour"
+        cs = detect_contour_coordsys(p) if kind == "contour" else "sky"
+        state["overlays"].append(
+            {"path": p, "kind": kind, "coordsys": cs, "enabled": True,
+             "color": (DS9_REGION_COLOR if kind == "region"
+                       else DS9_CONTOUR_COLOR),
+             "fill_alpha": 0.0})
+        existing.add(p)
+        added += 1
+    _rebuild_overlay_layers_impl()
+    # Auto-enable the layer groups that now have content (3 = regions,
+    # 4 = contours) so freshly loaded overlays actually show.
+    kinds = {o["kind"] for o in state["overlays"] if o.get("enabled", True)}
+    want = set(layers_box.active or [])
+    if "region" in kinds:
+        want.add(3)
+    if "contour" in kinds:
+        want.add(4)
+    if want != set(layers_box.active or []):
+        layers_box.active = sorted(want)
+    _sync_overlay_layer_visibility()
+    _update_addon_list()
+    msg = f"Added {added} overlay file(s)."
+    if skipped:
+        msg += f" Skipped: {', '.join(skipped)}."
+    if state.get("image") is None:
+        msg += " Load an image to display them."
+    _set_status(msg, "warn" if (skipped or state.get("image") is None) else "ok")
+
+
+def _on_addon_add() -> None:
+    _add_overlay_files(
+        _pick_files_dialog("Select DS9 region / contour files", _ADDON_TYPES))
+
+
+def _on_addon_clear() -> None:
+    state["overlays"] = []
+    _rebuild_overlay_layers_impl()
+    _update_addon_list()
+    _set_status("Cleared all region / contour overlays.", "ok")
+
+
+addon_add_btn = Button(label="📂  Add files…", button_type="primary",
+                       width=_MPT_DLG_W)
+addon_hint_div = Div(text="", width=_MPT_DLG_W)
+addon_clear_btn = Button(label="Clear all overlays", button_type="default",
+                         width=160)
+addon_add_btn.on_click(_on_addon_add)
+addon_clear_btn.on_click(_on_addon_clear)
+_update_addon_list()
+
+# ── Load Add-on dialog (Input tab) ───────────────────────────────────
+load_addon_close_x = Button(label="×", button_type="default", width=32,
+                            height=28, css_classes=["vmpt-modal-x"])
+load_addon_close_btn = Button(label="Close", button_type="default", width=90)
+load_addon_modal_backdrop = _mpt_dlg_backdrop()
+load_addon_modal_card = column(
+    _mpt_dlg_header("Load add-on overlays", load_addon_close_x),
+    _mpt_dlg_caption("Draw DS9 region (.reg) and contour (.ctr / .con) files "
+                     "on the image — pick any mix of files at once. The type "
+                     "(region vs contour) and a contour's coordinate frame are "
+                     "detected automatically. Overlays are sky-fixed, so they "
+                     "stay aligned through pan / zoom / re-pointing. Once "
+                     "loaded, toggle / recolour / remove them under "
+                     "<b>Loaded add-ons</b> in the Input tab."),
+    addon_add_btn,
+    _mpt_dlg_section("Loaded overlays"),
+    addon_hint_div,
+    row(addon_clear_btn),
+    row(load_addon_close_btn),
+    spacing=10, width=_MPT_DLG_W + 36, visible=False,
+    css_classes=["vmpt-modal-card"], styles=_mpt_dlg_card_styles(),
+)
+
+
+def _open_load_addon_modal():
+    load_addon_modal_backdrop.visible = True
+    load_addon_modal_card.visible = True
+
+
+def _close_load_addon_modal():
+    load_addon_modal_backdrop.visible = False
+    load_addon_modal_card.visible = False
+
+
+load_addon_close_x.on_click(_close_load_addon_modal)
+load_addon_close_btn.on_click(_close_load_addon_modal)
+load_addon_open_btn = Button(label="🧩  Load Add-on…", button_type="primary",
+                             width=SIDEBAR_W - 20, height=40)
+load_addon_open_btn.on_click(_open_load_addon_modal)
+
+
 image_tab = TabPanel(title="Input", child=column(
     Div(text="<div style='font-size:12px; color:#5a6b85; margin:2px 0 6px'>"
              "Load a background image and target catalogs.</div>",
@@ -11224,11 +12861,14 @@ image_tab = TabPanel(title="Input", child=column(
     _tab_caption("An example field, a local FITS, or a JPG/PNG + WCS sidecar."),
     load_catalog_open_btn,
     _tab_caption("CSV / ASCII / FITS with ID, RA, Dec — add several to layer."),
+    load_addon_open_btn,
+    _tab_caption("DS9 region (.reg) + contour (.ctr / .con) files as overlays."),
     _section_header("Loaded catalogs",
                     "Target catalogs layered on the image. Tick to show/hide, "
                     "▲▼ to reorder draw order, ✕ to remove."),
     catalog_list_column,
     catalog_edit_btn,
+    sidebar_overlay_section,          # DS9 overlays — appears once any are loaded
     _section_header("Display filters",
                     "Show only catalog sources at or below these limits; "
                     "leave blank to show all."),
@@ -11273,20 +12913,19 @@ aim_tab = TabPanel(title="Pointing", child=column(
 ))
 
 pick_tab = TabPanel(title="Settings", child=column(
-    _section_header("Layers", "Show or hide overlay layers on the canvas."),
-    layers_box,
     _section_header("Slitlet",
                     "Number of shutters opened per click, and whether clicks "
                     "snap to the nearest operable shutter."),
     slitlet_select,
     snap_box,
-    _section_header("Overlay appearance",
-                    "Per-layer transparency (alpha) and outline width."),
-    overlay_layer_select,
-    overlay_alpha_slider,
-    overlay_stroke_slider,
-    _section_header("Canvas (pixels)", "On-screen size of the image canvas."),
-    row(canvas_x_spinner, canvas_y_spinner, spacing=10),
+    _section_header("Layers & appearance",
+                    "Show / hide overlay layers and tune each layer's alpha and "
+                    "outline width — opens a dialog."),
+    layers_open_btn,
+    _section_header("Image display",
+                    "Tone curve + scaling + colormap (FITS) or brightness / "
+                    "contrast (RGB), plus canvas size — opens a dialog."),
+    image_display_open_btn,
     _section_header("Customise display",
                     "Choose which fields appear in the top status bar and the "
                     "catalog hover tooltip."),
@@ -11437,6 +13076,15 @@ curdoc().add_root(load_image_modal_backdrop)
 curdoc().add_root(load_image_modal_card)
 curdoc().add_root(load_catalog_modal_backdrop)
 curdoc().add_root(load_catalog_modal_card)
+# Settings-tab dialogs (Image display, Layers) + Input-tab dialog (Load Add-on).
+curdoc().add_root(image_display_modal_backdrop)
+curdoc().add_root(image_display_modal_card)
+curdoc().add_root(layers_modal_backdrop)
+curdoc().add_root(layers_modal_card)
+curdoc().add_root(load_addon_modal_backdrop)
+curdoc().add_root(load_addon_modal_card)
+curdoc().add_root(ovl_style_backdrop)
+curdoc().add_root(ovl_style_modal_card)
 # Status bar — separate root so its position:fixed style escapes the
 # sidebar's scrollable container. Lives at the bottom-left of the
 # viewport, under the sidebar.
@@ -11504,6 +13152,15 @@ def _collect_prefs() -> dict:
         "catalog_hover_order": list(catalog_hover_choice.value or []),
         "help_visible": bool(help_div.visible),
         "default_num_configs": int(mpt_num_configs_spinner.value or 1),
+        # Image display (v1.8.0). NB: the FITS colormap + invert are
+        # intentionally NOT persisted — every launch starts at the plain gray
+        # default (a quick per-session view tweak, not a durable preference).
+        "image_stretch": image_stretch_select.value,
+        "image_scale_mode": image_scale_mode_select.value,
+        "image_percentile": image_percentile_select.value,
+        "image_nan_white": bool(0 in (image_nan_white_checkbox.active or [])),
+        "rgb_brightness": float(rgb_brightness_slider.value),
+        "rgb_contrast": float(rgb_contrast_slider.value),
     }
 
 
@@ -11629,7 +13286,7 @@ def _apply_prefs(prefs: dict) -> None:
             try:
                 v = bool(prefs["help_visible"])
                 help_div.visible = v
-                tip_div.visible = v
+                tip_card.visible = v
                 help_toggle_btn.label = "Hide help" if v else "Show help"
                 help_panel.width = HELPPANEL_W if v else 130
             except Exception:  # noqa: BLE001
@@ -11641,6 +13298,48 @@ def _apply_prefs(prefs: dict) -> None:
                 _ensure_n_configs(v)
             except (ValueError, TypeError):
                 pass
+        # Image display (v1.8.0)
+        if "image_stretch" in prefs:
+            try:
+                image_stretch_select.value = str(prefs["image_stretch"])
+                state["image_stretch"] = image_stretch_select.value
+            except Exception:  # noqa: BLE001
+                pass
+        if "image_scale_mode" in prefs:
+            try:
+                image_scale_mode_select.value = str(prefs["image_scale_mode"])
+                state["image_scale_mode"] = image_scale_mode_select.value
+            except Exception:  # noqa: BLE001
+                pass
+        if "image_percentile" in prefs:
+            try:
+                image_percentile_select.value = str(prefs["image_percentile"])
+                state["image_percentile"] = float(image_percentile_select.value)
+            except (ValueError, TypeError):
+                pass
+        if "image_nan_white" in prefs:
+            try:
+                v = bool(prefs["image_nan_white"])
+                image_nan_white_checkbox.active = [0] if v else []
+                state["image_nan_white"] = v
+            except Exception:  # noqa: BLE001
+                pass
+        for _key, _w, _st in (
+            ("rgb_brightness", rgb_brightness_slider, "rgb_brightness"),
+            ("rgb_contrast", rgb_contrast_slider, "rgb_contrast"),
+        ):
+            if _key in prefs:
+                try:
+                    _w.value = float(prefs[_key])
+                    state[_st] = float(prefs[_key])
+                except (ValueError, TypeError):
+                    pass
+        # FITS colormap + invert are not persisted: always start at gray.
+        state["image_cmap"] = "gray"
+        state["image_invert"] = False
+        image_invert_checkbox.active = []
+        _apply_cmap_appearance()
+        _sync_image_controls()
     finally:
         _prefs_save_suppress["flag"] = False
 
@@ -11684,6 +13383,14 @@ overlay_stroke_slider.on_change("value", _save_current_prefs)
 stats_bar_choice.on_change("value", _save_current_prefs)
 catalog_hover_choice.on_change("value", _save_current_prefs)
 mpt_num_configs_spinner.on_change("value", _save_current_prefs)
+# Image display (v1.8.0) — persist on change (sliders use the settled value).
+image_stretch_select.on_change("value", _save_current_prefs)
+image_scale_mode_select.on_change("value", _save_current_prefs)
+image_percentile_select.on_change("value", _save_current_prefs)
+# (FITS colormap + invert are not persisted — always start gray — so no
+# auto-save hook for them.)
+rgb_brightness_slider.on_change("value_throttled", _save_current_prefs)
+rgb_contrast_slider.on_change("value_throttled", _save_current_prefs)
 # The help-panel toggle button already has `on_help_toggle` bound;
 # adding `_save_current_prefs` as a SECOND on_click means both fire
 # on every click — the first toggles the panel state, the second
@@ -11707,6 +13414,15 @@ def _on_reset_prefs():
         slitlet_select.value = "3"
         snap_box.active = [0]
         layers_box.active = [0, 1, 2]
+        # Image display back to defaults (gray colormap, not inverted,
+        # NaN not painted white).
+        state["image_cmap"] = "gray"
+        state["image_invert"] = False
+        state["image_nan_white"] = False
+        image_invert_checkbox.active = []
+        image_nan_white_checkbox.active = []
+        cmap_options_col.visible = False
+        _apply_cmap_appearance()
         # Overlay defaults — restore each layer's OWN default alpha /
         # stroke (`default_alpha` / `default_stroke` in the config), not
         # a uniform value. A blanket 0.20/1.0 would mangle most layers
@@ -11726,6 +13442,8 @@ def _on_reset_prefs():
                     extra = cfg.get("stroke_extra")
                     if extra is not None:
                         extra(ds)
+                # NB: colour + fill alpha are per item now (catalog list /
+                # Add-on dialog), not reset here.
             except (AttributeError, ValueError, TypeError):
                 pass
         try:
@@ -11747,7 +13465,7 @@ def _on_reset_prefs():
             pass
         # Help panel back on (matches the v1.3.3 default-on change).
         help_div.visible = True
-        tip_div.visible = True
+        tip_card.visible = True
         help_toggle_btn.label = "Hide help"
         help_panel.width = HELPPANEL_W
     finally:
@@ -11782,13 +13500,14 @@ _resubscribe_late_event_handlers(reset_prefs_btn)
 # actual loading. Loads are deferred to the next IO tick so the
 # document is fully wired before we trigger heavy work.
 def _parse_startup_args(argv: list[str]) -> dict:
-    """Tolerant parser for `--fits`, `--jpg`, `--wcs`, `--catalog`
-    (repeatable), and a default roll via `--v3pa` or `--apa` (degrees).
+    """Tolerant parser for `--fits`, `--jpg`, `--wcs`, `--catalog` (repeatable),
+    `--addon` (repeatable DS9 region/contour overlay files), and a default roll
+    via `--v3pa` or `--apa` (degrees).
 
     Unknown args are silently ignored — Bokeh prefixes some of its own
     flags before --args and we don't want to throw on them."""
     out: dict = {"fits": None, "jpg": None, "wcs": None, "catalogs": [],
-                 "v3pa": None, "apa": None}
+                 "addons": [], "v3pa": None, "apa": None}
     i = 0
     while i < len(argv):
         a = argv[i]
@@ -11797,6 +13516,9 @@ def _parse_startup_args(argv: list[str]) -> dict:
             i += 2
         elif a == "--catalog" and i + 1 < len(argv):
             out["catalogs"].append(argv[i + 1])
+            i += 2
+        elif a == "--addon" and i + 1 < len(argv):
+            out["addons"].append(argv[i + 1])
             i += 2
         else:
             i += 1
@@ -11867,6 +13589,21 @@ def _autoload_from_args() -> None:
             _deferred(_load_catalog_from_path, c, on_complete=cb)
         steps.append(step_cat)
 
+    # DS9 region / contour overlays via --addon (repeatable). Loaded after the
+    # image so they project onto its WCS; `_add_overlay_files` classifies each
+    # file (region vs contour, sky vs image) and auto-shows the layer.
+    if args["addons"]:
+        addon_paths = list(args["addons"])
+        def step_addons(cb, paths=addon_paths):
+            missing = [p for p in paths if not Path(p).exists()]
+            for p in missing:
+                _set_status(f"--addon path not found: {p}", "err")
+            present = [p for p in paths if Path(p).exists()]
+            if present:
+                _add_overlay_files(present)
+            cb()
+        steps.append(step_addons)
+
     # Default pointing roll from --v3pa / --apa. Applied LAST (after the
     # image + catalogs load) so the MSA overlay renders at the requested
     # angle. --v3pa wins if both are given. APA = V3 PA + V3IdlYAngle.
@@ -11915,8 +13652,11 @@ curdoc().add_next_tick_callback(_autoload_from_args)
 # fade-in block; setting the Bokeh Div's `text` swaps the DOM so the
 # animation restarts cleanly without us needing to hand-splice strings.
 def _advance_tip() -> None:
-    _tip_state["idx"] = (_tip_state["idx"] + 1) % len(_TIPS)
-    tip_div.text = _render_tip(_tip_state["idx"])
+    # Respect a short pause after the user manually skims with ‹ / ›.
+    if _tip_state.get("skip", 0) > 0:
+        _tip_state["skip"] -= 1
+        return
+    _show_tip(_tip_state["idx"] + 1)
 
 
 curdoc().add_periodic_callback(_advance_tip, 15_000)

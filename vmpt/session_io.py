@@ -81,6 +81,16 @@ class Session:
     # `open_shutters` / pointing then describe the one config.
     configs: list = field(default_factory=list)
     active_config: int = 0
+    # vMPT 1.8+: DS9 region (.reg) and contour (.con) display overlays.
+    # `region_paths` is a list of .reg file paths; `contour_specs` is a
+    # list of [path, coordsys] pairs (coordsys = "sky" | "image"). Both
+    # are vMPT-only extras stored in the sidecar workspace JSON, kept for
+    # backward compatibility. `overlays` is the richer authoritative list
+    # (vMPT 1.8.0+): dicts of {path, kind, coordsys, enabled} so each file's
+    # on/off state round-trips.
+    region_paths: list = field(default_factory=list)
+    contour_specs: list = field(default_factory=list)
+    overlays: list = field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -524,10 +534,40 @@ def _build_workspace_payload(session: Session) -> dict:
         "wcs_sidecar_path": session.wcs_sidecar_path,
         "catalog_path": session.catalog_path,
         "catalog_paths": [
-            {"path": str(e.get("path")), "enabled": bool(e.get("enabled", True))}
+            {"path": str(e.get("path")), "enabled": bool(e.get("enabled", True)),
+             # v1.8.0: per-catalog marker colour (omitted when unset so older
+             # readers just fall back to the palette).
+             **({"color": str(e["color"])} if e.get("color") else {})}
             for e in (session.catalog_paths or [])
             if e.get("path")
         ],
+        # v1.8.0 display overlays. Only emitted when present so bundles
+        # without DS9 overlays stay byte-identical to ≤1.7.x.
+        **(
+            {"region_paths": [str(p) for p in session.region_paths]}
+            if session.region_paths else {}
+        ),
+        **(
+            {"contour_specs": [
+                [str(spec[0]), str(spec[1]) if len(spec) > 1 else "sky"]
+                for spec in session.contour_specs
+            ]}
+            if session.contour_specs else {}
+        ),
+        # v1.8.0 authoritative overlay list (carries per-file enabled state).
+        **(
+            {"overlays": [
+                {"path": str(o.get("path")),
+                 "kind": str(o.get("kind", "region")),
+                 "coordsys": str(o.get("coordsys", "sky")),
+                 "enabled": bool(o.get("enabled", True)),
+                 # v1.8.0: per-file colour + fill alpha (Load Add-on dialog).
+                 **({"color": str(o["color"])} if o.get("color") else {}),
+                 "fill_alpha": float(o.get("fill_alpha", 0.0) or 0.0)}
+                for o in session.overlays if o.get("path")
+            ]}
+            if session.overlays else {}
+        ),
         # v1.4.0 multi-config. Only emitted when >1 config is present so
         # single-config bundles stay byte-identical to ≤1.3.x.
         **(
@@ -594,10 +634,13 @@ def _parse_catalog_paths(
     if isinstance(raw, list):
         for entry in raw:
             if isinstance(entry, dict) and entry.get("path"):
-                out.append({
+                rec = {
                     "path": str(entry["path"]),
                     "enabled": bool(entry.get("enabled", True)),
-                })
+                }
+                if entry.get("color"):        # v1.8.0 per-catalog colour
+                    rec["color"] = str(entry["color"])
+                out.append(rec)
             elif isinstance(entry, str) and entry:
                 out.append({"path": entry, "enabled": True})
     if not out and legacy_single:
@@ -711,6 +754,37 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
             })
     active_config = int(sidecar.get("active_config", 0) or 0)
 
+    # v1.8.0 display overlays (workspace sidecar). Absent for pre-1.8.0
+    # bundles → empty lists.
+    region_paths = [str(p) for p in (sidecar.get("region_paths") or [])
+                    if p]
+    contour_specs = []
+    for spec in (sidecar.get("contour_specs") or []):
+        if isinstance(spec, (list, tuple)) and spec:
+            cs = str(spec[1]) if len(spec) > 1 else "sky"
+            contour_specs.append([str(spec[0]), cs])
+        elif isinstance(spec, str) and spec:
+            contour_specs.append([spec, "sky"])
+    overlays = []
+    for o in (sidecar.get("overlays") or []):
+        if isinstance(o, dict) and o.get("path"):
+            entry = {
+                "path": str(o["path"]),
+                "kind": str(o.get("kind", "region")),
+                "coordsys": str(o.get("coordsys", "sky")),
+                "enabled": bool(o.get("enabled", True)),
+            }
+            # v1.8.0 per-file appearance (absent in older bundles → defaults
+            # applied downstream by the loader).
+            if o.get("color"):
+                entry["color"] = str(o["color"])
+            if o.get("fill_alpha") is not None:
+                try:
+                    entry["fill_alpha"] = float(o["fill_alpha"])
+                except (TypeError, ValueError):
+                    pass
+            overlays.append(entry)
+
     return Session(
         pointing_ra_deg=ra if ra is not None else 0.0,
         pointing_dec_deg=dec if dec is not None else 0.0,
@@ -729,6 +803,9 @@ def _import_mpt(data: dict, sidecar: dict) -> Session:
         name=data.get("name"),
         configs=configs,
         active_config=active_config,
+        region_paths=region_paths,
+        contour_specs=contour_specs,
+        overlays=overlays,
     )
 
 

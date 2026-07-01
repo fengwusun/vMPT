@@ -46,6 +46,15 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   touch (boundary rows adjacent, no operable row between) — bounded
   to the `±2`-row window where they crowd (not the whole band),
   matching APT MPT.
+- **Image display + overlays** (`v1.8.0`) — a **🎨 Image display**
+  dialog with FITS stretch / scaling (percentile · Min–Max · manual
+  vmin–vmax · zscale) + a gradient-swatch **colormap** picker and a
+  live **pixel histogram** (data range, [vmin, vmax], stretch curve);
+  RGB brightness / contrast; and a **pixel-brightness histogram**.
+  Large FITS open at a preview resolution and **auto-sharpen to native
+  pixels as you zoom in**. Load DS9 **region** (`.reg`) and **contour**
+  (`.ctr`/`.con`) files as sky-fixed **🧩 Add-on** layers — any mix at
+  once, per-file on/off, recolour + fill, or `--addon` from the shell.
 - **APT- / eMPT-ready export** — write a bundle (target-prefixed
   `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
   generated `README.md` of the import steps) that loads straight into

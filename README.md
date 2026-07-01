@@ -53,14 +53,27 @@ Interactive Bokeh app for planning JWST/NIRSpec MSA observations
   generated `README.md` of the import steps) that loads straight into
   APT, plus the files that feed the
   [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
+- **Image display + DS9 overlays** (`v1.8.0`) — a **🎨 Image display**
+  dialog re-stretches the background live (Linear / Sqrt / Asinh / Log;
+  Percentile / Min–Max / Manual vmin–vmax / ZScale; a matplotlib
+  **colormap** for grayscale FITS; optional **NaN → white**) with a
+  pixel-value **histogram** (log-count axis, draggable vmin / vmax
+  handles + stretch curve). **GB-scale FITS open instantly** at a
+  downsampled preview and **auto-sharpen to native pixels as you zoom**
+  (on-demand memmap level-of-detail). Draw DS9 **region** (`.reg`) and
+  **contour** (`.ctr` / `.con`) files as sky-fixed overlays (**🧩 Load
+  Add-on…** or `--addon`, repeatable) — each loaded file gets a sidebar
+  row with an on/off toggle and a **colour + fill-opacity popover**;
+  dense contours use a zoom-aware level-of-detail so pan / zoom stays
+  smooth.
 - **Sharing** — save the whole session as a JSON file, send it to a
   collaborator, and they pick up exactly where you left off.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
-![status](https://img.shields.io/badge/tests-248%20passed-brightgreen)
+![status](https://img.shields.io/badge/tests-355%20passed-brightgreen)
 ![python](https://img.shields.io/badge/python-3.11-blue)
 ![license](https://img.shields.io/badge/license-MIT-blue)
-![release](https://img.shields.io/badge/release-v1.7.1-blueviolet)
+![release](https://img.shields.io/badge/release-v1.8.0-blueviolet)
 ![pip](https://img.shields.io/badge/pip-jwst--vmpt-blue)
 
 📖 **Full documentation: <https://vmpt.readthedocs.io/>**
@@ -155,7 +168,7 @@ pip install -r requirements.txt
 ### Verify the install
 
 ```bash
-pytest tests/    # 238 passed, 5 skipped; ~20 seconds
+pytest tests/    # 355 passed, 4 skipped; ~50 seconds
 ```
 
 If everything's green, the tool is ready. If `pytest` complains about
@@ -199,11 +212,14 @@ The repo ships with two example fields you can load with one click.
    you know the app is busy.
 
    Tabs in the left sidebar:
-   - **Input** — image + catalog loading.
+   - **Input** — image, catalog, and DS9 add-on (region / contour)
+     loading; a *Loaded add-ons* list with a per-file colour + fill
+     popover.
    - **Pointing** — RA/Dec/V3 PA, disperser/filter, visibility window,
      and the MSA pointing optimizer.
-   - **Setting** — layers, slitlet size, snap-to-operable, overlay
-     appearance, undo/clear.
+   - **Setting** — slitlet size, snap-to-operable, a **🎨 Image display**
+     dialog (stretch / scale / colormap / histogram), a **🗂 Layers**
+     dialog (show/hide + per-layer alpha/stroke), undo/clear.
    - **MPT** — import/export APT plans + session save/load.
 
 3. **Aim the MSA** in the **Pointing** tab:

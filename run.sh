@@ -10,6 +10,8 @@
 #   --wcs PATH        WCS sidecar FITS for the JPG (must be paired with --jpg).
 #   --catalog PATH    Load this catalog file (CSV / ASCII / FITS).
 #                     May be repeated to layer multiple catalogs.
+#   --addon PATH      Load a DS9 region (.reg) / contour (.ctr/.con) overlay.
+#                     May be repeated.
 #   --v3pa DEG        Initial V3 PA in degrees (e.g. --v3pa 209).
 #   --apa DEG         Initial NIRSpec aperture PA (APA = V3 PA + V3IdlYAngle);
 #                     --v3pa wins if both are given.
@@ -41,6 +43,7 @@ FITS_PATH=""
 JPG_PATH=""
 WCS_PATH=""
 CATALOG_PATHS=()
+ADDON_PATHS=()
 V3PA=""
 APA=""
 
@@ -52,6 +55,7 @@ Usage: ./run.sh [--port N] [--fits PATH] [--jpg PATH --wcs PATH] [--catalog PATH
   --jpg PATH        JPG/PNG image; REQUIRES --wcs alongside.
   --wcs PATH        Sidecar FITS holding the WCS for --jpg.
   --catalog PATH    Catalog (CSV / ASCII / FITS). Can be repeated.
+  --addon PATH      DS9 region (.reg) / contour (.ctr/.con) overlay. Repeatable.
   --v3pa DEG        Initial V3 PA in degrees (e.g. --v3pa 209).
   --apa DEG         Initial NIRSpec aperture PA (APA = V3 PA + V3IdlYAngle).
                     --v3pa wins if both are given.
@@ -76,6 +80,9 @@ while [[ $# -gt 0 ]]; do
         --catalog)
             [[ $# -ge 2 ]] || { echo "run.sh: --catalog requires a path" >&2; exit 2; }
             CATALOG_PATHS+=("$2"); shift 2 ;;
+        --addon)
+            [[ $# -ge 2 ]] || { echo "run.sh: --addon requires a path" >&2; exit 2; }
+            ADDON_PATHS+=("$2"); shift 2 ;;
         --v3pa)
             [[ $# -ge 2 ]] || { echo "run.sh: --v3pa requires a number (deg)" >&2; exit 2; }
             V3PA="$2"; shift 2 ;;
@@ -119,6 +126,10 @@ RESOLVED_CATALOGS=()
 for c in "${CATALOG_PATHS[@]:-}"; do
     [[ -n "$c" ]] && RESOLVED_CATALOGS+=("$(abspath "$c")")
 done
+RESOLVED_ADDONS=()
+for a in "${ADDON_PATHS[@]:-}"; do
+    [[ -n "$a" ]] && RESOLVED_ADDONS+=("$(abspath "$a")")
+done
 
 # Build the `--args` list for Bokeh. Each --args value lands in
 # `sys.argv` inside vmpt/main.py at startup.
@@ -126,8 +137,14 @@ APP_ARGS=()
 [[ -n "$FITS_PATH" ]]   && APP_ARGS+=(--fits "$FITS_PATH")
 [[ -n "$JPG_PATH" ]]    && APP_ARGS+=(--jpg "$JPG_PATH")
 [[ -n "$WCS_PATH" ]]    && APP_ARGS+=(--wcs "$WCS_PATH")
+# `${arr[@]:-}` yields one empty-string element for an empty array (needed so
+# `set -u` doesn't trip on bash 3.2 / macOS) — so guard on non-empty to avoid
+# appending a spurious `--catalog ""` / `--addon ""`.
 for c in "${RESOLVED_CATALOGS[@]:-}"; do
-    APP_ARGS+=(--catalog "$c")
+    [[ -n "$c" ]] && APP_ARGS+=(--catalog "$c")
+done
+for a in "${RESOLVED_ADDONS[@]:-}"; do
+    [[ -n "$a" ]] && APP_ARGS+=(--addon "$a")
 done
 [[ -n "$V3PA" ]] && APP_ARGS+=(--v3pa "$V3PA")
 [[ -n "$APA" ]]  && APP_ARGS+=(--apa "$APA")
