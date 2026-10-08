@@ -1,0 +1,488 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>vMPT in 20 seconds</title>
+<meta name="description" content="A 15-second diagram of what vMPT does: point JWST/NIRSpec's micro-shutter mask at a field, let the optimizer find the best pointing, pick shutters by hand, and catch spectral overlaps before observing.">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0b0e21; color: #e8ecff; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif; }
+  body { display: grid; place-items: center; }
+  #stage { position: relative; aspect-ratio: 16 / 9; width: min(100vw, 177.78vh); }
+  canvas { display: block; width: 100%; height: 100%; }
+  #ui { position: absolute; right: 14px; bottom: 12px; display: flex; gap: 8px; align-items: center;
+    opacity: 0; transition: opacity .25s; }
+  #stage:hover #ui, #ui:focus-within, #ui.show { opacity: 1; }
+  #ui button { width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(126,232,199,.35);
+    background: rgba(19,32,60,.8); color: #e8ecff; cursor: pointer; font-size: 15px; line-height: 1; backdrop-filter: blur(6px); }
+  #ui button:hover { background: rgba(30,50,90,.9); }
+  #ui input[type=range] { width: 160px; accent-color: #7ee8c7; }
+  body.capture #stage { width: 100vw; height: 100vh; aspect-ratio: auto; }
+  body.capture #ui { display: none; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="c" width="1920" height="1080"></canvas>
+  <div id="ui" class="show">
+    <input id="scrub" type="range" min="0" max="20000" value="0" aria-label="scrub">
+    <button id="play" title="play / pause" aria-label="play or pause">❚❚</button>
+    <button id="replay" title="replay" aria-label="replay">↻</button>
+  </div>
+</div>
+
+<script>
+'use strict';
+/* ====================================================================================
+   vMPT in 15 seconds — scene-card diagram. Every frame is render(t); ?capture=1 freezes
+   the rAF loop and exposes window.__anim.seek(t) for the frame-exact MP4 renderer.
+   ==================================================================================== */
+const W = 1920, H = 1080, DURATION = 20.0;
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d', { alpha: false });
+
+// ───────── palette (the reference card's) + vMPT's semantic colours mapped onto it ─────────
+const PAL = {
+  bg: '#0b0e21', panel: '#151936', panelStroke: '#2c3158', dim: '#3a4165', dim2: '#2f3b66',
+  lab: '#9aa3c7', labSm: '#8b93b8', chipText: '#e8ecff', wordmark: '#c7cdee', wordmark2: '#6d76a3',
+  mint: '#7ee8c7', violet: '#a78bfa', gold: '#f5c042', blue: '#5d8bf7',
+  msa: '#5d8bf7', open: '#e14d4d', openFill: 'rgba(225,77,77,', stuck: '#c0392b', stuckFill: 'rgba(192,57,43,',
+  masked: 'rgba(244,121,59,', conflict: 'rgba(167,139,250,', target: '#f5c042', matched: '#7ee8c7',
+  spectrum: [[0, '#5d8bf7'], [0.28, '#39c6a2'], [0.55, '#f5c042'], [0.78, '#f4793b'], [1, '#e14d4d']],
+};
+const FONT = (w, s) => `${w} ${s}px -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif`;
+
+// ───────── helpers ─────────
+const clamp = (x, a = 0, b = 1) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, k) => a + (b - a) * k;
+const seg = (t, a, b) => clamp((t - a) / (b - a));
+const eio = k => k <= 0 ? 0 : k >= 1 ? 1 : (k < .5 ? 4 * k * k * k : 1 - Math.pow(-2 * k + 2, 3) / 2);
+const eo = k => k <= 0 ? 0 : k >= 1 ? 1 : 1 - Math.pow(1 - k, 3);
+const ei = k => k <= 0 ? 0 : k >= 1 ? 1 : k * k * k;
+const back = k => { if (k <= 0) return 0; if (k >= 1) return 1; const c = 1.70158, q = k - 1; return 1 + (c + 1) * q * q * q + c * q * q; };
+const elastic = k => k <= 0 ? 0 : k >= 1 ? 1 : Math.pow(2, -10 * k) * Math.sin((k * 10 - 0.75) * (2 * Math.PI / 3)) + 1;
+function mulberry32(a) { return function () { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; }
+
+let GA = 1;                                    // current scene alpha; every draw multiplies by it
+const setA = a => { ctx.globalAlpha = clamp(GA * a); };
+const rr = (x, y, w, h, r) => { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); };
+
+function spaced(text, x, y, o = {}) {           // uppercase letter-spaced label (manual spacing: works everywhere)
+  const { size = 26, weight = 600, color = PAL.lab, spacing = 0.16, align = 'center', alpha = 1 } = o;
+  ctx.save(); ctx.font = FONT(weight, size); ctx.fillStyle = color; setA(alpha); ctx.textBaseline = 'alphabetic'; ctx.textAlign = 'left';
+  const chars = [...text], widths = chars.map(c => ctx.measureText(c).width), sp = spacing * size;
+  const total = widths.reduce((a, b) => a + b, 0) + sp * (chars.length - 1);
+  let cx = align === 'center' ? x - total / 2 : align === 'right' ? x - total : x;
+  chars.forEach((c, i) => { ctx.fillText(c, cx, y); cx += widths[i] + sp; });
+  ctx.restore(); return total;
+}
+function plain(text, x, y, o = {}) {
+  const { size = 27, weight = 650, color = PAL.chipText, align = 'center', alpha = 1 } = o;
+  ctx.save(); ctx.font = FONT(weight, size); ctx.fillStyle = color; setA(alpha); ctx.textBaseline = 'alphabetic'; ctx.textAlign = align;
+  ctx.fillText(text, x, y); const w = ctx.measureText(text).width; ctx.restore(); return w;
+}
+function panel(x, y, w, h, alpha = 1) {
+  setA(alpha); ctx.fillStyle = PAL.panel; rr(x, y, w, h, 26); ctx.fill();
+  ctx.strokeStyle = PAL.panelStroke; ctx.lineWidth = 2.5; ctx.stroke();
+}
+// chip centred at (cx, cy); returns its box
+function chip(cx, cy, text, o = {}) {
+  const { dot = null, stroke = PAL.panelStroke, fill = PAL.panel, h = 76, size = 27, alpha = 1, w: fixedW = null, textColor = PAL.chipText, lw = 2 } = o;
+  if (alpha <= 0) return null;
+  ctx.save(); ctx.font = FONT(650, size); const tw = ctx.measureText(text).width; ctx.restore();
+  const w = fixedW || (tw + 72 + (dot ? 34 : 0));
+  const x = cx - w / 2, y = cy - h / 2;
+  setA(alpha); ctx.fillStyle = fill; rr(x, y, w, h, 18); ctx.fill(); ctx.strokeStyle = stroke; ctx.lineWidth = lw; ctx.stroke();
+  let tx = cx + (dot ? 17 : 0);
+  if (dot) { ctx.fillStyle = dot; ctx.beginPath(); ctx.arc(x + 42, cy, 9, 0, 6.283); ctx.fill(); tx = x + 74 + tw / 2; }
+  plain(text, tx, cy + size * 0.35, { size, color: textColor, alpha });
+  return { x, y, w, h };
+}
+function leader(x1, y1, x2, y2, alpha = 1, color = PAL.dim2) {   // dotted connector, gentle S-curve
+  if (alpha <= 0) return;
+  setA(alpha); ctx.strokeStyle = color; ctx.lineWidth = 3; ctx.setLineDash([3, 9]); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(x1, y1); ctx.bezierCurveTo(x1 - (x1 - x2) * 0.45, y1, x2 + (x1 - x2) * 0.45, y2, x2, y2); ctx.stroke();
+  ctx.setLineDash([]);
+}
+function glow(x, y, rx, ry, rot, color, alpha, inner = 0.35) { // soft elliptical glow (radial gradient)
+  ctx.save(); ctx.translate(x, y); ctx.rotate(rot); ctx.scale(1, ry / rx);
+  const g = ctx.createRadialGradient(0, 0, 0, 0, 0, rx);
+  g.addColorStop(0, color); g.addColorStop(inner, color); g.addColorStop(1, 'rgba(0,0,0,0)');
+  setA(alpha); ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0, 0, rx, 0, 6.283); ctx.fill(); ctx.restore();
+}
+function hexPath(cx, cy, r) { ctx.beginPath(); for (let k = 0; k < 6; k++) { const a = Math.PI / 180 * (90 + 60 * k); const px = cx + r * Math.cos(a), py = cy - r * Math.sin(a); k ? ctx.lineTo(px, py) : ctx.moveTo(px, py); } ctx.closePath(); }
+function spectrumGradient(x0, x1) { const g = ctx.createLinearGradient(x0, 0, x1, 0); for (const [o, c] of PAL.spectrum) g.addColorStop(o, c); return g; }
+
+// ───────── stylized sources (ported from the reference: spiral / edge-on / elliptical / JWST star) ─────────
+function drawGalaxy(g, alpha, k = 1) {   // k = scale
+  const { x, y, type, hue, rot } = g; const s = (g.scale || 1) * k;
+  const rad = rot * Math.PI / 180;
+  if (type === 'star') {
+    setA(alpha * 0.9); ctx.strokeStyle = '#dbe4ff'; ctx.lineWidth = 2.5 * s; ctx.lineCap = 'round';
+    for (let i = 0; i < 3; i++) { const a = Math.PI / 3 * i + Math.PI / 6; ctx.beginPath(); ctx.moveTo(x - 32 * s * Math.cos(a), y - 32 * s * Math.sin(a)); ctx.lineTo(x + 32 * s * Math.cos(a), y + 32 * s * Math.sin(a)); ctx.stroke(); }
+    glow(x, y, 14 * s, 14 * s, 0, 'rgba(238,242,255,0.9)', alpha, 0.2);
+    setA(alpha); ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(x, y, 4.5 * s, 0, 6.283); ctx.fill();
+  } else if (type === 'spiral') {
+    glow(x, y, 34 * s, 22 * s, rad, hue, alpha * 0.45, 0.15);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rad); setA(alpha); ctx.strokeStyle = hue; ctx.lineWidth = 3.5 * s; ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(-22 * s, 6 * s); ctx.bezierCurveTo(-16 * s, -16 * s, 6 * s, -18 * s, 14 * s, -7 * s); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(22 * s, -6 * s); ctx.bezierCurveTo(16 * s, 16 * s, -6 * s, 18 * s, -14 * s, 7 * s); ctx.stroke();
+    ctx.fillStyle = '#fff6e0'; ctx.beginPath(); ctx.arc(0, 0, 6 * s, 0, 6.283); ctx.fill(); ctx.restore();
+  } else if (type === 'edge') {
+    glow(x, y, 36 * s, 13 * s, rad, hue, alpha * 0.5, 0.15);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rad); setA(alpha); ctx.fillStyle = hue;
+    ctx.beginPath(); ctx.ellipse(0, 0, 28 * s, 5.5 * s, 0, 0, 6.283); ctx.fill();
+    ctx.fillStyle = '#fff6e0'; ctx.beginPath(); ctx.arc(0, 0, 6.5 * s, 0, 6.283); ctx.fill(); ctx.restore();
+  } else {
+    glow(x, y, 32 * s, 21 * s, rad, hue, alpha * 0.5, 0.15);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(rad); setA(alpha); ctx.fillStyle = hue;
+    ctx.beginPath(); ctx.ellipse(0, 0, 10 * s, 7 * s, 0, 0, 6.283); ctx.fill(); ctx.restore();
+  }
+}
+function ring(x, y, r, matched, alpha, k = 1) {
+  if (alpha <= 0) return;
+  setA(alpha); ctx.lineWidth = matched ? 3 : 2; ctx.strokeStyle = matched ? PAL.matched : PAL.target;
+  ctx.beginPath(); ctx.arc(x, y, r * k, 0, 6.283); ctx.stroke();
+  if (matched) { setA(alpha * 0.14); ctx.fillStyle = PAL.matched; ctx.fill(); }
+}
+function drawJWST(cx, cy, alpha, bob) {       // the reference's cartoon: 5-layer kite sunshield, 18-segment honeycomb, struts, secondary
+  if (alpha <= 0) return;
+  ctx.save(); ctx.translate(cx, cy + bob);
+  for (let L = 4; L >= 0; L--) {
+    const dy = 96 + L * 9;
+    setA(alpha); ctx.fillStyle = L % 2 ? '#262b52' : '#313768'; ctx.strokeStyle = L ? '#555f8f' : '#8b93b8'; ctx.lineWidth = 2; ctx.lineJoin = 'round';
+    ctx.beginPath(); ctx.moveTo(-210, dy); ctx.lineTo(0, dy - 58); ctx.lineTo(210, dy); ctx.lineTo(0, dy + 46); ctx.closePath(); ctx.fill(); ctx.stroke();
+  }
+  const MY = -34, hr = 13, hd = Math.sqrt(3) * hr * 1.04;
+  for (let q = -2; q <= 2; q++) for (let r = -2; r <= 2; r++) {
+    if (Math.max(Math.abs(q), Math.abs(r), Math.abs(q + r)) > 2 || (!q && !r)) continue;
+    const hx = hd * (q + r / 2), hy = MY + hd * 0.866 * r;
+    ctx.fillStyle = ((q + 2 * r) % 2 + 2) % 2 ? '#e8b84b' : '#f2c65e'; ctx.strokeStyle = '#161a38'; ctx.lineWidth = 1.6;
+    hexPath(hx, hy, hr - 0.9); ctx.fill(); ctx.stroke();
+  }
+  ctx.strokeStyle = '#4a5280'; ctx.lineWidth = 3; ctx.lineCap = 'round';
+  for (const a0 of [90, 210, 330]) { const a = Math.PI / 180 * a0; ctx.beginPath(); ctx.moveTo(64 * Math.cos(a), MY - 64 * Math.sin(a)); ctx.lineTo(0, MY); ctx.stroke(); }
+  ctx.fillStyle = '#1c2144'; ctx.strokeStyle = '#8b93b8'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, MY, 8, 0, 6.283); ctx.fill(); ctx.stroke();
+  ctx.restore();
+  plain('JWST', cx, cy + 222, { alpha });
+}
+function drawCursor(x, y, alpha, clickK) {
+  if (alpha <= 0) return;
+  ctx.save(); ctx.translate(x, y);
+  if (clickK > 0 && clickK < 1) { setA(alpha * (1 - clickK)); ctx.strokeStyle = PAL.mint; ctx.lineWidth = 3; ctx.beginPath(); ctx.arc(0, 0, 10 + 46 * eo(clickK), 0, 6.283); ctx.stroke(); }
+  const press = clickK > 0 && clickK < 0.25 ? 0.9 : 1; ctx.scale(press, press); setA(alpha);
+  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, 30); ctx.lineTo(7.5, 23); ctx.lineTo(13, 34.5); ctx.lineTo(18.5, 32); ctx.lineTo(13, 21); ctx.lineTo(22, 21); ctx.closePath();
+  ctx.fillStyle = '#ffffff'; ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 2.2; ctx.lineJoin = 'round'; ctx.fill(); ctx.stroke(); ctx.restore();
+}
+
+// ───────── static scaffold ─────────
+const RS = mulberry32(7);
+const STARS = []; for (let i = 0; i < 110; i++) STARS.push({ x: RS() * W, y: RS() * H, r: 0.8 + RS() * 1.7, mint: i % 5 === 0, ph: RS() * 6.28, f: 0.25 + RS() * 0.5 });
+const NOISE = (() => { const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d'); const img = x.createImageData(256, 256); const r = mulberry32(3);
+  for (let i = 0; i < img.data.length; i += 4) { const g = 128 + Math.round((r() * 2 - 1) * 70); img.data[i] = img.data[i + 1] = img.data[i + 2] = g; img.data[i + 3] = 255; } x.putImageData(img, 0, 0); return ctx.createPattern(c, 'repeat'); })();
+
+// ───────── SCENE 1: the field, the mask, the optimizer ─────────
+const P1 = { x: 590, y: 170, w: 740, h: 800 };
+const MSA1 = (() => {
+  const pad = 30, gap = 38, cols = 18, rows = 14;
+  const qw = (P1.w - 2 * pad - gap) / 2, qh = (P1.h - 2 * pad - gap) / 2;
+  const quads = []; for (let qy = 0; qy < 2; qy++) for (let qx = 0; qx < 2; qx++) quads.push({ x: P1.x + pad + qx * (qw + gap), y: P1.y + pad + qy * (qh + gap), w: qw, h: qh });
+  const rnd = mulberry32(11);
+  const cells = quads.map(() => { const a = new Uint8Array(cols * rows); for (let i = 0; i < a.length; i++) if (rnd() < 0.08) a[i] = 1;
+    const fr = 2 + Math.floor(rnd() * (rows - 4)); for (let c = 0; c < cols; c++) a[fr * cols + c] = 1;           // one failed row, like the real MSA
+    for (let k = 0; k < 2; k++) a[Math.floor(rnd() * a.length)] = 2; return a; });                                // two stuck-open shutters
+  return { quads, cols, rows, cw: qw / cols, ch: qh / rows, cells, cx: P1.x + P1.w / 2, cy: P1.y + P1.h / 2 };
+})();
+const GAL1 = (() => { const rnd = mulberry32(99), out = [], types = ['spiral', 'ellip', 'edge', 'star', 'spiral', 'ellip', 'edge'], hues = ['#f2d9a4', '#e8c9f0', '#bcd3f7', '#f0b9a6'];
+  let tries = 0; while (out.length < 17 && tries++ < 4000) { const x = P1.x + 44 + rnd() * (P1.w - 88), y = P1.y + 44 + rnd() * (P1.h - 88);
+    if (out.some(g => Math.hypot(g.x - x, g.y - y) < 92)) continue;
+    out.push({ x, y, type: types[out.length % types.length], hue: hues[out.length % 4], rot: rnd() * 70 - 35, delay: rnd(), scale: 0.72 + rnd() * 0.4 }); }
+  return out; })();
+// mask pose = {dx, dy (px), roll (rad)} about the panel centre. Inverse-map a point into the mask frame:
+const toMask = (px, py, P) => { const c = Math.cos(-P.roll), s = Math.sin(-P.roll), a = px - MSA1.cx - P.dx, b = py - MSA1.cy - P.dy; return { u: MSA1.cx + a * c - b * s, v: MSA1.cy + a * s + b * c }; };
+function cellAt(px, py, P) {
+  const m = toMask(px, py, P);
+  for (let qi = 0; qi < 4; qi++) { const q = MSA1.quads[qi]; if (m.u < q.x || m.u >= q.x + q.w || m.v < q.y || m.v >= q.y + q.h) continue;
+    const col = Math.floor((m.u - q.x) / MSA1.cw), row = Math.floor((m.v - q.y) / MSA1.ch);
+    const ok = row >= 1 && row <= MSA1.rows - 2 && MSA1.cells[qi][row * MSA1.cols + col] === 0;
+    return { qi, col, row, ok }; }
+  return null;
+}
+const OPT = (() => {                      // a real (tiny) search: best of 40 fine poses, 3 coarser ones shown first
+  const rnd = mulberry32(2026);
+  const score = P => GAL1.filter(g => { const c = cellAt(g.x, g.y, P); return c && c.ok; }).length;
+  let best = null;
+  for (let i = 0; i < 40; i++) { const P = { dx: (rnd() * 2 - 1) * 26, dy: (rnd() * 2 - 1) * 26, roll: (rnd() * 2 - 1) * 6 * Math.PI / 180 }; const n = score(P); if (!best || n > best.n) best = { P, n }; }
+  const poses = []; let tries = 0;
+  while (poses.length < 3 && tries++ < 400) { const P = { dx: (rnd() * 2 - 1) * 70, dy: (rnd() * 2 - 1) * 60, roll: (rnd() * 2 - 1) * 14 * Math.PI / 180 }; const n = score(P); if (n < best.n || tries > 300) poses.push({ P, n }); }
+  poses.sort((a, b) => a.n - b.n);
+  poses.push(best);
+  const matched = GAL1.map((g, i) => ({ g, i, c: cellAt(g.x, g.y, best.P) })).filter(o => o.c && o.c.ok);
+  return { poses, best, matched };
+})();
+const T1 = { in: [0, 0.6], panel: [0.2, 0.8], jwst: [0.3, 0.9], sight: [0.9, 1.3], maskIn: [1.4, 2.3], chip: 2.4,
+  search0: 3.0, step: 1.15, lock: [6.45, 7.2], opens: [7.2, 8.2], out: [9.1, 9.7] };   // lock[0] = search0 + 3·step
+function pose1(t) {
+  const p = OPT.poses; const n = p.length;                         // 4 poses, last = best
+  if (t < T1.search0) return { P: p[0].P, hold: 0, last: 0 };
+  const k = Math.floor((t - T1.search0) / T1.step);
+  if (k >= n - 1) return { P: p[n - 1].P, hold: n - 1, last: n - 2 };   // the last hold already sits on the best pose; the lock is marked by the title, the ✓ and a scale pulse
+  const local = (t - T1.search0 - k * T1.step) / T1.step, mv = 0.42;
+  if (local < mv) return { P: lerpPose(p[k].P, p[k + 1].P, eio(local / mv)), hold: -1, last: k };
+  return { P: p[k + 1].P, hold: k + 1 };
+}
+const lerpPose = (A, B, k) => ({ dx: lerp(A.dx, B.dx, k), dy: lerp(A.dy, B.dy, k), roll: lerp(A.roll, B.roll, k) });
+
+function scene1(t, o) {
+  GA = o;
+  const locked = t >= T1.lock[0];
+  // title
+  spaced(locked ? 'BEST POINTING FOUND' : t >= T1.search0 - 0.25 ? 'TRY POINTINGS  ·  COUNT TARGETS' : 'POINT THE MICRO-SHUTTER MASK', P1.x + P1.w / 2, P1.y - 26, { alpha: eo(seg(t, 0.15, 0.7)) });
+  // panel + faint stars inside
+  panel(P1.x, P1.y, P1.w, P1.h, eo(seg(t, ...T1.panel)));
+  const rp = mulberry32(21); setA(eo(seg(t, ...T1.panel)) * 0.9); ctx.fillStyle = '#39406b';
+  for (let i = 0; i < 46; i++) { const x = P1.x + 24 + rp() * (P1.w - 48), y = P1.y + 24 + rp() * (P1.h - 48), r = 0.7 + rp() * 1.3; ctx.beginPath(); ctx.arc(x, y, r, 0, 6.283); ctx.fill(); }
+  // JWST + sight line
+  drawJWST(285, 520, eo(seg(t, ...T1.jwst)), 5 * Math.sin(t * 1.4));
+  setA(0.9 * eo(seg(t, ...T1.sight))); ctx.strokeStyle = '#4a5280'; ctx.lineWidth = 3; ctx.setLineDash([2, 10]); ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(474, 476); ctx.lineTo(P1.x - 10, 540); ctx.stroke(); ctx.setLineDash([]);
+  // galaxies
+  for (const g of GAL1) { const a = eo(seg(t, 0.4 + g.delay * 0.9, 0.9 + g.delay * 0.9)); if (a > 0) drawGalaxy(g, a, 0.85 + 0.15 * a); }
+  // the mask (clipped to the panel), under the current pose
+  const { P, hold, last } = pose1(t);
+  const mA = eo(seg(t, ...T1.maskIn)); const mScale = (1 + 0.08 * (1 - mA)) * (1 + 0.035 * Math.sin(Math.PI * seg(t, T1.lock[0], T1.lock[0] + 0.6)));
+  if (mA > 0) {
+    ctx.save(); rr(P1.x, P1.y, P1.w, P1.h, 26); ctx.clip();
+    ctx.translate(MSA1.cx + P.dx, MSA1.cy + P.dy); ctx.rotate(P.roll); ctx.scale(mScale, mScale); ctx.translate(-MSA1.cx, -MSA1.cy);
+    const { quads, cols, rows, cw, ch, cells } = MSA1;
+    quads.forEach((q, qi) => {
+      setA(mA * 0.10); ctx.fillStyle = PAL.msa; ctx.fillRect(q.x, q.y, q.w, q.h);
+      setA(mA * 0.28); ctx.strokeStyle = PAL.msa; ctx.lineWidth = 1; ctx.beginPath();
+      for (let c = 1; c < cols; c++) { ctx.moveTo(q.x + c * cw, q.y); ctx.lineTo(q.x + c * cw, q.y + q.h); }
+      for (let r = 1; r < rows; r++) { ctx.moveTo(q.x, q.y + r * ch); ctx.lineTo(q.x + q.w, q.y + r * ch); }
+      ctx.stroke();
+      for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) { const st = cells[qi][r * cols + c]; if (!st) continue;
+        if (st === 1) { setA(mA * 0.85); ctx.fillStyle = PAL.bg; ctx.fillRect(q.x + c * cw + 0.5, q.y + r * ch + 0.5, cw - 1, ch - 1); }
+        else { setA(mA); ctx.fillStyle = PAL.stuckFill + '0.7)'; ctx.fillRect(q.x + c * cw + 1, q.y + r * ch + 1, cw - 2, ch - 2); ctx.strokeStyle = PAL.open; ctx.lineWidth = 1.5; ctx.strokeRect(q.x + c * cw + 1, q.y + r * ch + 1, cw - 2, ch - 2); } }
+      setA(mA * 0.95); ctx.strokeStyle = PAL.msa; ctx.lineWidth = 2; ctx.strokeRect(q.x, q.y, q.w, q.h);
+    });
+    // slitlets open on the matched targets once locked
+    OPT.matched.forEach((m, i) => { const t0 = T1.opens[0] + i / OPT.matched.length * (T1.opens[1] - T1.opens[0]) * 0.8; const k = back(seg(t, t0, t0 + 0.3)); if (k <= 0) return;
+      const q = quads[m.c.qi], x = q.x + m.c.col * cw, y = q.y + (m.c.row - 1) * ch, w = cw, h = 3 * ch, sc = 1 + 0.5 * (1 - k);
+      setA(mA * clamp(k * 1.3)); ctx.fillStyle = PAL.openFill + '0.55)'; ctx.fillRect(x + w / 2 - w * sc / 2, y + h / 2 - h * sc / 2, w * sc, h * sc);
+      ctx.strokeStyle = PAL.open; ctx.lineWidth = 2; ctx.strokeRect(x + w / 2 - w * sc / 2, y + h / 2 - h * sc / 2, w * sc, h * sc); });
+    // pointing cross
+    const crossA = 1 - eo(seg(t, T1.lock[1] + 0.3, T1.lock[1] + 0.8));
+    setA(mA * crossA); ctx.strokeStyle = PAL.mint; ctx.lineWidth = 3; ctx.lineCap = 'round'; ctx.beginPath();
+    ctx.moveTo(MSA1.cx - 14, MSA1.cy); ctx.lineTo(MSA1.cx + 14, MSA1.cy); ctx.moveTo(MSA1.cx, MSA1.cy - 14); ctx.lineTo(MSA1.cx, MSA1.cy + 14); ctx.stroke();
+    ctx.restore();
+  }
+  // target rings (gold; mint when matched under the held pose / after lock)
+  const held = hold >= 0 ? OPT.poses[hold].P : null;
+  for (const g of GAL1) { const a = eo(seg(t, 0.9 + g.delay * 0.6, 1.3 + g.delay * 0.6)); if (a <= 0) continue;
+    let matched = false; if (locked) matched = OPT.matched.some(m => m.g === g); else if (held) { const c = cellAt(g.x, g.y, held); matched = !!(c && c.ok); }
+    ring(g.x, g.y, 30, matched, a, back(a)); }
+  // optimizer chip + counter + connector
+  const cA = eo(seg(t, T1.chip, T1.chip + 0.4));
+  if (cA > 0) {
+    const AX = 1625, AY = 300;
+    setA(cA); ctx.fillStyle = '#13203c'; rr(AX - 150, AY - 70, 300, 140, 24); ctx.fill(); ctx.strokeStyle = PAL.mint; ctx.lineWidth = 3; ctx.stroke();
+    ctx.save(); ctx.translate(AX - 92, AY); ctx.fillStyle = PAL.mint; ctx.beginPath(); ctx.moveTo(0, -26); ctx.lineTo(7, -7); ctx.lineTo(26, 0); ctx.lineTo(7, 7); ctx.lineTo(0, 26); ctx.lineTo(-7, 7); ctx.lineTo(-26, 0); ctx.lineTo(-7, -7); ctx.closePath(); ctx.fill(); ctx.restore();
+    plain('OPTIMIZER', AX + 22, AY - 6, { alpha: cA });
+    for (let i = 0; i < 3; i++) { const pulse = locked ? 1 : 0.35 + 0.65 * (0.5 + 0.5 * Math.sin(6 * t - i * 1.1)); setA(cA * pulse); ctx.fillStyle = '#58c9a6'; ctx.beginPath(); ctx.arc(AX - 16 + i * 38, AY + 30, 6.5, 0, 6.283); ctx.fill(); }
+    leader(AX - 150, AY, P1.x + P1.w + 12, MSA1.cy + P.dy * 0.4, cA);
+    // counter chip: live score while searching, locked count afterwards
+    const settled = locked || hold >= 0;
+    const n = locked ? OPT.best.n : (hold >= 0 ? OPT.poses[hold].n : OPT.poses[last].n);
+    const cntA = eo(seg(t, T1.chip + 0.2, T1.chip + 0.6));
+    chip(AX, AY + 148, `× ${n} TARGETS${locked ? '  ✓' : ''}`, { alpha: cntA, w: 300, stroke: locked ? PAL.mint : PAL.panelStroke, fill: locked ? '#13203c' : PAL.panel,
+         textColor: settled ? PAL.chipText : PAL.labSm });
+  }
+  // footnote
+  spaced('NIRSPEC MSA  ·  4 QUADRANTS  ·  ~250 000 MICRO-SHUTTERS', P1.x + P1.w / 2, P1.y + P1.h + 56, { size: 20, weight: 500, color: PAL.labSm, spacing: 0.08, alpha: eo(seg(t, 1.6, 2.2)) });
+}
+
+// ───────── SCENE 2+3: zoomed grid — pick by hand, then spectra & overlaps ─────────
+const P2 = { x: 300, y: 200, w: 1120, h: 640 };
+const G2 = (() => {
+  const cols = 30, rows = 12, cw = P2.w / cols, ch = P2.h / rows;
+  const rnd = mulberry32(5); const cells = new Uint8Array(cols * rows); for (let i = 0; i < cells.length; i++) if (rnd() < 0.09) cells[i] = 1;
+  const A = { col: 7, row: 4 }, B = { col: 20, row: 3 }, H1 = { col: 13, row: 7 }, H2 = { col: 22, row: 6 }, STUCK = { col: 4, row: 9 };
+  for (const s of [A, B, H1, H2]) for (let r = s.row - 1; r <= s.row + 1; r++) cells[r * cols + s.col] = 0;    // slitlet cells must be operable
+  cells[STUCK.row * cols + STUCK.col] = 2;
+  const cc = (c) => ({ x: P2.x + (c.col + 0.5) * cw, y: P2.y + (c.row + 0.5) * ch });
+  const bgRnd = mulberry32(31); const bgStars = []; for (let i = 0; i < 34; i++) bgStars.push({ x: P2.x + 20 + bgRnd() * (P2.w - 40), y: P2.y + 20 + bgRnd() * (P2.h - 40), r: 0.9 + bgRnd() * 1.6 });
+  const bgGal = [{ col: 2.4, row: 1.6, type: 'edge', hue: '#bcd3f7', rot: 20, scale: 0.55 }, { col: 10.5, row: 1.4, type: 'ellip', hue: '#e8c9f0', rot: -10, scale: 0.6 },
+    { col: 16.3, row: 10.3, type: 'spiral', hue: '#f2d9a4', rot: 30, scale: 0.6 }, { col: 27.2, row: 9.6, type: 'edge', hue: '#f0b9a6', rot: -40, scale: 0.55 }, { col: 25.6, row: 1.2, type: 'star', hue: '#fff', rot: 0, scale: 0.5 }]
+    .map(g => ({ ...g, x: P2.x + g.col * cw, y: P2.y + g.row * ch }));
+  const targets = [{ ...cc(A), type: 'spiral', hue: '#f2d9a4', rot: -20, scale: 0.9, slit: A, kind: 'opt' }, { ...cc(B), type: 'ellip', hue: '#e8c9f0', rot: 15, scale: 0.85, slit: B, kind: 'opt' },
+    { ...cc(H1), type: 'edge', hue: '#bcd3f7', rot: 28, scale: 0.9, slit: H1, kind: 'hand' }];
+  return { cols, rows, cw, ch, cells, A, B, H1, H2, STUCK, cc, bgStars, bgGal, targets, HALF: 9 };   // HALF = spectrum half-length in cells (both directions)
+})();
+const T2 = { in: [9.3, 9.9], cur1: [9.9, 10.8], click1: 10.85, chipClick: 10.05, chipSlit: 11.2, cur2: [11.6, 12.4], click2: 12.45, curOut: [12.65, 13.1],
+  spectra: 13.5, grow: [13.6, 15.0], chipMask: 14.5, chipStuck: 14.1, conflict: 15.6, chipConf: 15.9, out: [18.1, 18.6] };
+
+function scene2(t, o) {
+  GA = o; const { cols, rows, cw, ch, cells, A, B, H1, H2, STUCK, cc, HALF } = G2;
+  const spectraOn = t >= T2.spectra;
+  spaced(t >= T2.chipConf ? 'vMPT FLAGS THE CONFLICT' : spectraOn ? 'SPECTRA SPREAD SIDEWAYS' : 'ZOOM IN  ·  PICK BY HAND', P2.x + P2.w / 2, P2.y - 26, { alpha: eo(seg(t, 9.45, 10.0)) });
+  panel(P2.x, P2.y, P2.w, P2.h, 1);
+  ctx.save(); rr(P2.x, P2.y, P2.w, P2.h, 26); ctx.clip();
+  // sky behind the grid
+  setA(0.95); ctx.fillStyle = '#5a6391'; for (const s of G2.bgStars) { ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.283); ctx.fill(); }
+  for (const g of G2.bgGal) drawGalaxy(g, 0.75);
+  for (const g of G2.targets) drawGalaxy(g, 1);
+  // open slitlets so far
+  const opens = [{ ...A, k: 1 }, { ...B, k: 1 }];
+  const k1 = back(seg(t, T2.click1, T2.click1 + 0.32)); if (k1 > 0) opens.push({ ...H1, k: k1 });
+  const k2 = back(seg(t, T2.click2, T2.click2 + 0.32)); if (k2 > 0) opens.push({ ...H2, k: k2 });
+  const openSet = new Set(); for (const s of opens) for (let r = s.row - 1; r <= s.row + 1; r++) openSet.add(r * cols + s.col);
+  // grid + failed + stuck
+  setA(0.10); ctx.fillStyle = PAL.msa; ctx.fillRect(P2.x, P2.y, P2.w, P2.h);
+  setA(0.30); ctx.strokeStyle = PAL.msa; ctx.lineWidth = 1; ctx.beginPath();
+  for (let c = 1; c < cols; c++) { ctx.moveTo(P2.x + c * cw, P2.y); ctx.lineTo(P2.x + c * cw, P2.y + P2.h); }
+  for (let r = 1; r < rows; r++) { ctx.moveTo(P2.x, P2.y + r * ch); ctx.lineTo(P2.x + P2.w, P2.y + r * ch); }
+  ctx.stroke();
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) if (cells[r * cols + c] === 1) { setA(0.85); ctx.fillStyle = PAL.bg; ctx.fillRect(P2.x + c * cw + 1, P2.y + r * ch + 1, cw - 2, ch - 2); }
+  // spectra (two-sided), masked cells, conflict window
+  const grow = eo(seg(t, ...T2.grow));
+  if (spectraOn) {
+    const bands = opens.map(s => ({ ...s, kind: 'user' })); bands.push({ ...STUCK, kind: 'stuck' });
+    const hits = new Map();
+    for (const bnd of bands) {
+      const half = HALF * grow * (bnd.kind === 'stuck' ? 0.8 : 1), rowsSpan = bnd.kind === 'stuck' ? 1 : 2;
+      const c0 = Math.ceil(bnd.col - half), c1 = Math.floor(bnd.col + half);
+      for (let r = bnd.row - rowsSpan; r <= bnd.row + rowsSpan; r++) { if (r < 0 || r >= rows) continue;
+        for (let c = Math.max(0, c0); c <= Math.min(cols - 1, c1); c++) { const i = r * cols + c; if (cells[i] !== 0 || openSet.has(i)) continue;
+          const h = hits.get(i) || { user: 0, stuck: 0 }; h[bnd.kind]++; hits.set(i, h); } }
+    }
+    for (const [i, h] of hits) { const r = Math.floor(i / cols), c = i % cols; const n = h.user + h.stuck;
+      setA(clamp(0.19 * n, 0, 0.62)); ctx.fillStyle = h.user ? PAL.masked + '1)' : 'rgba(217,98,114,1)'; ctx.fillRect(P2.x + c * cw + 1, P2.y + r * ch + 1, cw - 2, ch - 2); }
+    // conflict: B (rows 2–4) and the hand-picked H2 (rows 5–7) touch with no buffer row; their spectra overlap over these columns
+    const cf = eo(seg(t, T2.conflict, T2.conflict + 0.5));
+    if (cf > 0) {
+      const pulse = 0.5 + 0.5 * Math.sin((t - T2.conflict) * 2 * Math.PI * 1.2 - Math.PI / 2);
+      const cA = Math.max(B.col, H2.col) - HALF, cB = Math.min(B.col, H2.col) + HALF;
+      for (let r = B.row; r <= H2.row; r++) for (let c = Math.max(0, cA); c <= Math.min(cols - 1, cB); c++) { const i = r * cols + c; if (cells[i] !== 0 || openSet.has(i)) continue;
+        setA(cf * (0.5 + 0.35 * pulse)); ctx.fillStyle = PAL.conflict + '1)'; ctx.fillRect(P2.x + c * cw + 1, P2.y + r * ch + 1, cw - 2, ch - 2); }
+      for (const s of [B, H2]) { const x = P2.x + s.col * cw, y = P2.y + (s.row - 1) * ch;
+        for (const [wpx, fa] of [[12 + 8 * pulse, 0.14], [6 + 3 * pulse, 0.3], [2.5, 1]]) { setA(cf * (0.6 + 0.4 * pulse) * fa); ctx.strokeStyle = PAL.violet; ctx.lineWidth = wpx; ctx.strokeRect(x - 5, y - 5, cw + 10, 3 * ch + 10); } }
+    }
+    // the rainbow bands themselves (blue end → red end, straddling the shutter)
+    for (const bnd of bands) {
+      const half = HALF * grow * (bnd.kind === 'stuck' ? 0.8 : 1); if (half <= 0) continue;
+      const x0 = P2.x + (bnd.col + 0.5 - half) * cw, x1 = P2.x + (bnd.col + 0.5 + half) * cw;
+      const y0 = P2.y + (bnd.row - (bnd.kind === 'stuck' ? 0 : 1)) * ch + 4, hgt = (bnd.kind === 'stuck' ? 1 : 3) * ch - 8;
+      if (bnd.kind === 'stuck') { setA(0.34); ctx.fillStyle = 'rgba(217,98,114,1)'; } else { setA(0.40); ctx.fillStyle = spectrumGradient(x0, x1); }
+      rr(x0, y0, x1 - x0, hgt, 10); ctx.fill();
+    }
+  }
+  // stuck-open cell
+  { const x = P2.x + STUCK.col * cw, y = P2.y + STUCK.row * ch; setA(1); ctx.fillStyle = PAL.stuckFill + '0.7)'; ctx.fillRect(x + 2, y + 2, cw - 4, ch - 4); ctx.strokeStyle = PAL.open; ctx.lineWidth = 2; ctx.strokeRect(x + 2, y + 2, cw - 4, ch - 4); }
+  // open slitlets
+  for (const s of opens) { const x = P2.x + s.col * cw, y = P2.y + (s.row - 1) * ch, w = cw, h = 3 * ch, sc = 1 + 0.35 * (1 - s.k);
+    setA(clamp(s.k * 1.3)); ctx.fillStyle = PAL.openFill + '0.5)'; ctx.fillRect(x + w / 2 - w * sc / 2, y + h / 2 - h * sc / 2, w * sc, h * sc);
+    ctx.strokeStyle = PAL.open; ctx.lineWidth = 2.5; ctx.strokeRect(x + w / 2 - w * sc / 2, y + h / 2 - h * sc / 2, w * sc, h * sc);
+    setA(clamp(s.k) * 0.35); ctx.fillStyle = '#ffd6d6'; ctx.fillRect(P2.x + s.col * cw + 4, P2.y + s.row * ch + 4, cw - 8, ch - 8); }
+  ctx.restore();
+  // target rings
+  for (const g of G2.targets) ring(g.x, g.y, 42, g.kind === 'opt' || k1 > 0, 1);
+  // chips (right column) + leaders
+  const cx = 1690;
+  const a1 = Math.min(eo(seg(t, T2.chipClick, T2.chipClick + 0.4)), 1 - eo(seg(t, T2.spectra - 0.3, T2.spectra)));
+  const a2 = Math.min(eo(seg(t, T2.chipSlit, T2.chipSlit + 0.4)), 1 - eo(seg(t, T2.spectra - 0.3, T2.spectra)));
+  if (a1 > 0) chip(cx, 330, 'CLICK A TARGET', { dot: PAL.mint, alpha: a1, w: 330 });
+  if (a2 > 0) { const b = chip(cx, 450, '3-SHUTTER SLITLET', { dot: PAL.open, alpha: a2, w: 330 }); const p = cc(H1); leader(b.x, 450, P2.x + (H1.col + 1) * cw + 6, p.y, a2); }
+  const a3 = eo(seg(t, T2.chipStuck, T2.chipStuck + 0.4)), a4 = eo(seg(t, T2.chipMask, T2.chipMask + 0.4)), a5 = eo(seg(t, T2.chipConf, T2.chipConf + 0.4));
+  if (a4 > 0) chip(cx, 330, 'OVERLAP  →  MASKED', { dot: '#f4793b', alpha: a4, w: 330 });
+  if (a5 > 0) { const b = chip(cx, 450, 'CONFLICT', { dot: PAL.violet, alpha: a5, w: 330, stroke: PAL.violet, fill: '#1a1a3c' }); leader(b.x, 450, P2.x + (H2.col + 1) * cw + 8, P2.y + (B.row + 1.5) * ch, a5, '#5b4e8a'); }
+  if (a3 > 0) { const b = chip(cx, 570, 'STUCK-OPEN SHUTTER', { dot: PAL.open, alpha: a3, w: 330 }); const p = cc(STUCK); leader(b.x, 570, P2.x + (STUCK.col + 1) * cw + 6, p.y, a3); }
+  // cursor
+  const p1 = cc(H1), p2 = cc(H2);
+  let cur = null;
+  if (t >= T2.cur1[0] && t < T2.cur1[1]) { const k = eio(seg(t, ...T2.cur1)); cur = { x: lerp(W + 40, p1.x, k), y: lerp(900, p1.y, k) - Math.sin(k * Math.PI) * 70, a: eo(seg(t, T2.cur1[0], T2.cur1[0] + 0.3)), c: 0 }; }
+  else if (t >= T2.cur1[1] && t < T2.cur2[0]) cur = { x: p1.x, y: p1.y, a: 1, c: seg(t, T2.click1, T2.click1 + 0.45) };
+  else if (t >= T2.cur2[0] && t < T2.cur2[1]) { const k = eio(seg(t, ...T2.cur2)); cur = { x: lerp(p1.x, p2.x, k), y: lerp(p1.y, p2.y, k) - Math.sin(k * Math.PI) * 50, a: 1, c: 0 }; }
+  else if (t >= T2.cur2[1] && t < T2.curOut[0]) cur = { x: p2.x, y: p2.y, a: 1, c: seg(t, T2.click2, T2.click2 + 0.45) };
+  else if (t >= T2.curOut[0] && t < T2.curOut[1]) { const k = ei(seg(t, ...T2.curOut)); cur = { x: lerp(p2.x, W + 60, k), y: lerp(p2.y, 300, k), a: 1 - k, c: 0 }; }
+  if (cur) drawCursor(cur.x, cur.y, cur.a, cur.c);
+}
+
+// ───────── outro ─────────
+function drawLogo(x, y, size, alpha) {
+  const k = size / 64; ctx.save(); setA(alpha); ctx.translate(x, y); ctx.scale(k, k);
+  ctx.fillStyle = '#0b1020'; rr(0, 0, 64, 64, 10); ctx.fill();
+  ctx.strokeStyle = '#3a7eff'; ctx.lineWidth = 2.5; for (const [X, Y] of [[6, 6], [34, 6], [6, 34], [34, 34]]) { rr(X, Y, 24, 24, 2); ctx.stroke(); }
+  ctx.fillStyle = '#ff4d4d'; for (const [X, Y] of [[12, 11], [12, 14], [12, 17], [43, 22], [43, 25], [43, 28], [20, 46], [20, 49], [20, 52], [48, 40], [48, 43], [48, 46]]) ctx.fillRect(X, Y, 3, 3);
+  ctx.strokeStyle = '#7fff00'; ctx.lineWidth = 3.5; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(32, 26); ctx.lineTo(32, 38); ctx.moveTo(26, 32); ctx.lineTo(38, 32); ctx.stroke(); ctx.restore();
+}
+const T4 = { start: 18.45 };
+function outro(t) {
+  GA = 1;
+  const a1 = eo(seg(t, T4.start, T4.start + 0.5)), a2 = eo(seg(t, T4.start + 0.25, T4.start + 0.75)), a3 = eo(seg(t, T4.start + 0.45, T4.start + 0.95));
+  if (a1 <= 0) return;
+  const rise = k => (1 - k) * 18;
+  drawLogo(W / 2 - 75, H / 2 - 262 + rise(a1), 150, a1);
+  plain('vMPT', W / 2, H / 2 + 22 + rise(a1), { size: 104, weight: 800, color: PAL.chipText, alpha: a1 });
+  spaced('VISUAL MSA PLANNING TOOL  ·  JWST / NIRSPEC', W / 2, H / 2 + 76 + rise(a2), { size: 24, alpha: a2 });
+  const cmd = 'pip install jwst-vmpt'; ctx.save(); ctx.font = `500 30px ui-monospace, "SF Mono", Menlo, Consolas, monospace`; const cw = ctx.measureText(cmd).width; ctx.restore();
+  const pw = cw + 60, ph = 64, px = W / 2 - pw / 2, py = H / 2 + 128 + rise(a3);
+  setA(a3); ctx.fillStyle = '#13203c'; rr(px, py, pw, ph, 16); ctx.fill(); ctx.strokeStyle = PAL.mint; ctx.lineWidth = 2.5; ctx.stroke();
+  ctx.save(); ctx.font = `500 30px ui-monospace, "SF Mono", Menlo, Consolas, monospace`; ctx.fillStyle = '#d6fff2'; ctx.textAlign = 'center'; setA(a3); ctx.fillText(cmd, W / 2, py + 42); ctx.restore();
+  spaced('VMPT.READTHEDOCS.IO', W / 2, py + ph + 52, { size: 22, weight: 500, color: PAL.labSm, spacing: 0.1, alpha: a3 });
+}
+
+// ───────── header + background ─────────
+function header(t, alpha) {
+  GA = alpha; if (alpha <= 0) return;
+  const w1 = spaced('vMPT', 64, 84, { size: 30, weight: 700, color: PAL.wordmark, spacing: 0.22, align: 'left' });
+  spaced('VISUAL MSA PLANNING TOOL  ·  JWST / NIRSPEC', 64 + w1 + 56, 84, { size: 30, weight: 600, color: PAL.wordmark2, spacing: 0.22, align: 'left' });
+  const beat = t < 9.75 ? 0 : t < 13.5 ? 1 : 2;
+  for (let i = 0; i < 3; i++) { setA(1); ctx.fillStyle = i === beat ? PAL.mint : PAL.dim; ctx.beginPath(); ctx.arc(1790 + i * 32, 76, 7, 0, 6.283); ctx.fill(); }
+}
+function background(t) {
+  GA = 1; ctx.globalAlpha = 1; ctx.fillStyle = PAL.bg; ctx.fillRect(0, 0, W, H);
+  for (const s of STARS) { ctx.globalAlpha = 0.25 + 0.45 * (0.5 + 0.5 * Math.sin(t * 2.1 * s.f + s.ph)); ctx.fillStyle = s.mint ? PAL.mint : '#aeb6dd'; ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, 6.283); ctx.fill(); }
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = 0.07; ctx.fillStyle = NOISE; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+}
+
+// ───────── master render ─────────
+function render(t) {
+  t = clamp(t, 0, DURATION);
+  background(t);
+  const o1 = eio(Math.min(seg(t, ...T1.in), 1 - seg(t, ...T1.out)));
+  const o2 = eio(Math.min(seg(t, ...T2.in), 1 - seg(t, ...T2.out)));
+  const oh = eio(Math.min(seg(t, 0, 0.6), 1 - seg(t, 18.3, 18.8)));
+  if (o1 > 0) scene1(t, o1);
+  if (o2 > 0) scene2(t, o2);
+  header(t, oh);
+  outro(t);
+  GA = 1; ctx.globalAlpha = 1;
+}
+
+// ───────── player / capture API ─────────
+const capture = new URLSearchParams(location.search).has('capture');
+if (capture) document.body.classList.add('capture');
+let playing = !capture, t0 = performance.now(), tAcc = 0, raf = 0;
+const scrub = document.getElementById('scrub'), playBtn = document.getElementById('play'), replayBtn = document.getElementById('replay');
+function now() { return playing ? (tAcc + (performance.now() - t0) / 1000) % DURATION : tAcc; }
+function frame() { const t = now(); render(t); scrub.value = Math.round(t * 1000); if (playing) raf = requestAnimationFrame(frame); }
+function setPlaying(p) { const t = now(); playing = p; tAcc = t; t0 = performance.now(); playBtn.textContent = p ? '❚❚' : '▶'; if (p) raf = requestAnimationFrame(frame); else { cancelAnimationFrame(raf); render(t); } }
+playBtn.onclick = () => setPlaying(!playing);
+replayBtn.onclick = () => { tAcc = 0; t0 = performance.now(); if (!playing) setPlaying(true); };
+scrub.oninput = () => { tAcc = +scrub.value / 1000; t0 = performance.now(); if (!playing) render(tAcc); };
+document.getElementById('stage').addEventListener('click', e => { if (!capture && e.target === canvas) setPlaying(!playing); });
+document.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); setPlaying(!playing); } });
+window.__anim = {
+  duration: DURATION,
+  seek(t) { if (playing) setPlaying(false); tAcc = clamp(t, 0, DURATION); scrub.value = Math.round(tAcc * 1000); render(tAcc); },
+  ready: (document.fonts && document.fonts.ready ? document.fonts.ready : Promise.resolve()).then(() => true),
+  scene: { OPT: { poses: OPT.poses.map(p => p.n), matched: OPT.matched.length }, G2 },
+};
+if (!capture) raf = requestAnimationFrame(frame); else render(0);
+</script>
+</body>
+</html>

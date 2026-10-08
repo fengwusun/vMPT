@@ -6,6 +6,16 @@ project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+
+- **A 20-second intro animation.** A scene-card explainer of what vMPT does
+  (optimizer search → hand-picking → spectra, masked shutters and a
+  conflict) for audiences new to JWST: an animated GIF at the top of the
+  README, and on Read the Docs an MP4 plus the self-contained interactive
+  HTML (`docs/_static/vmpt_intro.html`, pause / replay / scrub). The README
+  opening is rewritten to describe current functionality instead of the
+  project's version history.
+
 ## [1.8.0] — 2026-07-01
 
 ### Fixed

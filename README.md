@@ -3,71 +3,44 @@
   vMPT — visual MSA Planning Tool
 </h1>
 
-Interactive Bokeh app for planning JWST/NIRSpec MSA observations
-**directly on an image of the target field**. vMPT combines:
+Plan JWST/NIRSpec micro-shutter (MSA) observations **directly on an image
+of your field**: point the mask, let the optimizer find the best pointing,
+pick shutters by hand, see spectral overlaps as they happen, and export a
+bundle that loads straight into APT.
 
-- **Automated MSA pointing optimization** — vMPT's
-  `optimizer.py` is a lightweight Python module that searches
-  (RA, Dec, V3 PA) for the best MSA pointing and roll angle. It's
-  inspired by [hMPT](https://github.com/zihaowu-astro/hMPT)
-  (Zihao Wu et al., CfA|Harvard), which is itself inspired by
-  ESA's eMPT (Bonaventura et al. 2023). The MSA shutter geometry, V2/V3 ↔ (s, d) coordinate
-  mapping, and gnomonic projection are independently implemented;
-  the search algorithm (grid → differential-evolution refine) is
-  a simpler version than hMPT's. Three modes: Democracy (count),
-  Meritocracy (Σ weight), Hierarchy (strict priority tiers). As of
-  `v1.5.0` the per-pointing shutter mapping uses a polynomial inverse
-  of the MSA map — ~20–40× faster than the previous interpolation, with
-  identical shutter assignments — so multi-config plans run in seconds.
-- **Shutter-collision protection** — mark high-priority targets
-  whose spectra must not overlap any other source on the detector
-  under the current Disperser / Filter. Slitlet-aware row buffer
-  (`v1.2.1+`) reserves one row above and below each protected
-  slitlet, including against stuck-open shutters.
-- **Hand-picking + live MPT-faithful conflict feedback** — click any
-  shutter to open an N-shutter slitlet, watch the three-colour
-  spec-overlap layer light up in real time: **pink** (Mask Stuck)
-  where stuck-open spectra land on operable rows, **orange** (Masked)
-  where user-pick spectra land, **purple** (Mask Conflict) when two
-  open slitlets touch (boundary rows adjacent, no operable row
-  between) — bounded to the `±2`-row window where the two slitlets
-  crowd (not the whole band). Alpha stacks with the number of dispersing
-  sources hitting each shutter. Undo / redo at will. **Hover a shutter
-  and tap Space** (`v1.6.0`) to open/close just that one cell regardless
-  of the slitlet size; pan the canvas with **W A S D / arrow keys**
-  (`v1.6.0`) without reaching for the mouse.
-- **Multiple MPT configurations** (`v1.4.0`; up to **five** in
-  `v1.5.0`) — plan up to five APT-style MPT configs (each its own
-  pointing + shutters). The optimizer **auto-produces them all in one
-  run** (sequential-greedy) with a per-source *max-configs* cap so later
-  configs find new targets; a one-click top-bar chip switches the config
-  you're editing (idle configs draw as faint dashed outlines in their
-  own colour, one of five). A
-  **MPT catalog viewer** lists every selected source with its
-  wavelength coverage + detector-gap, and shutters can hold more than
-  one source. Loading a shutter-mask CSV (`v1.6.0`) auto-matches its
-  open shutters to the catalog, so the viewer populates straight from a
-  mask — no optimizer run needed.
-- **APT / eMPT-ready export** — write a bundle (target-prefixed
-  `<catalog>_MPT_plan.json` + `<catalog>_APT_catalog.cat`, with a
-  generated `README.md` of the import steps) that loads straight into
-  APT, plus the files that feed the
-  [eMPT pipeline](https://github.com/esdc-esac-esa-int/eMPT_v1).
-- **Image display + DS9 overlays** (`v1.8.0`) — a **🎨 Image display**
-  dialog re-stretches the background live (Linear / Sqrt / Asinh / Log;
-  Percentile / Min–Max / Manual vmin–vmax / ZScale; a matplotlib
-  **colormap** for grayscale FITS; optional **NaN → white**) with a
-  pixel-value **histogram** (log-count axis, draggable vmin / vmax
-  handles + stretch curve). **GB-scale FITS open instantly** at a
-  downsampled preview and **auto-sharpen to native pixels as you zoom**
-  (on-demand memmap level-of-detail). Draw DS9 **region** (`.reg`) and
-  **contour** (`.ctr` / `.con`) files as sky-fixed overlays (**🧩 Load
-  Add-on…** or `--addon`, repeatable) — each loaded file gets a sidebar
-  row with an on/off toggle and a **colour + fill-opacity popover**;
-  dense contours use a zoom-aware level-of-detail so pan / zoom stays
-  smooth.
-- **Sharing** — save the whole session as a JSON file, send it to a
-  collaborator, and they pick up exactly where you left off.
+![vMPT in 20 seconds: the micro-shutter mask lands on a field and the optimizer finds the pointing that catches the most targets; shutters are picked by hand on a zoomed grid; spectra spread sideways, masked shutters turn orange and a conflict pulses violet](docs/_static/vmpt_intro.gif)
+
+*Twenty seconds of vMPT: the mask lands on a field and the optimizer finds
+the pointing that catches the most targets; shutters are picked by hand on
+a zoomed grid; spectra spread sideways, masked shutters turn orange and a
+true conflict pulses violet. Higher quality:
+[MP4](https://vmpt.readthedocs.io/en/latest/_static/vmpt_intro.mp4) ·
+[interactive version](https://vmpt.readthedocs.io/en/latest/_static/vmpt_intro.html)
+(pause, replay, scrub).*
+
+**What it does**
+
+- **Finds the best pointing** — searches RA, Dec and roll angle for the
+  position that puts the most targets into operable shutters, scored by
+  count, by weight, or by strict priority tiers. Multi-configuration plans
+  (up to five pointings) come out of a single run. The search is inspired
+  by [hMPT](https://github.com/zihaowu-astro/hMPT) (Z. Wu et al.,
+  CfA / Harvard) and ESA's eMPT (Bonaventura et al. 2023).
+- **Hand-picking with live conflict feedback** — click a shutter to open
+  an N-shutter slitlet and see where every open and stuck-open shutter's
+  spectrum lands: **orange** = masked by a spectrum, **pink** = masked by
+  a stuck-open shutter, **purple** = two slitlets in conflict. Undo at
+  will; Space toggles a single shutter; W A S D pans.
+- **Collision protection** — protect high-priority targets so that no
+  other spectrum, including from stuck-open shutters, can overlap theirs.
+- **Works on your image** — FITS with a WCS, or JPG/PNG with a WCS
+  sidecar. GB-scale mosaics open instantly and sharpen as you zoom; live
+  stretch, colormap and histogram controls; DS9 regions and contours as
+  overlays, each with its own colour.
+- **Round-trips with APT and eMPT** — export an APT-importable catalog and
+  MPT plan (with a README of the import steps) plus the eMPT pipeline
+  inputs; import APT plans, shutter masks or `.aptx` archives; save and
+  share whole sessions as JSON.
 
 [![docs](https://readthedocs.org/projects/vmpt/badge/?version=latest)](https://vmpt.readthedocs.io/)
 ![status](https://img.shields.io/badge/tests-355%20passed-brightgreen)
